@@ -1,0 +1,101 @@
+package com.dubcast.bff
+
+import com.dubcast.bff.config.StorageConfig
+import com.dubcast.bff.service.FileStorageService
+import java.io.ByteArrayInputStream
+import java.io.File
+import kotlin.test.*
+
+class FileStorageServiceTest {
+
+    private val testDir = File("C:/tmp/test-storage-unit")
+    private val config = StorageConfig(basePath = testDir.path)
+    private lateinit var service: FileStorageService
+
+    @BeforeTest
+    fun setup() {
+        testDir.deleteRecursively()
+        service = FileStorageService(config)
+        service.init()
+    }
+
+    @AfterTest
+    fun cleanup() {
+        testDir.deleteRecursively()
+    }
+
+    @Test
+    fun `init creates required directories`() {
+        assertTrue(File(testDir, "uploads").exists())
+        assertTrue(File(testDir, "tts").exists())
+        assertTrue(File(testDir, "lipsync").exists())
+    }
+
+    @Test
+    fun `saveUpload stores file and returns blob path`() {
+        val content = "test video content".toByteArray()
+        val blobPath = service.saveUpload("test.mp4", ByteArrayInputStream(content))
+
+        assertTrue(blobPath.startsWith("uploads/"))
+        assertTrue(blobPath.endsWith("_test.mp4"))
+
+        val saved = service.getUploadFile(blobPath)
+        assertEquals("test video content", saved.readText())
+    }
+
+    @Test
+    fun `saveUpload sanitizes file name`() {
+        val content = "data".toByteArray()
+        val blobPath = service.saveUpload("my file (1).mp4", ByteArrayInputStream(content))
+
+        assertTrue(blobPath.contains("my_file__1_.mp4"))
+    }
+
+    @Test
+    fun `saveUpload rejects file exceeding max size`() {
+        val content = ByteArray(1024) { 0x41 }
+        val exception = assertFailsWith<IllegalArgumentException> {
+            service.saveUpload("big.mp4", ByteArrayInputStream(content), maxSize = 512)
+        }
+        assertTrue(exception.message!!.contains("exceeds maximum size"))
+    }
+
+    @Test
+    fun `getUploadFile rejects path traversal`() {
+        val exception = assertFailsWith<IllegalArgumentException> {
+            service.getUploadFile("../../etc/passwd")
+        }
+        assertTrue(exception.message!!.contains("Invalid file path"))
+    }
+
+    @Test
+    fun `getUploadFile rejects nonexistent file`() {
+        assertFailsWith<IllegalArgumentException> {
+            service.getUploadFile("uploads/nonexistent.mp4")
+        }
+    }
+
+    @Test
+    fun `saveTtsAudio stores audio and returns blob path`() {
+        val audioBytes = "fake audio data".toByteArray()
+        val blobPath = service.saveTtsAudio(audioBytes, "req-123")
+
+        assertEquals("tts/req-123.mp3", blobPath)
+        assertTrue(File(testDir, "tts/req-123.mp3").exists())
+        assertEquals("fake audio data", File(testDir, "tts/req-123.mp3").readText())
+    }
+
+    @Test
+    fun `getLipSyncResultFile returns correct path`() {
+        val (file, path) = service.getLipSyncResultFile("ls-456")
+
+        assertEquals("lipsync/ls-456.mp4", path)
+        assertTrue(file.path.endsWith("ls-456.mp4"))
+    }
+
+    @Test
+    fun `resolveDownloadUrl builds correct URL`() {
+        val url = service.resolveDownloadUrl("http://localhost:8080", "tts/req-123.mp3")
+        assertEquals("http://localhost:8080/files/tts/req-123.mp3", url)
+    }
+}
