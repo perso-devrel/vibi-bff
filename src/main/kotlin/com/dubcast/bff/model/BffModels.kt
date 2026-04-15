@@ -19,6 +19,7 @@ data class Voice(
     val voiceId: String,
     val name: String,
     val previewUrl: String? = null,
+    val language: String? = null,
     val category: String? = null,
     val labels: Map<String, String> = emptyMap(),
 )
@@ -42,6 +43,7 @@ data class TtsRequest(
 @Serializable
 data class TtsResponse(
     val audioUrl: String,
+    val durationMs: Long? = null,
 )
 
 // --- Lip-Sync ---

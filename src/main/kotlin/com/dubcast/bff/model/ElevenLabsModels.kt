@@ -16,6 +16,24 @@ data class ElevenLabsVoice(
 @Serializable
 data class ElevenLabsVoicesResponse(
     val voices: List<ElevenLabsVoice>,
+    @SerialName("has_more") val hasMore: Boolean = false,
+    @SerialName("total_count") val totalCount: Int = 0,
+    @SerialName("next_page_token") val nextPageToken: String? = null,
+)
+
+// --- TTS Request ---
+@Serializable
+data class ElevenLabsTtsRequest(
+    val text: String,
+    @SerialName("model_id") val modelId: String,
+    @SerialName("voice_settings") val voiceSettings: ElevenLabsVoiceSettings,
+    @SerialName("language_code") val languageCode: String? = null,
+)
+
+@Serializable
+data class ElevenLabsVoiceSettings(
+    val stability: Float,
+    @SerialName("similarity_boost") val similarityBoost: Float,
 )
 
 // --- Lip-Sync ---
@@ -29,5 +47,6 @@ data class ElevenLabsLipSyncResponse(
 data class ElevenLabsLipSyncStatus(
     @SerialName("dubbing_id") val id: String,
     val status: String,
+    @SerialName("target_languages") val targetLanguages: List<String> = emptyList(),
     val error: String? = null,
 )

@@ -16,6 +16,7 @@ fun Route.voiceRoutes(elevenLabsClient: ElevenLabsClient) {
                 voiceId = v.voiceId,
                 name = v.name,
                 previewUrl = v.previewUrl,
+                language = v.labels["language"] ?: v.labels["accent"],
                 category = v.category,
                 labels = v.labels,
             )

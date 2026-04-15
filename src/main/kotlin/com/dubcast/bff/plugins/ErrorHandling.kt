@@ -24,7 +24,13 @@ fun Application.configureErrorHandling() {
                 in 400..499 -> HttpStatusCode.BadRequest
                 else -> HttpStatusCode.BadGateway
             }
-            call.respond(status, ErrorResponse(error = "Upstream API error", detail = cause.body))
+            val message = when (cause.statusCode) {
+                401 -> "Authentication failed with upstream service"
+                429 -> "Rate limit exceeded, please try again later"
+                in 400..499 -> "Invalid request to upstream service"
+                else -> "Upstream service unavailable"
+            }
+            call.respond(status, ErrorResponse(error = message))
         }
         exception<IllegalArgumentException> { call, cause ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse(error = cause.message ?: "Bad request"))

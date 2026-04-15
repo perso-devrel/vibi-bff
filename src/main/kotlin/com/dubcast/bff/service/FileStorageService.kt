@@ -34,6 +34,7 @@ class FileStorageService(private val config: StorageConfig) {
                 while (input.read(buffer).also { bytesRead = it } != -1) {
                     totalBytes += bytesRead
                     if (totalBytes > maxSize) {
+                        output.close()
                         target.delete()
                         throw IllegalArgumentException("File exceeds maximum size of ${maxSize / 1024 / 1024}MB")
                     }
@@ -66,6 +67,9 @@ class FileStorageService(private val config: StorageConfig) {
 
     fun getLipSyncResultFile(lipSyncId: String): Pair<File, String> {
         val target = File(lipsyncDir, "$lipSyncId.mp4")
+        require(target.canonicalPath.startsWith(lipsyncDir.canonicalPath)) {
+            "Invalid lip-sync ID: $lipSyncId"
+        }
         return target to "lipsync/$lipSyncId.mp4"
     }
 

@@ -2,7 +2,9 @@ package com.dubcast.bff.plugins
 
 import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.routes.lipSyncRoutes
+import com.dubcast.bff.routes.lipSyncV2Routes
 import com.dubcast.bff.routes.ttsRoutes
+import com.dubcast.bff.routes.ttsV2Routes
 import com.dubcast.bff.routes.uploadRoutes
 import com.dubcast.bff.routes.voiceRoutes
 import com.dubcast.bff.service.ElevenLabsClient
@@ -29,6 +31,12 @@ fun Application.configureRouting(
             voiceRoutes(elevenLabsClient)
             ttsRoutes(elevenLabsClient, fileStorage, appConfig)
             lipSyncRoutes(elevenLabsClient, fileStorage, appConfig)
+        }
+
+        route("/api/v2") {
+            voiceRoutes(elevenLabsClient)
+            ttsV2Routes(elevenLabsClient, fileStorage, appConfig)
+            lipSyncV2Routes(elevenLabsClient, fileStorage, appConfig)
         }
     }
 }
