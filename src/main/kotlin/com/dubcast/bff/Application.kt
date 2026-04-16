@@ -4,6 +4,7 @@ import com.dubcast.bff.config.loadConfig
 import com.dubcast.bff.plugins.*
 import com.dubcast.bff.service.ElevenLabsClient
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.RenderService
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.contentnegotiation.*
@@ -54,6 +55,7 @@ fun Application.module() {
 
     val fileStorage = FileStorageService(appConfig.storage).also { it.init() }
     val elevenLabsClient = ElevenLabsClient(appConfig.elevenLabs, httpClient)
+    val renderService = RenderService(fileStorage.renderDir).also { it.init() }
 
     install(CallLogging) {
         level = Level.INFO
@@ -62,7 +64,7 @@ fun Application.module() {
     configureSerialization()
     configureCors()
     configureErrorHandling()
-    configureRouting(fileStorage, elevenLabsClient, appConfig)
+    configureRouting(fileStorage, elevenLabsClient, appConfig, renderService)
 
     monitor.subscribe(ApplicationStopped) {
         httpClient.close()

@@ -13,11 +13,13 @@ class FileStorageService(private val config: StorageConfig) {
     private val uploadsDir get() = File(baseDir, "uploads")
     private val ttsDir get() = File(baseDir, "tts")
     private val lipsyncDir get() = File(baseDir, "lipsync")
+    val renderDir get() = File(baseDir, "render")
 
     fun init() {
         uploadsDir.mkdirs()
         ttsDir.mkdirs()
         lipsyncDir.mkdirs()
+        renderDir.mkdirs()
         log.info("Storage initialized at {}", baseDir.absolutePath)
     }
 

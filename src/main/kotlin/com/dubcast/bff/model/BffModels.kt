@@ -46,6 +46,34 @@ data class TtsResponse(
     val durationMs: Long? = null,
 )
 
+// --- Render ---
+@Serializable
+data class DubClip(
+    val audioFileKey: String,
+    val startMs: Long,
+    val durationMs: Long,
+    val volume: Float = 1.0f,
+)
+
+@Serializable
+data class RenderConfig(
+    val dubClips: List<DubClip>,
+    val videoDurationMs: Long,
+)
+
+@Serializable
+data class RenderResponse(
+    val jobId: String,
+)
+
+@Serializable
+data class RenderStatusResponse(
+    val jobId: String,
+    val status: String,
+    val progress: Int? = null,
+    val error: String? = null,
+)
+
 // --- Lip-Sync ---
 @Serializable
 data class LipSyncRequest(
