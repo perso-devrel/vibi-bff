@@ -92,11 +92,12 @@ class ElevenLabsClient(
     suspend fun textToSpeech(
         voiceId: String,
         text: String,
+        targetFile: File,
         modelId: String = "eleven_multilingual_v2",
         stability: Float = 0.5f,
         similarityBoost: Float = 0.75f,
         languageCode: String? = null,
-    ): ByteArray {
+    ) {
         require(voiceIdPattern.matches(voiceId)) { "Invalid voiceId: $voiceId" }
         log.info("TTS request: voiceId={}, text length={}", voiceId, text.length)
         val requestBody = ElevenLabsTtsRequest(
@@ -108,13 +109,31 @@ class ElevenLabsClient(
             ),
             languageCode = languageCode,
         )
-        val response = httpClient.post(url("/v1/text-to-speech/$voiceId")) {
-            header("xi-api-key", config.apiKey)
-            contentType(ContentType.Application.Json)
-            setBody(requestBody)
+        val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
+        try {
+            httpClient.preparePost(url("/v1/text-to-speech/$voiceId")) {
+                header("xi-api-key", config.apiKey)
+                contentType(ContentType.Application.Json)
+                setBody(requestBody)
+            }.execute { response ->
+                checkResponse(response)
+                val channel = response.bodyAsChannel()
+                tempFile.outputStream().use { output ->
+                    val buffer = ByteArray(8192)
+                    while (!channel.isClosedForRead) {
+                        val bytesRead = channel.readAvailable(buffer)
+                        if (bytesRead > 0) output.write(buffer, 0, bytesRead)
+                    }
+                }
+            }
+            if (!tempFile.renameTo(targetFile)) {
+                throw RuntimeException("Failed to rename TTS temp file to ${targetFile.absolutePath}")
+            }
+            log.info("TTS audio saved to {} ({} bytes)", targetFile.path, targetFile.length())
+        } catch (e: Throwable) {
+            tempFile.delete()
+            throw e
         }
-        checkResponse(response)
-        return response.body()
     }
 
     // --- Lip-Sync ---

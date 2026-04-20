@@ -63,12 +63,17 @@ class TtsRoutesTest {
             elevenLabsClient.textToSpeech(
                 voiceId = "voice-1",
                 text = "hello",
+                targetFile = any(),
                 modelId = "eleven_multilingual_v2",
                 stability = 0.5f,
                 similarityBoost = 0.75f,
                 languageCode = null,
             )
-        } returns fakeAudio
+        } coAnswers {
+            val file = arg<File>(2)
+            file.parentFile.mkdirs()
+            file.writeBytes(fakeAudio)
+        }
 
         val response = client.post("/api/v1/tts") {
             contentType(ContentType.Application.Json)
@@ -89,12 +94,17 @@ class TtsRoutesTest {
             elevenLabsClient.textToSpeech(
                 voiceId = "voice-2",
                 text = "hi",
+                targetFile = any(),
                 modelId = "eleven_turbo_v2_5",
                 stability = 0.8f,
                 similarityBoost = 0.9f,
                 languageCode = "ko",
             )
-        } returns fakeAudio
+        } coAnswers {
+            val file = arg<File>(2)
+            file.parentFile.mkdirs()
+            file.writeBytes(fakeAudio)
+        }
 
         val response = client.post("/api/v1/tts") {
             contentType(ContentType.Application.Json)

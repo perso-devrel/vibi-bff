@@ -76,13 +76,11 @@ class FileStorageServiceTest {
     }
 
     @Test
-    fun `saveTtsAudio stores audio and returns blob path`() {
-        val audioBytes = "fake audio data".toByteArray()
-        val blobPath = service.saveTtsAudio(audioBytes, "req-123")
+    fun `reserveTtsPath returns target file and blob path`() {
+        val (file, blobPath) = service.reserveTtsPath("req-123")
 
         assertEquals("tts/req-123.mp3", blobPath)
-        assertTrue(File(testDir, "tts/req-123.mp3").exists())
-        assertEquals("fake audio data", File(testDir, "tts/req-123.mp3").readText())
+        assertEquals(File(testDir, "tts/req-123.mp3").canonicalPath, file.canonicalPath)
     }
 
     @Test

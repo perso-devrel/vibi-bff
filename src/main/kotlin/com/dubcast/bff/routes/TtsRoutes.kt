@@ -19,19 +19,20 @@ fun Route.ttsRoutes(
     post("/tts") {
         val request = call.receive<TtsRequest>()
 
-        val audioBytes = elevenLabsClient.textToSpeech(
+        val requestId = UUID.randomUUID().toString()
+        val (targetFile, blobPath) = fileStorage.reserveTtsPath(requestId)
+
+        elevenLabsClient.textToSpeech(
             voiceId = request.voiceId,
             text = request.text,
+            targetFile = targetFile,
             modelId = request.modelId,
             stability = request.stability,
             similarityBoost = request.similarityBoost,
             languageCode = request.languageCode,
         )
 
-        val requestId = UUID.randomUUID().toString()
-        val blobPath = fileStorage.saveTtsAudio(audioBytes, requestId)
         val audioUrl = fileStorage.resolveDownloadUrl(appConfig.baseUrl, blobPath)
-
         call.respond(HttpStatusCode.OK, TtsResponse(audioUrl = audioUrl))
     }
 }

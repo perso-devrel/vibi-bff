@@ -59,12 +59,10 @@ class FileStorageService(private val config: StorageConfig) {
         return file
     }
 
-    fun saveTtsAudio(bytes: ByteArray, requestId: String): String {
+    fun reserveTtsPath(requestId: String): Pair<File, String> {
         val target = File(ttsDir, "$requestId.mp3")
-        target.writeBytes(bytes)
         val blobPath = "tts/$requestId.mp3"
-        log.info("Saved TTS audio: {} ({} bytes)", blobPath, bytes.size)
-        return blobPath
+        return target to blobPath
     }
 
     fun getLipSyncResultFile(lipSyncId: String): Pair<File, String> {
