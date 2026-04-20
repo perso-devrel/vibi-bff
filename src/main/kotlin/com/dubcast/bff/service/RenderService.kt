@@ -39,6 +39,11 @@ class RenderService(
         log.info("Render directory initialized at {}", renderDir.absolutePath)
     }
 
+    fun shutdown() {
+        cleanup.shutdown()
+        if (!cleanup.awaitTermination(2, TimeUnit.SECONDS)) cleanup.shutdownNow()
+    }
+
     fun getJob(jobId: String): RenderJob? = jobs[jobId]
 
     fun submitRender(

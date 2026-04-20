@@ -68,5 +68,6 @@ fun Application.module() {
 
     monitor.subscribe(ApplicationStopped) {
         httpClient.close()
+        renderService.shutdown()
     }
 }
