@@ -23,6 +23,8 @@ trigger: elevenlabs
 
 `dubbing` → `dubbed` (성공, terminal) / `failed` (terminal). BFF의 `/lipsync/{jobId}/status` 폴링이 이 값을 그대로 노출.
 
+`getLipSyncStatus(id)`는 jobId별 in-memory 캐시 적용 — non-terminal은 짧은 TTL(기본 2초)로 폴링 동안 업스트림 QPS를 줄이고, terminal(`dubbed`/`failed`)은 긴 TTL(기본 1시간)로 결과가 변하지 않으니 거의 영구 캐시. 단일 mutex 없이 동작 — 2초 TTL 안에 발생하는 중복 fetch는 무해(GET idempotent). TTL은 생성자 파라미터(`lipSyncStatusTtlMs`, `lipSyncStatusTerminalTtlMs`)로 조정 가능.
+
 ## 에러 매핑
 
 `plugins/ErrorHandling.kt`의 `ElevenLabsApiException`이 업스트림 상태 코드를 BFF 응답에 그대로 전달. 바디는 `ErrorResponse(error, detail?)`.

@@ -23,6 +23,8 @@ class ElevenLabsClient(
     private val config: ElevenLabsConfig,
     private val httpClient: HttpClient,
     private val voicesCacheTtlMs: Long = 600_000,
+    private val lipSyncStatusTtlMs: Long = 2_000,
+    private val lipSyncStatusTerminalTtlMs: Long = 3_600_000,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -153,12 +155,25 @@ class ElevenLabsClient(
         return response.body()
     }
 
+    private data class CachedLipSyncStatus(val status: ElevenLabsLipSyncStatus, val cachedAt: Long)
+
+    private val lipSyncStatusCache = ConcurrentHashMap<String, CachedLipSyncStatus>()
+
+    private fun isLipSyncTerminal(status: String) = status == "dubbed" || status == "failed"
+
     suspend fun getLipSyncStatus(id: String): ElevenLabsLipSyncStatus {
+        val now = System.currentTimeMillis()
+        lipSyncStatusCache[id]?.let { cached ->
+            val ttl = if (isLipSyncTerminal(cached.status.status)) lipSyncStatusTerminalTtlMs else lipSyncStatusTtlMs
+            if (now - cached.cachedAt < ttl) return cached.status
+        }
         val response = httpClient.get(url("/v1/dubbing/$id")) {
             header("xi-api-key", config.apiKey)
         }
         checkResponse(response)
-        return response.body()
+        val fresh: ElevenLabsLipSyncStatus = response.body()
+        lipSyncStatusCache[id] = CachedLipSyncStatus(fresh, System.currentTimeMillis())
+        return fresh
     }
 
     private val downloadInFlight = ConcurrentHashMap<String, Boolean>()
