@@ -210,7 +210,10 @@ class RenderService(
             updateProgress()
 
             // Step 4 & 5: stickers + dub audio + subtitles
-            val totalDurationMs = sorted.sumOf { it.durationMs }
+            // Use output-length semantics so speed-scaled VIDEO segments
+            // contribute their stretched/compressed length, matching what
+            // the final -t expects after concat.
+            val totalDurationMs = sorted.sumOf { segmentOutputDurationMs(it) }
             val command = buildFfmpegCommand(
                 concatFile, audioFiles, imageFiles, subtitlesFile,
                 dubClips, imageClips, totalDurationMs, job.outputFile, outW, outH,
@@ -294,9 +297,13 @@ class RenderService(
         val outFile = File(tempDir, "seg_vid_$idx.mp4")
         val trimStart = (seg.trimStartMs ?: 0L) / 1000.0
         val trimEnd = (seg.trimEndMs ?: seg.durationMs) / 1000.0
-        val durationSec = trimEnd - trimStart
+        val sourceDurationSec = trimEnd - trimStart
         val speed = seg.speedScale
         val volume = seg.volumeScale
+        // -t is an output-side option: it caps the duration AFTER setpts
+        // rescales PTS. Without this divide, speed < 1 (slow-mo) would be
+        // truncated to the source window length instead of the stretched one.
+        val outputDurationSec = sourceDurationSec / speed
 
         val vfBase = "scale=${outW}:${outH}:force_original_aspect_ratio=decrease," +
                      "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=${bgColor}," +
@@ -308,15 +315,16 @@ class RenderService(
         if (volume != 1.0f) afParts.add("volume=${volume}")
         val af = afParts.joinToString(",")
 
-        // -ss before -i = fast input-side seek; -t limits output duration.
-        // anullsrc ensures an audio stream even if the source has none,
-        // keeping all segments stream-compatible for concat demuxer.
+        // -ss before -i = fast input-side seek; -t after inputs limits output
+        // duration (post-setpts). anullsrc ensures an audio stream even if
+        // the source has none, keeping all segments stream-compatible for
+        // concat demuxer.
         val cmd = mutableListOf(
             "ffmpeg", "-y",
             "-ss", trimStart.toString(),
             "-i", vidFile.absolutePath,
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-            "-t", durationSec.toString(),
+            "-t", outputDurationSec.toString(),
             "-vf", vf,
         )
         if (af.isNotEmpty()) {
@@ -333,20 +341,22 @@ class RenderService(
         return outFile
     }
 
-    // ffmpeg color syntax accepts "#RRGGBB" or "0xRRGGBB"; older builds
-    // reject the leading "#" inside filter args, so normalise to 0x.
-    private fun ffmpegColor(hex: String): String {
+    // ffmpeg color syntax accepts "#RRGGBB" or "0xRRGGBB". Validate against
+    // a strict hex pattern so the string can't smuggle commas or quotes into
+    // a filter_complex expression (filter injection); fall back to opaque
+    // black when the input is malformed.
+    internal fun ffmpegColor(hex: String): String {
         val trimmed = hex.trim()
-        return when {
-            trimmed.startsWith("#") -> "0x" + trimmed.removePrefix("#")
-            trimmed.startsWith("0x") || trimmed.startsWith("0X") -> trimmed
-            else -> trimmed
-        }
+        val match = HEX_COLOR_REGEX.matchEntire(trimmed) ?: return "0x000000"
+        return "0x" + match.groupValues[1]
     }
 
     // atempo is clamped to 0.5..2.0 per ffmpeg docs; chain filters to hit
-    // speeds outside that range (e.g. 4x = atempo=2,atempo=2).
-    private fun atempoChain(speed: Float): String {
+    // speeds outside that range (e.g. 4x = atempo=2,atempo=2). Callers
+    // should validate speed > 0 upstream (Segment.init enforces this), but
+    // double-check here so a bad value never loops forever.
+    internal fun atempoChain(speed: Float): String {
+        require(speed > 0f) { "atempo speed must be > 0 (got $speed)" }
         if (speed in 0.5f..2.0f) return "atempo=${speed}"
         val parts = mutableListOf<Float>()
         var remaining = speed
@@ -354,6 +364,22 @@ class RenderService(
         while (remaining < 0.5f) { parts.add(0.5f); remaining *= 2.0f }
         parts.add(remaining)
         return parts.joinToString(",") { "atempo=${it}" }
+    }
+
+    private fun audioClipFilter(inputIdx: Int, startMs: Long, volume: Float, label: String) =
+        "[$inputIdx:a]adelay=${startMs}|${startMs},volume=${volume}[$label]"
+
+    private fun segmentOutputDurationMs(seg: Segment): Long = when (seg.type) {
+        "VIDEO" -> {
+            val trimStart = seg.trimStartMs ?: 0L
+            val trimEnd = seg.trimEndMs ?: seg.durationMs
+            ((trimEnd - trimStart) / seg.speedScale).toLong().coerceAtLeast(0L)
+        }
+        else -> seg.durationMs
+    }
+
+    companion object {
+        private val HEX_COLOR_REGEX = Regex("^#?([0-9a-fA-F]{6})$")
     }
 
     private fun concatSegments(segments: List<File>, output: File) {
@@ -446,13 +472,11 @@ class RenderService(
         } else {
             val mixInputs = mutableListOf<String>("[0:a]")
             for ((i, clip) in dubClips.withIndex()) {
-                val idx = clipInputIndices[i]
-                filters.add("[$idx:a]adelay=${clip.startMs}|${clip.startMs},volume=${clip.volume}[dub$i]")
+                filters.add(audioClipFilter(clipInputIndices[i], clip.startMs, clip.volume, "dub$i"))
                 mixInputs.add("[dub$i]")
             }
             for ((i, clip) in bgmClips.withIndex()) {
-                val idx = bgmInputIndices[i]
-                filters.add("[$idx:a]adelay=${clip.startMs}|${clip.startMs},volume=${clip.volume}[bgm$i]")
+                filters.add(audioClipFilter(bgmInputIndices[i], clip.startMs, clip.volume, "bgm$i"))
                 mixInputs.add("[bgm$i]")
             }
             filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0[aout]")

@@ -89,14 +89,24 @@ data class Segment(
     val imageHeightPct: Float? = null,
     val volumeScale: Float = 1.0f,
     val speedScale: Float = 1.0f,
-)
+) {
+    init {
+        require(speedScale > 0f) { "Segment.speedScale must be > 0 (got $speedScale)" }
+        require(volumeScale >= 0f) { "Segment.volumeScale must be >= 0 (got $volumeScale)" }
+    }
+}
 
 @Serializable
 data class FrameConfig(
     val width: Int,
     val height: Int,
     val backgroundColorHex: String = "#000000",
-)
+) {
+    init {
+        require(width > 0) { "FrameConfig.width must be > 0 (got $width)" }
+        require(height > 0) { "FrameConfig.height must be > 0 (got $height)" }
+    }
+}
 
 @Serializable
 data class RenderConfig(
