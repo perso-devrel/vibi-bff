@@ -32,6 +32,8 @@ trigger: 렌더
 - **VIDEO**: `-ss`를 `-i` **앞에** 두는 입력측 seek + `-t duration`. 출력 해상도로 scale+letterbox, `anullsrc`로 무음 AAC 트랙 추가 (원본에 오디오가 없어도 concat 호환).
 - **IMAGE**: `-loop 1` + letterbox (`scale=…:force_original_aspect_ratio=decrease, pad=W:H:(ow-iw)/2:(oh-ih)/2`) + 무음 AAC(128k).
 
+세그먼트 정규화는 `Semaphore(MAX_PARALLEL_SEGMENTS)` (기본 2)로 동시 ffmpeg 프로세스를 제한한 bounded-parallel. `runBlocking + coroutineScope { async { ... withPermit {} }.awaitAll() }`. `stepsDone`은 병렬 증가를 위해 `AtomicInteger`. 한 세그먼트가 실패하면 `coroutineScope`가 나머지 async를 취소하고, `finally`의 `tempDir.deleteRecursively()`가 부분 파일을 정리.
+
 ## 출력 해상도
 
 - Multi-segment: `segments[0].width` / `segments[0].height`. null이면 `1920×1080` 폴백.

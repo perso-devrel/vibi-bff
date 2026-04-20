@@ -5,13 +5,20 @@ import com.dubcast.bff.model.ImageClip
 import com.dubcast.bff.model.Segment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicInteger
 
 data class RenderJob(
     val jobId: String,
@@ -21,6 +28,8 @@ data class RenderJob(
     val outputFile: File,
     val createdAt: Long = System.currentTimeMillis(),
 )
+
+private const val MAX_PARALLEL_SEGMENTS = 2
 
 class RenderService(
     private val renderDir: File,
@@ -146,36 +155,47 @@ class RenderService(
             val outH = firstSeg.height ?: 1080
 
             val totalSteps = sorted.size + 2 // per-segment + concat + final
-            var stepsDone = 0
+            val stepsDone = AtomicInteger(0)
 
             fun updateProgress() {
-                job.progress = ((stepsDone.toDouble() / totalSteps) * 95).toInt().coerceIn(0, 95)
+                job.progress = ((stepsDone.get().toDouble() / totalSteps) * 95).toInt().coerceIn(0, 95)
             }
 
-            // Step 1 & 2: process each segment
-            val processedFiles = sorted.mapIndexed { idx, seg ->
-                val file = when (seg.type) {
-                    "IMAGE" -> {
-                        val imgFile = segmentImageFiles[seg.sourceFileKey]
-                            ?: throw IllegalArgumentException("Segment image not found: ${seg.sourceFileKey}")
-                        convertImageSegment(imgFile, seg, outW, outH, tempDir, idx)
-                    }
-                    "VIDEO" -> {
-                        val vidFile = videoFiles[seg.sourceFileKey]
-                            ?: throw IllegalArgumentException("Video file not found: ${seg.sourceFileKey}")
-                        trimVideoSegment(vidFile, seg, outW, outH, tempDir, idx)
-                    }
-                    else -> throw IllegalArgumentException("Unknown segment type: ${seg.type}")
+            // Step 1 & 2: process each segment — bounded parallel (Semaphore(2))
+            // caps concurrent ffmpeg processes so libx264 doesn't thrash on
+            // low-core hosts while still parallelising cheap IMAGE segments.
+            val segmentSemaphore = Semaphore(MAX_PARALLEL_SEGMENTS)
+            val processedFiles = runBlocking {
+                coroutineScope {
+                    sorted.mapIndexed { idx, seg ->
+                        async(Dispatchers.IO) {
+                            segmentSemaphore.withPermit {
+                                val file = when (seg.type) {
+                                    "IMAGE" -> {
+                                        val imgFile = segmentImageFiles[seg.sourceFileKey]
+                                            ?: throw IllegalArgumentException("Segment image not found: ${seg.sourceFileKey}")
+                                        convertImageSegment(imgFile, seg, outW, outH, tempDir, idx)
+                                    }
+                                    "VIDEO" -> {
+                                        val vidFile = videoFiles[seg.sourceFileKey]
+                                            ?: throw IllegalArgumentException("Video file not found: ${seg.sourceFileKey}")
+                                        trimVideoSegment(vidFile, seg, outW, outH, tempDir, idx)
+                                    }
+                                    else -> throw IllegalArgumentException("Unknown segment type: ${seg.type}")
+                                }
+                                stepsDone.incrementAndGet()
+                                updateProgress()
+                                file
+                            }
+                        }
+                    }.awaitAll()
                 }
-                stepsDone++
-                updateProgress()
-                file
             }
 
             // Step 3: concat
             val concatFile = File(tempDir, "concat.mp4")
             concatSegments(processedFiles, concatFile)
-            stepsDone++
+            stepsDone.incrementAndGet()
             updateProgress()
 
             // Step 4 & 5: stickers + dub audio + subtitles
