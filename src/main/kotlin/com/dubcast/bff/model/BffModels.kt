@@ -80,6 +80,8 @@ data class Segment(
     val imageYPct: Float? = null,
     val imageWidthPct: Float? = null,
     val imageHeightPct: Float? = null,
+    val volumeScale: Float = 1.0f,
+    val speedScale: Float = 1.0f,
 )
 
 @Serializable

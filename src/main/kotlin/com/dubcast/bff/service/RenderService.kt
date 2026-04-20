@@ -281,28 +281,54 @@ class RenderService(
         val trimStart = (seg.trimStartMs ?: 0L) / 1000.0
         val trimEnd = (seg.trimEndMs ?: seg.durationMs) / 1000.0
         val durationSec = trimEnd - trimStart
+        val speed = seg.speedScale
+        val volume = seg.volumeScale
 
-        val vf = "scale=${outW}:${outH}:force_original_aspect_ratio=decrease," +
-                 "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=black," +
-                 "setsar=1"
+        val vfBase = "scale=${outW}:${outH}:force_original_aspect_ratio=decrease," +
+                     "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=black," +
+                     "setsar=1"
+        val vf = if (speed != 1.0f) "$vfBase,setpts=PTS/${speed}" else vfBase
+
+        val afParts = mutableListOf<String>()
+        if (speed != 1.0f) afParts.add(atempoChain(speed))
+        if (volume != 1.0f) afParts.add("volume=${volume}")
+        val af = afParts.joinToString(",")
 
         // -ss before -i = fast input-side seek; -t limits output duration.
         // anullsrc ensures an audio stream even if the source has none,
         // keeping all segments stream-compatible for concat demuxer.
-        val cmd = listOf(
+        val cmd = mutableListOf(
             "ffmpeg", "-y",
             "-ss", trimStart.toString(),
             "-i", vidFile.absolutePath,
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
             "-t", durationSec.toString(),
             "-vf", vf,
+        )
+        if (af.isNotEmpty()) {
+            cmd.addAll(listOf("-af", af))
+        }
+        cmd.addAll(listOf(
             "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-r", "30",
             "-c:a", "aac", "-b:a", "192k",
             outFile.absolutePath,
-        )
+        ))
+
         val exit = runFfmpegBlocking(cmd)
         if (exit != 0 || !outFile.exists()) throw RuntimeException("Video segment $idx trim failed (exit $exit)")
         return outFile
+    }
+
+    // atempo is clamped to 0.5..2.0 per ffmpeg docs; chain filters to hit
+    // speeds outside that range (e.g. 4x = atempo=2,atempo=2).
+    private fun atempoChain(speed: Float): String {
+        if (speed in 0.5f..2.0f) return "atempo=${speed}"
+        val parts = mutableListOf<Float>()
+        var remaining = speed
+        while (remaining > 2.0f) { parts.add(2.0f); remaining /= 2.0f }
+        while (remaining < 0.5f) { parts.add(0.5f); remaining *= 2.0f }
+        parts.add(remaining)
+        return parts.joinToString(",") { "atempo=${it}" }
     }
 
     private fun concatSegments(segments: List<File>, output: File) {
