@@ -105,6 +105,7 @@ fun Route.renderRoutes(
                 imageClips = config.imageClips,
                 videoDurationMs = config.videoDurationMs,
                 segments = config.segments,
+                frame = config.frame,
                 inputFilesToCleanup = inputFiles,
             )
 

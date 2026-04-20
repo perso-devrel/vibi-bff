@@ -85,11 +85,19 @@ data class Segment(
 )
 
 @Serializable
+data class FrameConfig(
+    val width: Int,
+    val height: Int,
+    val backgroundColorHex: String = "#000000",
+)
+
+@Serializable
 data class RenderConfig(
     val dubClips: List<DubClip>,
     val videoDurationMs: Long? = null,          // legacy (Task 2 이하)
     val segments: List<Segment>? = null,        // Task 3a+
     val imageClips: List<ImageClip> = emptyList(), // Task 2
+    val frame: FrameConfig? = null,
 )
 
 @Serializable

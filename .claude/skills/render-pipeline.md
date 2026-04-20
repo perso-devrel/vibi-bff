@@ -34,10 +34,10 @@ trigger: 렌더
 
 세그먼트 정규화는 `Semaphore(MAX_PARALLEL_SEGMENTS)` (기본 2)로 동시 ffmpeg 프로세스를 제한한 bounded-parallel. `runBlocking + coroutineScope { async { ... withPermit {} }.awaitAll() }`. `stepsDone`은 병렬 증가를 위해 `AtomicInteger`. 한 세그먼트가 실패하면 `coroutineScope`가 나머지 async를 취소하고, `finally`의 `tempDir.deleteRecursively()`가 부분 파일을 정리.
 
-## 출력 해상도
+## 출력 해상도 / 배경색
 
-- Multi-segment: `segments[0].width` / `segments[0].height`. null이면 `1920×1080` 폴백.
-- Legacy: 스티커가 있을 때(`imageClips.isNotEmpty()`)만 ffprobe로 결정. 스티커가 없으면 `outW=outH=0`으로 진행 (스티커 픽셀 계산이 필요 없어서 안전).
+- Multi-segment: 우선순위 `config.frame?.width/height` → `segments[0].width/height` → `1920×1080` 폴백. 배경색은 `config.frame?.backgroundColorHex` (기본 `#000000`). `ffmpegColor()`가 `#RRGGBB`를 `0xRRGGBB`로 정규화해 ffmpeg 필터에 안전하게 임베드.
+- Legacy: 스티커가 있을 때(`imageClips.isNotEmpty()`)만 ffprobe로 결정. 스티커가 없으면 `outW=outH=0`으로 진행 (스티커 픽셀 계산이 필요 없어서 안전). FrameConfig는 multi-segment 경로에서만 적용.
 
 스티커의 `xPct/yPct/widthPct/heightPct`, 세그먼트의 `imageWidthPct/imageHeightPct` 모두 이 출력 해상도 대비 퍼센트로 계산.
 

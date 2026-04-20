@@ -1,6 +1,7 @@
 package com.dubcast.bff.service
 
 import com.dubcast.bff.model.DubClip
+import com.dubcast.bff.model.FrameConfig
 import com.dubcast.bff.model.ImageClip
 import com.dubcast.bff.model.Segment
 import kotlinx.coroutines.CoroutineScope
@@ -66,6 +67,7 @@ class RenderService(
         imageClips: List<ImageClip>,
         videoDurationMs: Long?,
         segments: List<Segment>?,
+        frame: FrameConfig? = null,
         inputFilesToCleanup: List<File> = emptyList(),
     ): String {
         val jobId = "render-${UUID.randomUUID()}"
@@ -83,6 +85,7 @@ class RenderService(
                     runMultiSegmentRender(
                         job, segments, videoFiles, segmentImageFiles,
                         audioFiles, imageFiles, subtitlesFile, dubClips, imageClips,
+                        frame,
                     )
                 } else {
                     // Legacy path: single video
@@ -144,6 +147,7 @@ class RenderService(
         subtitlesFile: File?,
         dubClips: List<DubClip>,
         imageClips: List<ImageClip>,
+        frame: FrameConfig?,
     ) {
         require(segments.isNotEmpty()) { "segments must not be empty" }
         val tempDir = File(renderDir, "tmp_${job.jobId}")
@@ -151,8 +155,9 @@ class RenderService(
         try {
             val sorted = segments.sortedBy { it.order }
             val firstSeg = sorted.first()
-            val outW = firstSeg.width ?: 1920
-            val outH = firstSeg.height ?: 1080
+            val outW = frame?.width ?: firstSeg.width ?: 1920
+            val outH = frame?.height ?: firstSeg.height ?: 1080
+            val bgColor = ffmpegColor(frame?.backgroundColorHex ?: "#000000")
 
             val totalSteps = sorted.size + 2 // per-segment + concat + final
             val stepsDone = AtomicInteger(0)
@@ -174,12 +179,12 @@ class RenderService(
                                     "IMAGE" -> {
                                         val imgFile = segmentImageFiles[seg.sourceFileKey]
                                             ?: throw IllegalArgumentException("Segment image not found: ${seg.sourceFileKey}")
-                                        convertImageSegment(imgFile, seg, outW, outH, tempDir, idx)
+                                        convertImageSegment(imgFile, seg, outW, outH, bgColor, tempDir, idx)
                                     }
                                     "VIDEO" -> {
                                         val vidFile = videoFiles[seg.sourceFileKey]
                                             ?: throw IllegalArgumentException("Video file not found: ${seg.sourceFileKey}")
-                                        trimVideoSegment(vidFile, seg, outW, outH, tempDir, idx)
+                                        trimVideoSegment(vidFile, seg, outW, outH, bgColor, tempDir, idx)
                                     }
                                     else -> throw IllegalArgumentException("Unknown segment type: ${seg.type}")
                                 }
@@ -240,6 +245,7 @@ class RenderService(
         seg: Segment,
         outW: Int,
         outH: Int,
+        bgColor: String,
         tempDir: File,
         idx: Int,
     ): File {
@@ -251,7 +257,7 @@ class RenderService(
         val scaleH = ((hPct / 100f) * outH).toInt().coerceAtLeast(2)
 
         val vf = "scale=${scaleW}:${scaleH}:force_original_aspect_ratio=decrease," +
-                 "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=black," +
+                 "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=${bgColor}," +
                  "setsar=1"
 
         val cmd = listOf(
@@ -274,6 +280,7 @@ class RenderService(
         seg: Segment,
         outW: Int,
         outH: Int,
+        bgColor: String,
         tempDir: File,
         idx: Int,
     ): File {
@@ -285,7 +292,7 @@ class RenderService(
         val volume = seg.volumeScale
 
         val vfBase = "scale=${outW}:${outH}:force_original_aspect_ratio=decrease," +
-                     "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=black," +
+                     "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=${bgColor}," +
                      "setsar=1"
         val vf = if (speed != 1.0f) "$vfBase,setpts=PTS/${speed}" else vfBase
 
@@ -317,6 +324,17 @@ class RenderService(
         val exit = runFfmpegBlocking(cmd)
         if (exit != 0 || !outFile.exists()) throw RuntimeException("Video segment $idx trim failed (exit $exit)")
         return outFile
+    }
+
+    // ffmpeg color syntax accepts "#RRGGBB" or "0xRRGGBB"; older builds
+    // reject the leading "#" inside filter args, so normalise to 0x.
+    private fun ffmpegColor(hex: String): String {
+        val trimmed = hex.trim()
+        return when {
+            trimmed.startsWith("#") -> "0x" + trimmed.removePrefix("#")
+            trimmed.startsWith("0x") || trimmed.startsWith("0X") -> trimmed
+            else -> trimmed
+        }
     }
 
     // atempo is clamped to 0.5..2.0 per ffmpeg docs; chain filters to hit
