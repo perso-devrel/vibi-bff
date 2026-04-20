@@ -34,14 +34,16 @@ trigger: 렌더
 
 ## 출력 해상도
 
-- Multi-segment: `segments[0].width` / `segments[0].height`
-- Legacy: 원본 video에 대해 ffprobe
+- Multi-segment: `segments[0].width` / `segments[0].height`. null이면 `1920×1080` 폴백.
+- Legacy: 스티커가 있을 때(`imageClips.isNotEmpty()`)만 ffprobe로 결정. 스티커가 없으면 `outW=outH=0`으로 진행 (스티커 픽셀 계산이 필요 없어서 안전).
 
 스티커의 `xPct/yPct/widthPct/heightPct`, 세그먼트의 `imageWidthPct/imageHeightPct` 모두 이 출력 해상도 대비 퍼센트로 계산.
 
 ## Concat
 
-정규화된 모든 세그먼트가 동일한 codec(libx264)/fps(30)/해상도/AAC 오디오 → concat demuxer + `-c copy` 고속.
+정규화된 모든 세그먼트가 동일한 codec(libx264)/fps(30)/해상도/AAC(44.1kHz stereo) → concat demuxer + `-c copy` 고속.
+
+오디오 비트레이트는 segment 종류에 따라 다름 (IMAGE: 128k, VIDEO: 192k). codec/sample rate/channel layout이 같으면 concat demuxer가 비트레이트 차이는 그대로 통과시키지만, 추후 컨테이너 호환성 이슈가 보이면 비트레이트 통일을 의심할 것.
 
 ## 최종 ffmpeg 단계
 

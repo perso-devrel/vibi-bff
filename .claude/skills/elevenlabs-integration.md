@@ -7,15 +7,15 @@ trigger: elevenlabs
 
 # ElevenLabs 연동
 
-모든 업스트림 호출은 `service/ElevenLabsClient.kt`에 Ktor CIO 기반으로 래핑. 응답 DTO는 `model/ElevenLabsModels.kt`에서 `@SerialName`으로 snake_case → camelCase 변환.
+모든 업스트림 호출은 `service/ElevenLabsClient.kt`로 래핑. 클라이언트는 외부에서 `HttpClient`를 주입받음 (`Application.kt`에서 CIO 엔진으로 생성). 응답 DTO는 `model/ElevenLabsModels.kt`에서 `@SerialName`으로 snake_case → camelCase 변환.
 
 ## 사용 엔드포인트
 
 | 기능         | Method | Path                                                   |
 |--------------|--------|--------------------------------------------------------|
-| Voices       | GET    | `/v2/voices` (페이지네이션, `page_size=100`)           |
+| Voices       | GET    | `/v2/voices` (`page_size=100`, 내부에서 모든 페이지 순회 후 합쳐 단일 응답으로 반환. `totalCount`는 누적 개수로 재계산) |
 | TTS          | POST   | `/v1/text-to-speech/{voice_id}`                        |
-| Dubbing 시작 | POST   | `/v1/dubbing` (`target_lang` 필수, `mode=automatic`, `start_time`/`end_time` 초단위) |
+| Dubbing 시작 | POST   | `/v1/dubbing` (`target_lang` 필수, `mode=automatic`. `start_time`/`end_time` 초단위 — BFF가 ms 입력을 `start_time = startMs/1000`, `end_time = (startMs+durationMs)/1000`으로 변환해 전송) |
 | Dubbing 상태 | GET    | `/v1/dubbing/{dubbing_id}`                             |
 | Dubbed 오디오| GET    | `/v1/dubbing/{dubbing_id}/audio/{language_code}`       |
 
