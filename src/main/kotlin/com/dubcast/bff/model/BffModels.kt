@@ -56,6 +56,13 @@ data class DubClip(
 )
 
 @Serializable
+data class BgmClip(
+    val audioFileKey: String,
+    val startMs: Long,
+    val volume: Float = 1.0f,
+)
+
+@Serializable
 data class ImageClip(
     val imageFileKey: String,
     val startMs: Long,
@@ -98,6 +105,7 @@ data class RenderConfig(
     val segments: List<Segment>? = null,        // Task 3a+
     val imageClips: List<ImageClip> = emptyList(), // Task 2
     val frame: FrameConfig? = null,
+    val bgmClips: List<BgmClip> = emptyList(),
 )
 
 @Serializable

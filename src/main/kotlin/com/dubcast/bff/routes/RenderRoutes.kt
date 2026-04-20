@@ -27,6 +27,7 @@ fun Route.renderRoutes(
             var legacyVideoFile: File? = null
             val videoFiles = mutableMapOf<String, File>()
             val audioFiles = mutableMapOf<String, File>()
+            val bgmAudioFiles = mutableMapOf<String, File>()
             val imageFiles = mutableMapOf<String, File>()
             val segmentImageFiles = mutableMapOf<String, File>()
             var subtitlesFile: File? = null
@@ -53,6 +54,8 @@ fun Route.renderRoutes(
                                 videoFiles[name] = saveFile(part, "$name.mp4")
                             name.startsWith("audio_") ->
                                 audioFiles[name] = saveFile(part, "$name.mp3")
+                            name.startsWith("bgm_") ->
+                                bgmAudioFiles[name] = saveFile(part, "$name.mp3")
                             name.startsWith("segment_image_") ->
                                 segmentImageFiles[name] = saveFile(part, "$name.jpg")
                             name.startsWith("image_") ->
@@ -79,6 +82,11 @@ fun Route.renderRoutes(
                     "Audio file missing for key: ${clip.audioFileKey}"
                 }
             }
+            for (clip in config.bgmClips) {
+                require(bgmAudioFiles.containsKey(clip.audioFileKey)) {
+                    "BGM audio file missing for key: ${clip.audioFileKey}"
+                }
+            }
             // Validate image keys
             for (clip in config.imageClips) {
                 require(imageFiles.containsKey(clip.imageFileKey)) {
@@ -90,6 +98,7 @@ fun Route.renderRoutes(
             legacyVideoFile?.let { inputFiles.add(it) }
             inputFiles.addAll(videoFiles.values)
             inputFiles.addAll(audioFiles.values)
+            inputFiles.addAll(bgmAudioFiles.values)
             inputFiles.addAll(imageFiles.values)
             inputFiles.addAll(segmentImageFiles.values)
             subtitlesFile?.let { inputFiles.add(it) }
@@ -99,9 +108,11 @@ fun Route.renderRoutes(
                 videoFiles = videoFiles,
                 segmentImageFiles = segmentImageFiles,
                 audioFiles = audioFiles,
+                bgmAudioFiles = bgmAudioFiles,
                 imageFiles = imageFiles,
                 subtitlesFile = subtitlesFile,
                 dubClips = config.dubClips,
+                bgmClips = config.bgmClips,
                 imageClips = config.imageClips,
                 videoDurationMs = config.videoDurationMs,
                 segments = config.segments,

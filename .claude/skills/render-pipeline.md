@@ -22,6 +22,7 @@ trigger: 렌더
 - `segment_image_0`, … — IMAGE 타입 세그먼트의 원본 이미지
 - `image_0`, `image_1`, … — 스티커 오버레이 (`imageClips[]`로 참조)
 - `audio_0`, `audio_1`, … — 더빙 트랙 (`dubClips[]`로 참조)
+- `bgm_0`, `bgm_1`, … — 배경 음악 트랙 (`bgmClips[]`로 참조). 별도 맵으로 저장해 `audio_*`와 네임스페이스 분리
 - `subtitles` — ASS 자막 (선택, 최종 단계에서 burn)
 - `config` — `RenderConfig` JSON (FormItem, 파일 아님)
 
@@ -52,8 +53,8 @@ trigger: 렌더
 순서: 자막 `ass` 필터 → 스티커 `overlay` 체인 (각 `enable='between(t,s,e)'`) → 오디오 믹싱.
 
 오디오 분기:
-- `dubClips` 빈 리스트: `[0:a]anull[aout]` 패스스루 (`amix=inputs=1`은 구버전 ffmpeg에서 문제)
-- 아니면 `adelay=ms|ms, volume=v` 후 원본 오디오와 `amix=duration=first:dropout_transition=0`
+- `dubClips`와 `bgmClips` 모두 빈 리스트: `[0:a]anull[aout]` 패스스루 (`amix=inputs=1`은 구버전 ffmpeg에서 문제)
+- 아니면 각 dub/bgm clip에 `adelay=ms|ms, volume=v`를 적용 후 원본 오디오(`[0:a]`)와 함께 `amix=inputs=N:duration=first:dropout_transition=0`. BGM은 루프 없이 `duration=first`로 영상 길이에 자연 종료.
 
 ## Windows 경로 주의
 

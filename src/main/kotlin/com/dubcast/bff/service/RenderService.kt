@@ -1,5 +1,6 @@
 package com.dubcast.bff.service
 
+import com.dubcast.bff.model.BgmClip
 import com.dubcast.bff.model.DubClip
 import com.dubcast.bff.model.FrameConfig
 import com.dubcast.bff.model.ImageClip
@@ -67,6 +68,8 @@ class RenderService(
         imageClips: List<ImageClip>,
         videoDurationMs: Long?,
         segments: List<Segment>?,
+        bgmAudioFiles: Map<String, File> = emptyMap(),
+        bgmClips: List<BgmClip> = emptyList(),
         frame: FrameConfig? = null,
         inputFilesToCleanup: List<File> = emptyList(),
     ): String {
@@ -85,7 +88,7 @@ class RenderService(
                     runMultiSegmentRender(
                         job, segments, videoFiles, segmentImageFiles,
                         audioFiles, imageFiles, subtitlesFile, dubClips, imageClips,
-                        frame,
+                        frame, bgmAudioFiles, bgmClips,
                     )
                 } else {
                     // Legacy path: single video
@@ -100,6 +103,7 @@ class RenderService(
                     val command = buildFfmpegCommand(
                         videoFile, audioFiles, imageFiles, subtitlesFile,
                         dubClips, imageClips, duration, outputFile, outW, outH,
+                        bgmAudioFiles, bgmClips,
                     )
                     log.info("Starting legacy ffmpeg render: jobId={}", jobId)
                     process = ProcessBuilder(command).redirectErrorStream(true).start()
@@ -148,6 +152,8 @@ class RenderService(
         dubClips: List<DubClip>,
         imageClips: List<ImageClip>,
         frame: FrameConfig?,
+        bgmAudioFiles: Map<String, File>,
+        bgmClips: List<BgmClip>,
     ) {
         require(segments.isNotEmpty()) { "segments must not be empty" }
         val tempDir = File(renderDir, "tmp_${job.jobId}")
@@ -208,6 +214,7 @@ class RenderService(
             val command = buildFfmpegCommand(
                 concatFile, audioFiles, imageFiles, subtitlesFile,
                 dubClips, imageClips, totalDurationMs, job.outputFile, outW, outH,
+                bgmAudioFiles, bgmClips,
             )
             log.info("Starting final ffmpeg render: jobId={}", job.jobId)
             val proc = ProcessBuilder(command).redirectErrorStream(true).start()
@@ -385,6 +392,8 @@ class RenderService(
         outputFile: File,
         outWidth: Int = 0,
         outHeight: Int = 0,
+        bgmAudioFiles: Map<String, File> = emptyMap(),
+        bgmClips: List<BgmClip> = emptyList(),
     ): List<String> {
         val cmd = mutableListOf("ffmpeg", "-y")
         cmd.addAll(listOf("-i", videoFile.absolutePath))
@@ -397,6 +406,15 @@ class RenderService(
                 ?: throw IllegalArgumentException("Audio file not found: ${clip.audioFileKey}")
             cmd.addAll(listOf("-i", f.absolutePath))
             clipInputIndices.add(inputIdx++)
+        }
+
+        // BGM inputs (separate from dubClips; natural end, no loop)
+        val bgmInputIndices = mutableListOf<Int>()
+        for (clip in bgmClips) {
+            val f = bgmAudioFiles[clip.audioFileKey]
+                ?: throw IllegalArgumentException("BGM audio file not found: ${clip.audioFileKey}")
+            cmd.addAll(listOf("-i", f.absolutePath))
+            bgmInputIndices.add(inputIdx++)
         }
 
         // Sticker image inputs (deduplicated, order preserved)
@@ -418,8 +436,12 @@ class RenderService(
 
         val filters = mutableListOf<String>()
 
-        // Audio mixing: pass-through if no dub clips, otherwise delay+volume+amix
-        if (dubClips.isEmpty()) {
+        // Audio mixing: pass-through when there's nothing to mix; otherwise
+        // build adelay+volume chains for each dub/bgm clip and amix them
+        // together with the original video audio. amix duration=first caps
+        // output to the source video's length, so BGM shorter than the
+        // video ends naturally and longer BGM is truncated (no looping).
+        if (dubClips.isEmpty() && bgmClips.isEmpty()) {
             filters.add("[0:a]anull[aout]")
         } else {
             val mixInputs = mutableListOf<String>("[0:a]")
@@ -427,6 +449,11 @@ class RenderService(
                 val idx = clipInputIndices[i]
                 filters.add("[$idx:a]adelay=${clip.startMs}|${clip.startMs},volume=${clip.volume}[dub$i]")
                 mixInputs.add("[dub$i]")
+            }
+            for ((i, clip) in bgmClips.withIndex()) {
+                val idx = bgmInputIndices[i]
+                filters.add("[$idx:a]adelay=${clip.startMs}|${clip.startMs},volume=${clip.volume}[bgm$i]")
+                mixInputs.add("[bgm$i]")
             }
             filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0[aout]")
         }
