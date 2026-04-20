@@ -56,9 +56,38 @@ data class DubClip(
 )
 
 @Serializable
+data class ImageClip(
+    val imageFileKey: String,
+    val startMs: Long,
+    val endMs: Long,
+    val xPct: Float,
+    val yPct: Float,
+    val widthPct: Float,
+    val heightPct: Float,
+)
+
+@Serializable
+data class Segment(
+    val sourceFileKey: String,
+    val type: String, // "VIDEO" or "IMAGE"
+    val order: Int,
+    val durationMs: Long,
+    val trimStartMs: Long? = null,
+    val trimEndMs: Long? = null,
+    val width: Int? = null,
+    val height: Int? = null,
+    val imageXPct: Float? = null,
+    val imageYPct: Float? = null,
+    val imageWidthPct: Float? = null,
+    val imageHeightPct: Float? = null,
+)
+
+@Serializable
 data class RenderConfig(
     val dubClips: List<DubClip>,
-    val videoDurationMs: Long,
+    val videoDurationMs: Long? = null,          // legacy (Task 2 이하)
+    val segments: List<Segment>? = null,        // Task 3a+
+    val imageClips: List<ImageClip> = emptyList(), // Task 2
 )
 
 @Serializable

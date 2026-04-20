@@ -1,6 +1,8 @@
 package com.dubcast.bff.service
 
 import com.dubcast.bff.model.DubClip
+import com.dubcast.bff.model.ImageClip
+import com.dubcast.bff.model.Segment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -23,7 +25,7 @@ data class RenderJob(
 class RenderService(
     private val renderDir: File,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
-    private val jobTtlMs: Long = 3600_000, // 1 hour
+    private val jobTtlMs: Long = 3600_000,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, RenderJob>()
@@ -40,15 +42,18 @@ class RenderService(
     fun getJob(jobId: String): RenderJob? = jobs[jobId]
 
     fun submitRender(
-        videoFile: File,
+        legacyVideoFile: File?,
+        videoFiles: Map<String, File>,
+        segmentImageFiles: Map<String, File>,
         audioFiles: Map<String, File>,
+        imageFiles: Map<String, File>,
         subtitlesFile: File?,
         dubClips: List<DubClip>,
-        videoDurationMs: Long,
+        imageClips: List<ImageClip>,
+        videoDurationMs: Long?,
+        segments: List<Segment>?,
         inputFilesToCleanup: List<File> = emptyList(),
     ): String {
-        require(videoDurationMs > 0) { "videoDurationMs must be positive" }
-
         val jobId = "render-${UUID.randomUUID()}"
         val outputFile = File(renderDir, "$jobId.mp4")
         val job = RenderJob(jobId = jobId, outputFile = outputFile)
@@ -60,36 +65,44 @@ class RenderService(
                 job.status = "PROCESSING"
                 job.progress = 0
 
-                val command = buildFfmpegCommand(
-                    videoFile, audioFiles, subtitlesFile, dubClips, videoDurationMs, outputFile
-                )
+                if (segments != null) {
+                    runMultiSegmentRender(
+                        job, segments, videoFiles, segmentImageFiles,
+                        audioFiles, imageFiles, subtitlesFile, dubClips, imageClips,
+                    )
+                } else {
+                    // Legacy path: single video
+                    val videoFile = legacyVideoFile
+                        ?: videoFiles["video_0"]
+                        ?: throw IllegalArgumentException("No video file provided")
+                    val duration = videoDurationMs
+                        ?: throw IllegalArgumentException("videoDurationMs is required for legacy render")
+                    require(duration > 0) { "videoDurationMs must be positive" }
 
-                log.info("Starting ffmpeg render: jobId={}", jobId)
-
-                process = ProcessBuilder(command)
-                    .redirectErrorStream(true)
-                    .start()
-
-                val durationSec = videoDurationMs / 1000.0
-
-                process.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        parseFfmpegProgress(line, durationSec)?.let { pct ->
-                            job.progress = pct
+                    val (outW, outH) = if (imageClips.isNotEmpty()) getVideoSize(videoFile) else Pair(0, 0)
+                    val command = buildFfmpegCommand(
+                        videoFile, audioFiles, imageFiles, subtitlesFile,
+                        dubClips, imageClips, duration, outputFile, outW, outH,
+                    )
+                    log.info("Starting legacy ffmpeg render: jobId={}", jobId)
+                    process = ProcessBuilder(command).redirectErrorStream(true).start()
+                    val durationSec = duration / 1000.0
+                    process.inputStream.bufferedReader().useLines { lines ->
+                        lines.forEach { line ->
+                            parseFfmpegProgress(line, durationSec)?.let { job.progress = it }
                         }
                     }
-                }
-
-                val exitCode = process.waitFor()
-                if (exitCode == 0 && outputFile.exists()) {
-                    job.status = "COMPLETED"
-                    job.progress = 100
-                    log.info("Render completed: jobId={}, size={}", jobId, outputFile.length())
-                } else {
-                    job.status = "FAILED"
-                    job.error = "ffmpeg exited with code $exitCode"
-                    outputFile.delete()
-                    log.error("Render failed: jobId={}, exitCode={}", jobId, exitCode)
+                    val exitCode = process.waitFor()
+                    if (exitCode == 0 && outputFile.exists()) {
+                        job.status = "COMPLETED"
+                        job.progress = 100
+                        log.info("Render completed: jobId={}, size={}", jobId, outputFile.length())
+                    } else {
+                        job.status = "FAILED"
+                        job.error = "ffmpeg exited with code $exitCode"
+                        outputFile.delete()
+                        log.error("Render failed: jobId={}, exitCode={}", jobId, exitCode)
+                    }
                 }
             } catch (e: Exception) {
                 process?.destroyForcibly()
@@ -105,67 +118,281 @@ class RenderService(
         return jobId
     }
 
+    // ── Multi-segment pipeline (Task 3b) ─────────────────────────────────────
+
+    private fun runMultiSegmentRender(
+        job: RenderJob,
+        segments: List<Segment>,
+        videoFiles: Map<String, File>,
+        segmentImageFiles: Map<String, File>,
+        audioFiles: Map<String, File>,
+        imageFiles: Map<String, File>,
+        subtitlesFile: File?,
+        dubClips: List<DubClip>,
+        imageClips: List<ImageClip>,
+    ) {
+        require(segments.isNotEmpty()) { "segments must not be empty" }
+        val tempDir = File(renderDir, "tmp_${job.jobId}")
+        tempDir.mkdirs()
+        try {
+            val sorted = segments.sortedBy { it.order }
+            val firstSeg = sorted.first()
+            val outW = firstSeg.width ?: 1920
+            val outH = firstSeg.height ?: 1080
+
+            val totalSteps = sorted.size + 2 // per-segment + concat + final
+            var stepsDone = 0
+
+            fun updateProgress() {
+                job.progress = ((stepsDone.toDouble() / totalSteps) * 95).toInt().coerceIn(0, 95)
+            }
+
+            // Step 1 & 2: process each segment
+            val processedFiles = sorted.mapIndexed { idx, seg ->
+                val file = when (seg.type) {
+                    "IMAGE" -> {
+                        val imgFile = segmentImageFiles[seg.sourceFileKey]
+                            ?: throw IllegalArgumentException("Segment image not found: ${seg.sourceFileKey}")
+                        convertImageSegment(imgFile, seg, outW, outH, tempDir, idx)
+                    }
+                    "VIDEO" -> {
+                        val vidFile = videoFiles[seg.sourceFileKey]
+                            ?: throw IllegalArgumentException("Video file not found: ${seg.sourceFileKey}")
+                        trimVideoSegment(vidFile, seg, outW, outH, tempDir, idx)
+                    }
+                    else -> throw IllegalArgumentException("Unknown segment type: ${seg.type}")
+                }
+                stepsDone++
+                updateProgress()
+                file
+            }
+
+            // Step 3: concat
+            val concatFile = File(tempDir, "concat.mp4")
+            concatSegments(processedFiles, concatFile)
+            stepsDone++
+            updateProgress()
+
+            // Step 4 & 5: stickers + dub audio + subtitles
+            val totalDurationMs = sorted.sumOf { it.durationMs }
+            val command = buildFfmpegCommand(
+                concatFile, audioFiles, imageFiles, subtitlesFile,
+                dubClips, imageClips, totalDurationMs, job.outputFile, outW, outH,
+            )
+            log.info("Starting final ffmpeg render: jobId={}", job.jobId)
+            val proc = ProcessBuilder(command).redirectErrorStream(true).start()
+            try {
+                val durationSec = totalDurationMs / 1000.0
+                proc.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        parseFfmpegProgress(line, durationSec)?.let { pct ->
+                            job.progress = 95 + (pct * 5 / 100)
+                        }
+                    }
+                }
+                val exitCode = proc.waitFor()
+                if (exitCode == 0 && job.outputFile.exists()) {
+                    job.status = "COMPLETED"
+                    job.progress = 100
+                    log.info("Multi-segment render completed: jobId={}", job.jobId)
+                } else {
+                    job.status = "FAILED"
+                    job.error = "ffmpeg final step exited with code $exitCode"
+                    job.outputFile.delete()
+                    log.error("Multi-segment render failed: jobId={}, exitCode={}", job.jobId, exitCode)
+                }
+            } catch (e: Exception) {
+                proc.destroyForcibly()
+                throw e
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    private fun convertImageSegment(
+        imgFile: File,
+        seg: Segment,
+        outW: Int,
+        outH: Int,
+        tempDir: File,
+        idx: Int,
+    ): File {
+        val outFile = File(tempDir, "seg_img_$idx.mp4")
+        val durationSec = seg.durationMs / 1000.0
+        val wPct = seg.imageWidthPct ?: 100f
+        val hPct = seg.imageHeightPct ?: 100f
+        val scaleW = ((wPct / 100f) * outW).toInt().coerceAtLeast(2)
+        val scaleH = ((hPct / 100f) * outH).toInt().coerceAtLeast(2)
+
+        val vf = "scale=${scaleW}:${scaleH}:force_original_aspect_ratio=decrease," +
+                 "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=black," +
+                 "setsar=1"
+
+        val cmd = listOf(
+            "ffmpeg", "-y",
+            "-loop", "1", "-i", imgFile.absolutePath,
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+            "-vf", vf,
+            "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "30",
+            "-c:a", "aac", "-b:a", "128k",
+            "-t", durationSec.toString(),
+            outFile.absolutePath,
+        )
+        val exit = runFfmpegBlocking(cmd)
+        if (exit != 0 || !outFile.exists()) throw RuntimeException("Image segment $idx conversion failed (exit $exit)")
+        return outFile
+    }
+
+    private fun trimVideoSegment(
+        vidFile: File,
+        seg: Segment,
+        outW: Int,
+        outH: Int,
+        tempDir: File,
+        idx: Int,
+    ): File {
+        val outFile = File(tempDir, "seg_vid_$idx.mp4")
+        val trimStart = (seg.trimStartMs ?: 0L) / 1000.0
+        val trimEnd = (seg.trimEndMs ?: seg.durationMs) / 1000.0
+        val durationSec = trimEnd - trimStart
+
+        val vf = "scale=${outW}:${outH}:force_original_aspect_ratio=decrease," +
+                 "pad=${outW}:${outH}:(ow-iw)/2:(oh-ih)/2:color=black," +
+                 "setsar=1"
+
+        // -ss before -i = fast input-side seek; -t limits output duration.
+        // anullsrc ensures an audio stream even if the source has none,
+        // keeping all segments stream-compatible for concat demuxer.
+        val cmd = listOf(
+            "ffmpeg", "-y",
+            "-ss", trimStart.toString(),
+            "-i", vidFile.absolutePath,
+            "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", durationSec.toString(),
+            "-vf", vf,
+            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-r", "30",
+            "-c:a", "aac", "-b:a", "192k",
+            outFile.absolutePath,
+        )
+        val exit = runFfmpegBlocking(cmd)
+        if (exit != 0 || !outFile.exists()) throw RuntimeException("Video segment $idx trim failed (exit $exit)")
+        return outFile
+    }
+
+    private fun concatSegments(segments: List<File>, output: File) {
+        val concatList = File(output.parentFile, "concat_list.txt")
+        concatList.writeText(segments.joinToString("\n") { "file '${it.absolutePath.replace("\\", "/")}'" })
+        val cmd = listOf(
+            "ffmpeg", "-y",
+            "-f", "concat", "-safe", "0",
+            "-i", concatList.absolutePath,
+            "-c", "copy",
+            output.absolutePath,
+        )
+        val exit = runFfmpegBlocking(cmd)
+        concatList.delete()
+        if (exit != 0 || !output.exists()) throw RuntimeException("Concat failed (exit $exit)")
+    }
+
+    private fun runFfmpegBlocking(command: List<String>): Int {
+        val proc = ProcessBuilder(command).redirectErrorStream(true).start()
+        val out = proc.inputStream.bufferedReader().readText()
+        val exit = proc.waitFor()
+        if (exit != 0) log.error("ffmpeg step failed (exit {}): {}", exit, out.takeLast(500))
+        return exit
+    }
+
+    // ── FFmpeg command builder ────────────────────────────────────────────────
+
     internal fun buildFfmpegCommand(
         videoFile: File,
         audioFiles: Map<String, File>,
+        imageFiles: Map<String, File>,
         subtitlesFile: File?,
         dubClips: List<DubClip>,
+        imageClips: List<ImageClip>,
         videoDurationMs: Long,
         outputFile: File,
+        outWidth: Int = 0,
+        outHeight: Int = 0,
     ): List<String> {
         val cmd = mutableListOf("ffmpeg", "-y")
-
-        // Input 0: original video
         cmd.addAll(listOf("-i", videoFile.absolutePath))
 
-        // Inputs 1..N: audio files for each dub clip
+        // Audio inputs
         val clipInputIndices = mutableListOf<Int>()
         var inputIdx = 1
         for (clip in dubClips) {
-            val audioFile = audioFiles[clip.audioFileKey]
-                ?: throw IllegalArgumentException("Audio file not found for key: ${clip.audioFileKey}")
-            cmd.addAll(listOf("-i", audioFile.absolutePath))
-            clipInputIndices.add(inputIdx)
-            inputIdx++
+            val f = audioFiles[clip.audioFileKey]
+                ?: throw IllegalArgumentException("Audio file not found: ${clip.audioFileKey}")
+            cmd.addAll(listOf("-i", f.absolutePath))
+            clipInputIndices.add(inputIdx++)
         }
 
-        // Build filter_complex
+        // Sticker image inputs (deduplicated, order preserved)
+        val imageInputIndices = mutableMapOf<String, Int>()
+        for (clip in imageClips) {
+            if (clip.imageFileKey !in imageInputIndices) {
+                val f = imageFiles[clip.imageFileKey]
+                    ?: throw IllegalArgumentException("Image file not found: ${clip.imageFileKey}")
+                cmd.addAll(listOf("-i", f.absolutePath))
+                imageInputIndices[clip.imageFileKey] = inputIdx++
+            }
+        }
+
+        // Determine output resolution for sticker pixel math
+        val (outW, outH) = if (imageClips.isNotEmpty()) {
+            if (outWidth > 0 && outHeight > 0) Pair(outWidth, outHeight)
+            else getVideoSize(videoFile)
+        } else Pair(outWidth, outHeight)
+
         val filters = mutableListOf<String>()
-        val mixInputs = mutableListOf<String>()
 
-        // Original audio from video
-        mixInputs.add("[0:a]")
-
-        // Each dub clip: apply delay and volume
-        for ((i, clip) in dubClips.withIndex()) {
-            val idx = clipInputIndices[i]
-            val delayMs = clip.startMs
-            val label = "dub$i"
-            filters.add("[$idx:a]adelay=$delayMs|$delayMs,volume=${clip.volume}[$label]")
-            mixInputs.add("[$label]")
-        }
-
-        // Mix all audio streams
-        val mixCount = mixInputs.size
-        val mixFilter = "${mixInputs.joinToString("")}amix=inputs=$mixCount:duration=first:dropout_transition=0[aout]"
-        filters.add(mixFilter)
-
-        // Subtitle burn-in via ASS filter, or null (no-op) filter for passthrough
-        if (subtitlesFile != null) {
-            // Use -i for subtitle input to avoid path escaping issues in filter strings
-            cmd.addAll(listOf("-i", subtitlesFile.absolutePath))
-            val subIdx = inputIdx
-            filters.add("[0:v][$subIdx:s]overlay=eof_action=pass[vout]".let {
-                // ASS subtitles are text-based, use subtitles filter with input index
-                "[0:v]ass='${escapeFilterPath(subtitlesFile.absolutePath)}'[vout]"
-            })
+        // Audio mixing: pass-through if no dub clips, otherwise delay+volume+amix
+        if (dubClips.isEmpty()) {
+            filters.add("[0:a]anull[aout]")
         } else {
-            filters.add("[0:v]null[vout]")
+            val mixInputs = mutableListOf<String>("[0:a]")
+            for ((i, clip) in dubClips.withIndex()) {
+                val idx = clipInputIndices[i]
+                filters.add("[$idx:a]adelay=${clip.startMs}|${clip.startMs},volume=${clip.volume}[dub$i]")
+                mixInputs.add("[dub$i]")
+            }
+            filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0[aout]")
         }
 
-        val filterComplex = filters.joinToString(";")
-        cmd.addAll(listOf("-filter_complex", filterComplex))
+        // Video chain: subtitle → sticker overlays
+        var vLabel = "v0"
+        if (subtitlesFile != null) {
+            cmd.addAll(listOf("-i", subtitlesFile.absolutePath))
+            filters.add("[0:v]ass='${escapeFilterPath(subtitlesFile.absolutePath)}'[$vLabel]")
+        } else {
+            filters.add("[0:v]null[$vLabel]")
+        }
 
+        for ((i, clip) in imageClips.withIndex()) {
+            val imgIdx = imageInputIndices[clip.imageFileKey]!!
+            val wPx = ((clip.widthPct / 100f) * outW).toInt().coerceAtLeast(2)
+            val hPx = ((clip.heightPct / 100f) * outH).toInt().coerceAtLeast(2)
+            val xPx = ((clip.xPct / 100f) * outW).toInt() - wPx / 2
+            val yPx = ((clip.yPct / 100f) * outH).toInt() - hPx / 2
+            val startSec = clip.startMs / 1000.0
+            val endSec = clip.endMs / 1000.0
+            val nextLabel = "v${i + 1}"
+            filters.add("[$imgIdx:v]scale=${wPx}:${hPx}[simg$i]")
+            filters.add("[$vLabel][simg$i]overlay=x=$xPx:y=$yPx:enable='between(t,$startSec,$endSec)'[$nextLabel]")
+            vLabel = nextLabel
+        }
+
+        // Rename final video label to [vout]
+        val finalLabel = "[$vLabel]"
+        val lastIdx = filters.indexOfLast { it.endsWith(finalLabel) }
+        if (lastIdx >= 0) {
+            filters[lastIdx] = filters[lastIdx].dropLast(finalLabel.length) + "[vout]"
+        }
+
+        cmd.addAll(listOf("-filter_complex", filters.joinToString(";")))
         cmd.addAll(listOf(
             "-map", "[vout]",
             "-map", "[aout]",
@@ -182,11 +409,37 @@ class RenderService(
         return cmd
     }
 
+    // ── Utilities ─────────────────────────────────────────────────────────────
+
+    private fun getVideoSize(videoFile: File): Pair<Int, Int> {
+        return try {
+            val proc = ProcessBuilder(
+                "ffprobe", "-v", "quiet",
+                "-show_entries", "stream=width,height",
+                "-select_streams", "v:0",
+                "-of", "csv=p=0",
+                videoFile.absolutePath,
+            ).start()
+            val output = proc.inputStream.bufferedReader().readText().trim()
+            proc.waitFor()
+            val parts = output.lines().first().split(",")
+            val w = parts.getOrNull(0)?.toIntOrNull() ?: 1920
+            val h = parts.getOrNull(1)?.toIntOrNull() ?: 1080
+            Pair(w, h)
+        } catch (e: Exception) {
+            log.warn("ffprobe failed, defaulting to 1920x1080: {}", e.message)
+            Pair(1920, 1080)
+        }
+    }
+
     private fun escapeFilterPath(path: String): String {
-        return path
-            .replace("\\", "/")
-            .replace(":", "\\:")
-            .replace("'", "'\\''")
+        val fwd = path.replace("\\", "/")
+        // On Windows, preserve the drive-letter colon (e.g. "C:") and only escape remaining colons
+        return if (fwd.length >= 2 && fwd[1] == ':') {
+            fwd.substring(0, 2) + fwd.substring(2).replace(":", "\\:").replace("'", "\\'")
+        } else {
+            fwd.replace(":", "\\:").replace("'", "\\'")
+        }
     }
 
     internal fun parseFfmpegProgress(line: String, totalDurationSec: Double): Int? {
@@ -194,20 +447,20 @@ class RenderService(
         if (totalDurationSec <= 0) return null
         val timeUs = line.substringAfter("out_time_us=").toLongOrNull() ?: return null
         val timeSec = timeUs / 1_000_000.0
-        val pct = ((timeSec / totalDurationSec) * 100).toInt().coerceIn(0, 99)
-        return pct
+        return ((timeSec / totalDurationSec) * 100).toInt().coerceIn(0, 99)
     }
 
     private fun cleanupExpiredJobs() {
         val now = System.currentTimeMillis()
-        val expired = jobs.entries.filter { (_, job) ->
-            (job.status == "COMPLETED" || job.status == "FAILED") &&
-                (now - job.createdAt) > jobTtlMs
-        }
-        for ((id, job) in expired) {
-            job.outputFile.delete()
-            jobs.remove(id)
-            log.info("Cleaned up expired render job: {}", id)
-        }
+        jobs.entries
+            .filter { (_, job) ->
+                (job.status == "COMPLETED" || job.status == "FAILED") &&
+                    (now - job.createdAt) > jobTtlMs
+            }
+            .forEach { (id, job) ->
+                job.outputFile.delete()
+                jobs.remove(id)
+                log.info("Cleaned up expired render job: {}", id)
+            }
     }
 }

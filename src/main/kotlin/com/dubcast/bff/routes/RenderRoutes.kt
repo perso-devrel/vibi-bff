@@ -21,45 +21,44 @@ fun Route.renderRoutes(
     fileStorage: FileStorageService,
 ) {
     route("/render") {
-        // POST /api/v2/render (multipart)
         post {
             val multipart = call.receiveMultipart()
 
-            var videoFile: File? = null
+            var legacyVideoFile: File? = null
+            val videoFiles = mutableMapOf<String, File>()
             val audioFiles = mutableMapOf<String, File>()
+            val imageFiles = mutableMapOf<String, File>()
+            val segmentImageFiles = mutableMapOf<String, File>()
             var subtitlesFile: File? = null
             var renderConfig: RenderConfig? = null
+
+            fun saveFile(part: PartData.FileItem, defaultName: String): File {
+                @Suppress("DEPRECATION")
+                val blobPath = fileStorage.saveUpload(
+                    part.originalFileName ?: defaultName,
+                    part.streamProvider(),
+                    MAX_FILE_SIZE,
+                )
+                return fileStorage.getUploadFile(blobPath)
+            }
 
             multipart.forEachPart { part ->
                 when (part) {
                     is PartData.FileItem -> {
+                        val name = part.name ?: ""
                         when {
-                            part.name == "video" -> {
-                                @Suppress("DEPRECATION")
-                                val blobPath = fileStorage.saveUpload(
-                                    part.originalFileName ?: "video.mp4",
-                                    part.streamProvider(),
-                                    MAX_FILE_SIZE,
-                                )
-                                videoFile = fileStorage.getUploadFile(blobPath)
-                            }
-                            part.name?.startsWith("audio_") == true -> {
-                                @Suppress("DEPRECATION")
-                                val blobPath = fileStorage.saveUpload(
-                                    part.originalFileName ?: "${part.name}.mp3",
-                                    part.streamProvider(),
-                                    MAX_FILE_SIZE,
-                                )
-                                audioFiles[part.name!!] = fileStorage.getUploadFile(blobPath)
-                            }
-                            part.name == "subtitles" -> {
-                                @Suppress("DEPRECATION")
-                                val blobPath = fileStorage.saveUpload(
-                                    part.originalFileName ?: "subtitles.ass",
-                                    part.streamProvider(),
-                                )
-                                subtitlesFile = fileStorage.getUploadFile(blobPath)
-                            }
+                            name == "video" ->
+                                legacyVideoFile = saveFile(part, "video.mp4")
+                            name.startsWith("video_") ->
+                                videoFiles[name] = saveFile(part, "$name.mp4")
+                            name.startsWith("audio_") ->
+                                audioFiles[name] = saveFile(part, "$name.mp3")
+                            name.startsWith("segment_image_") ->
+                                segmentImageFiles[name] = saveFile(part, "$name.jpg")
+                            name.startsWith("image_") ->
+                                imageFiles[name] = saveFile(part, "$name.jpg")
+                            name == "subtitles" ->
+                                subtitlesFile = saveFile(part, "subtitles.ass")
                         }
                     }
                     is PartData.FormItem -> {
@@ -72,37 +71,49 @@ fun Route.renderRoutes(
                 part.dispose()
             }
 
-            val video = videoFile ?: throw IllegalArgumentException("video file is required")
             val config = renderConfig ?: throw IllegalArgumentException("config is required")
 
-            // Validate all audio keys exist
+            // Validate audio keys
             for (clip in config.dubClips) {
                 require(audioFiles.containsKey(clip.audioFileKey)) {
                     "Audio file missing for key: ${clip.audioFileKey}"
                 }
             }
+            // Validate image keys
+            for (clip in config.imageClips) {
+                require(imageFiles.containsKey(clip.imageFileKey)) {
+                    "Image file missing for key: ${clip.imageFileKey}"
+                }
+            }
 
-            val inputFiles = mutableListOf(video)
+            val inputFiles = mutableListOf<File>()
+            legacyVideoFile?.let { inputFiles.add(it) }
+            inputFiles.addAll(videoFiles.values)
             inputFiles.addAll(audioFiles.values)
-            if (subtitlesFile != null) inputFiles.add(subtitlesFile!!)
+            inputFiles.addAll(imageFiles.values)
+            inputFiles.addAll(segmentImageFiles.values)
+            subtitlesFile?.let { inputFiles.add(it) }
 
             val jobId = renderService.submitRender(
-                videoFile = video,
+                legacyVideoFile = legacyVideoFile,
+                videoFiles = videoFiles,
+                segmentImageFiles = segmentImageFiles,
                 audioFiles = audioFiles,
+                imageFiles = imageFiles,
                 subtitlesFile = subtitlesFile,
                 dubClips = config.dubClips,
+                imageClips = config.imageClips,
                 videoDurationMs = config.videoDurationMs,
+                segments = config.segments,
                 inputFilesToCleanup = inputFiles,
             )
 
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
         }
 
-        // GET /api/v2/render/{jobId}/status
         get("/{jobId}/status") {
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("Render jobId required")
-
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
 
@@ -114,11 +125,9 @@ fun Route.renderRoutes(
             ))
         }
 
-        // GET /api/v2/render/{jobId}/download
         get("/{jobId}/download") {
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("Render jobId required")
-
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
 
