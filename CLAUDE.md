@@ -4,7 +4,9 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Project Overview
 
-DubCast BFF — Kotlin/Ktor backend that proxies ElevenLabs API for TTS, voice listing, and lip-sync dubbing. Serves as a BFF (Backend For Frontend) for the DubCast Android app.
+DubCast BFF — Kotlin/Ktor backend that proxies ElevenLabs API for TTS, voice listing, and lip-sync dubbing, and runs local ffmpeg-based video rendering (dub audio mixing, sticker overlays, multi-segment concat, subtitle burn-in). Serves as a BFF (Backend For Frontend) for the DubCast Android app.
+
+**Runtime dependencies:** `ffmpeg` and `ffprobe` must be available on `PATH` for the render pipeline to work.
 
 ## Build & Run
 
@@ -47,8 +49,9 @@ Configured via `.env` file (loaded by dotenv-kotlin) or system env. See `.env.ex
 - `model/BffModels.kt` — BFF request/response DTOs (kotlinx.serialization)
 - `model/ElevenLabsModels.kt` — ElevenLabs API response DTOs (snake_case → camelCase via `@SerialName`)
 - `service/ElevenLabsClient.kt` — HTTP client wrapping all ElevenLabs API calls (voices, TTS, dubbing/lip-sync)
-- `service/FileStorageService.kt` — Local file storage in `uploads/`, `tts/`, `lipsync/` subdirectories
+- `service/FileStorageService.kt` — Local file storage in `uploads/`, `tts/`, `lipsync/`, `render/` subdirectories
 - `service/AudioUtils.kt` — MP3 frame header parsing for duration estimation
+- `service/RenderService.kt` — Background ffmpeg render jobs (multipart inputs → mp4 output). Handles multi-segment concat, sticker image overlays, dub audio mixing, and ASS subtitle burn-in. Jobs tracked in-memory with TTL cleanup; outputs streamed via download endpoint (no static mount).
 
 ### API versions
 
@@ -59,6 +62,24 @@ Configured via `.env` file (loaded by dotenv-kotlin) or system env. See `.env.ex
   - `POST /lipsync` — multipart (video, audio, targetLang, startMs, durationMs)
   - `GET /lipsync/{jobId}/status` — status polling with dynamic target language
   - `GET /lipsync/{jobId}/download` — binary mp4 streaming
+  - `POST /render` — multipart render job. Fields: `video` (legacy) or `video_0`/`video_1`/… , `audio_N` (dub tracks), `image_N` (sticker overlays), `segment_image_N` (IMAGE-type segment sources), `subtitles` (ASS), `config` (JSON `RenderConfig`). Returns `jobId`.
+  - `GET /render/{jobId}/status` — status polling (`PENDING`/`PROCESSING`/`COMPLETED`/`FAILED` + `progress`)
+  - `GET /render/{jobId}/download` — binary mp4 streaming (no static mount)
+- Swagger UI exposed at `/swagger` (spec: `resources/openapi/dubcast-bff.yaml`)
+
+### Render pipeline (v2)
+
+`RenderConfig` supports two paths chosen by presence of `segments`:
+
+- **Legacy** (`segments == null`): single video input + `videoDurationMs`. Runs one ffmpeg command (audio mix + subtitles + stickers).
+- **Multi-segment** (`segments != null`): each segment is `VIDEO` (trim+normalize to output resolution) or `IMAGE` (loop → letterboxed still with silent AAC). Normalized clips are concatenated via concat demuxer, then the final ffmpeg pass applies stickers + dub audio mix + subtitle burn-in.
+
+Shared features across both paths:
+- `imageClips[]` — sticker overlays with percentage-based position/size (`xPct/yPct/widthPct/heightPct`) and `between(t,start,end)` gating
+- `dubClips[]` — per-clip `adelay`+`volume` then `amix` with original video audio
+- Optional ASS subtitles via the `ass` filter
+
+Output resolution is taken from `segments[0].width/height` (multi-segment) or ffprobe on the source video (legacy). Windows drive-letter colons are preserved when paths are embedded in filter expressions.
 
 ### ElevenLabs API usage
 
@@ -76,6 +97,7 @@ Custom exceptions in `ErrorHandling.kt`: `NotFoundException` (404), `ElevenLabsA
 
 - `/files/tts/*` — TTS audio files (mp3)
 - `/files/lipsync/*` — Lip-sync result videos (mp4)
+- Render outputs are **not** statically mounted; fetch via `GET /api/v2/render/{jobId}/download`.
 
 ## Testing
 
