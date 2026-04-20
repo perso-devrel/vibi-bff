@@ -10,6 +10,8 @@ import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
 import kotlinx.io.asSource
 import kotlinx.io.buffered
@@ -20,6 +22,7 @@ import java.util.concurrent.ConcurrentHashMap
 class ElevenLabsClient(
     private val config: ElevenLabsConfig,
     private val httpClient: HttpClient,
+    private val voicesCacheTtlMs: Long = 600_000,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -33,8 +36,34 @@ class ElevenLabsClient(
     }
 
     // --- Voices ---
+    private val voicesCacheMutex = Mutex()
+    @Volatile private var voicesCache: ElevenLabsVoicesResponse? = null
+    @Volatile private var voicesCachedAt: Long = 0L
+
+    private fun voicesCacheFresh(): ElevenLabsVoicesResponse? {
+        val cached = voicesCache ?: return null
+        return if (System.currentTimeMillis() - voicesCachedAt < voicesCacheTtlMs) cached else null
+    }
+
     suspend fun getVoices(): ElevenLabsVoicesResponse {
-        log.info("Fetching voice list")
+        voicesCacheFresh()?.let { return it }
+        return voicesCacheMutex.withLock {
+            // Re-check inside lock so concurrent first callers reuse the same fetch.
+            voicesCacheFresh()?.let { return@withLock it }
+            val fresh = fetchVoices()
+            voicesCache = fresh
+            voicesCachedAt = System.currentTimeMillis()
+            fresh
+        }
+    }
+
+    fun invalidateVoicesCache() {
+        voicesCache = null
+        voicesCachedAt = 0L
+    }
+
+    private suspend fun fetchVoices(): ElevenLabsVoicesResponse {
+        log.info("Fetching voice list from upstream")
         val allVoices = mutableListOf<ElevenLabsVoice>()
         var pageToken: String? = null
         var hasMore = true

@@ -13,7 +13,7 @@ trigger: elevenlabs
 
 | 기능         | Method | Path                                                   |
 |--------------|--------|--------------------------------------------------------|
-| Voices       | GET    | `/v2/voices` (`page_size=100`, 내부에서 모든 페이지 순회 후 합쳐 단일 응답으로 반환. `totalCount`는 누적 개수로 재계산) |
+| Voices       | GET    | `/v2/voices` (`page_size=100`, 내부에서 모든 페이지 순회 후 합쳐 단일 응답으로 반환. `totalCount`는 누적 개수로 재계산. **결과는 in-memory TTL 캐시** — 기본 10분, single-flight Mutex로 동시 첫 요청 합침. 강제 갱신은 `invalidateVoicesCache()`) |
 | TTS          | POST   | `/v1/text-to-speech/{voice_id}`                        |
 | Dubbing 시작 | POST   | `/v1/dubbing` (`target_lang` 필수, `mode=automatic`. `start_time`/`end_time` 초단위 — BFF가 ms 입력을 `start_time = startMs/1000`, `end_time = (startMs+durationMs)/1000`으로 변환해 전송) |
 | Dubbing 상태 | GET    | `/v1/dubbing/{dubbing_id}`                             |
