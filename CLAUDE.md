@@ -31,7 +31,7 @@ Build output: `C:/tmp/dubcast-bff-build`. Full env var table + API reference in 
 
 ## Error handling
 
-`plugins/ErrorHandling.kt`: `NotFoundException` → 404, `IllegalArgumentException` → 400, `ElevenLabsApiException` → upstream code. All return `ErrorResponse(error, detail?)`.
+`plugins/ErrorHandling.kt`: `NotFoundException` → 404, `IllegalArgumentException` → 400, `ElevenLabsApiException` → upstream code, `PersoApiException` → 402/429/4xx/502 by upstream status. All return `ErrorResponse(error, detail?)`.
 
 ## File serving
 
