@@ -4,6 +4,7 @@ import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.routes.lipSyncRoutes
 import com.dubcast.bff.routes.lipSyncV2Routes
 import com.dubcast.bff.routes.renderRoutes
+import com.dubcast.bff.routes.separationRoutes
 import com.dubcast.bff.routes.ttsRoutes
 import com.dubcast.bff.routes.ttsV2Routes
 import com.dubcast.bff.routes.uploadRoutes
@@ -11,6 +12,9 @@ import com.dubcast.bff.routes.voiceRoutes
 import com.dubcast.bff.service.ElevenLabsClient
 import com.dubcast.bff.service.FileStorageService
 import com.dubcast.bff.service.RenderService
+import com.dubcast.bff.service.SeparationService
+import com.dubcast.bff.service.SignedUrlService
+import com.dubcast.bff.service.StemMixService
 import io.ktor.server.application.*
 import io.ktor.server.http.content.*
 import io.ktor.server.plugins.swagger.*
@@ -22,6 +26,9 @@ fun Application.configureRouting(
     elevenLabsClient: ElevenLabsClient,
     appConfig: AppConfig,
     renderService: RenderService,
+    separationService: SeparationService,
+    stemMixService: StemMixService,
+    signedUrlService: SignedUrlService,
 ) {
     routing {
         swaggerUI(path = "swagger", swaggerFile = "openapi/dubcast-bff.yaml")
@@ -41,6 +48,7 @@ fun Application.configureRouting(
             ttsV2Routes(elevenLabsClient, fileStorage, appConfig)
             lipSyncV2Routes(elevenLabsClient, fileStorage, appConfig)
             renderRoutes(renderService, fileStorage)
+            separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig)
         }
     }
 }

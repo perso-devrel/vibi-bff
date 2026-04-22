@@ -131,6 +131,75 @@ data class RenderStatusResponse(
     val error: String? = null,
 )
 
+// --- Separation ---
+@Serializable
+data class SeparationSpec(
+    val mediaType: String,                  // "VIDEO" | "AUDIO"
+    val numberOfSpeakers: Int,
+    val sourceLanguageCode: String = "auto",
+) {
+    init {
+        require(mediaType == "VIDEO" || mediaType == "AUDIO") {
+            "mediaType must be VIDEO or AUDIO (got $mediaType)"
+        }
+        require(numberOfSpeakers in 1..10) {
+            "numberOfSpeakers must be in 1..10 (got $numberOfSpeakers)"
+        }
+    }
+}
+
+@Serializable
+data class SeparationResponse(val jobId: String)
+
+@Serializable
+data class StemInfo(
+    val stemId: String,
+    val label: String,
+    val url: String,
+    val durationMs: Long? = null,
+)
+
+@Serializable
+data class SeparationStatusResponse(
+    val jobId: String,
+    val status: String,
+    val progress: Int? = null,
+    val progressReason: String? = null,
+    val error: String? = null,
+    val stems: List<StemInfo> = emptyList(),
+    val mixJobId: String? = null,
+)
+
+@Serializable
+data class StemMixSelection(
+    val stemId: String,
+    val volume: Float = 1.0f,
+)
+
+@Serializable
+data class StemMixRequest(
+    val stems: List<StemMixSelection>,
+) {
+    init {
+        require(stems.isNotEmpty()) { "stems must not be empty" }
+        for (s in stems) {
+            require(s.volume >= 0f) { "stem volume must be >= 0 (got ${s.volume})" }
+        }
+    }
+}
+
+@Serializable
+data class StemMixResponse(val mixJobId: String)
+
+@Serializable
+data class StemMixStatusResponse(
+    val mixJobId: String,
+    val status: String,
+    val progress: Int? = null,
+    val error: String? = null,
+    val downloadUrl: String? = null,
+)
+
 // --- Lip-Sync ---
 @Serializable
 data class LipSyncRequest(
