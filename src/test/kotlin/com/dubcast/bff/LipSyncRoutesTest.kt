@@ -27,11 +27,7 @@ class LipSyncRoutesTest {
     private val testDir = File("C:/tmp/test-storage-lipsync")
     private lateinit var elevenLabsClient: ElevenLabsClient
     private lateinit var fileStorage: FileStorageService
-    private val appConfig = AppConfig(
-        elevenLabs = ElevenLabsConfig(apiKey = "test-key", baseUrl = "https://api.elevenlabs.io"),
-        storage = StorageConfig(basePath = testDir.path),
-        baseUrl = "http://localhost:8080",
-    )
+    private val appConfig = testAppConfig(storagePath = testDir.path)
 
     @BeforeTest
     fun setup() {

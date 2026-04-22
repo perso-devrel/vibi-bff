@@ -22,12 +22,12 @@ Build output: `C:/tmp/dubcast-bff-build`. Full env var table + API reference in 
 
 ## Structure
 
-- `Application.kt` — entry point, DI wiring, `ELEVENLABS_API_KEY` validation
+- `Application.kt` — entry point, DI wiring, `ELEVENLABS_API_KEY` + `PERSO_API_KEY` validation
 - `config/AppConfig.kt` — HOCON + env var loading
 - `plugins/` — CORS, serialization (`Json { ignoreUnknownKeys=true, encodeDefaults=true }`), error handling (StatusPages), routing
 - `routes/` — `/api/v1` (legacy JSON) and `/api/v2` (multipart, spec-aligned Android target)
-- `model/BffModels.kt` — BFF DTOs; `model/ElevenLabsModels.kt` — upstream DTOs (`@SerialName` snake_case → camelCase)
-- `service/` — `ElevenLabsClient`, `FileStorageService`, `AudioUtils`, `RenderService`
+- `model/BffModels.kt` — BFF DTOs; `model/ElevenLabsModels.kt`, `model/PersoModels.kt` — upstream DTOs (`@SerialName` snake_case → camelCase)
+- `service/` — `ElevenLabsClient`, `PersoClient`, `FileStorageService`, `AudioUtils`, `RenderService`, `SeparationService`, `StemMixService`, `SignedUrlService`
 
 ## Error handling
 
@@ -35,7 +35,7 @@ Build output: `C:/tmp/dubcast-bff-build`. Full env var table + API reference in 
 
 ## File serving
 
-Static mounts: `/files/tts/*`, `/files/lipsync/*`. Render outputs are **not** static-mounted — fetch via `GET /api/v2/render/{jobId}/download`.
+Static mounts: `/files/tts/*`, `/files/lipsync/*`. Render outputs are **not** static-mounted — fetch via `GET /api/v2/render/{jobId}/download`. Separation stems and stem-mix outputs require HMAC-signed tokens and are served via endpoints (never static-mounted).
 
 ## Testing
 
@@ -47,4 +47,5 @@ Load the relevant skill when touching that subsystem — these contain the detai
 
 - `render-pipeline` — ffmpeg pipeline, `RenderConfig`, segments, sticker overlays, Windows path escaping
 - `elevenlabs-integration` — upstream endpoints, dubbing status flow, v1/v2 differences
+- `separation-pipeline` — Perso upload 3-step, translate/poll/download, stem plan mapping, HMAC URL signing, mix-triggered dispose
 - `review` — code review checklist (triggered by "리뷰")
