@@ -9,6 +9,7 @@ import org.slf4j.LoggerFactory
 
 class NotFoundException(message: String) : RuntimeException(message)
 class ElevenLabsApiException(val statusCode: Int, val body: String) : RuntimeException("ElevenLabs API error $statusCode: $body")
+class PersoApiException(val statusCode: Int, val body: String) : RuntimeException("Perso API error $statusCode: $body")
 
 fun Application.configureErrorHandling() {
     val log = LoggerFactory.getLogger("ErrorHandling")
@@ -29,6 +30,23 @@ fun Application.configureErrorHandling() {
                 429 -> "Rate limit exceeded, please try again later"
                 in 400..499 -> "Invalid request to upstream service"
                 else -> "Upstream service unavailable"
+            }
+            call.respond(status, ErrorResponse(error = message))
+        }
+        exception<PersoApiException> { call, cause ->
+            log.error("Perso API error: {} - {}", cause.statusCode, cause.body)
+            val status = when (cause.statusCode) {
+                402 -> HttpStatusCode.PaymentRequired
+                429 -> HttpStatusCode.TooManyRequests
+                in 400..499 -> HttpStatusCode.BadRequest
+                else -> HttpStatusCode.BadGateway
+            }
+            val message = when (cause.statusCode) {
+                401 -> "Authentication failed with Perso"
+                402 -> "Insufficient Perso quota"
+                429 -> "Perso rate limit exceeded, please try again later"
+                in 400..499 -> "Invalid request to Perso"
+                else -> "Perso service unavailable"
             }
             call.respond(status, ErrorResponse(error = message))
         }
