@@ -11,6 +11,15 @@ class NotFoundException(message: String) : RuntimeException(message)
 class ElevenLabsApiException(val statusCode: Int, val body: String) : RuntimeException("ElevenLabs API error $statusCode: $body")
 class PersoApiException(val statusCode: Int, val body: String) : RuntimeException("Perso API error $statusCode: $body")
 
+// Structured API error: lets a handler specify the wire error code + detail
+// independently of a free-form message. Use for validation failures where
+// the client switches on the `error` field (e.g. "trim_end_exceeds_duration").
+class ApiErrorException(
+    val statusCode: HttpStatusCode,
+    val errorCode: String,
+    val detail: String? = null,
+) : RuntimeException("$errorCode${detail?.let { ": $it" } ?: ""}")
+
 fun Application.configureErrorHandling() {
     val log = LoggerFactory.getLogger("ErrorHandling")
 
@@ -49,6 +58,9 @@ fun Application.configureErrorHandling() {
                 else -> "Perso service unavailable"
             }
             call.respond(status, ErrorResponse(error = message))
+        }
+        exception<ApiErrorException> { call, cause ->
+            call.respond(cause.statusCode, ErrorResponse(error = cause.errorCode, detail = cause.detail))
         }
         exception<IllegalArgumentException> { call, cause ->
             call.respond(HttpStatusCode.BadRequest, ErrorResponse(error = cause.message ?: "Bad request"))
