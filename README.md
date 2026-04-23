@@ -191,9 +191,32 @@ pick and remix.
 {
   "mediaType": "VIDEO",          // "VIDEO" or "AUDIO"
   "numberOfSpeakers": 2,         // 1..10 — Perso has no auto-detect
-  "sourceLanguageCode": "auto"   // "auto" or ISO code like "ko"
+  "sourceLanguageCode": "auto",  // "auto" or ISO code like "ko"
+  "trimStartMs": 2000,           // optional — see "Optional trim" below
+  "trimEndMs": 8500              // optional — must be present iff trimStartMs is
 }
 ```
+
+##### Optional trim (`trimStartMs` / `trimEndMs`)
+
+When both fields are supplied, the BFF stream-copy cuts the uploaded file
+with ffmpeg before handing it to Perso, so only the selected window is
+processed (and billed). Omitting both is backwards-compatible: Perso
+receives the whole file. Validation:
+
+| Condition                              | Response                                                                 |
+|----------------------------------------|--------------------------------------------------------------------------|
+| only one of the two is present         | `400 partial_trim_range`                                                 |
+| `trimStartMs < 0`                      | `400 trim_start_negative`                                                |
+| `trimEndMs <= trimStartMs`             | `400 trim_range_invalid`                                                 |
+| window `< 500 ms`                      | `400 trim_range_too_short`                                               |
+| `trimEndMs` exceeds probed duration    | `400 trim_end_exceeds_duration` with `detail="trimEndMs=… duration=…"` |
+| ffprobe / ffmpeg fails                 | `500 ffmpeg_error`                                                       |
+
+> Any non-2xx from the trim stage disposes the uploaded file. Clients must
+> re-upload the source with a corrected `spec` rather than retrying against
+> the same upload. (`500` instead of `501` because 501 is semantically
+> *Not Implemented* — the ffmpeg call is available, it just failed.)
 
 #### Stems
 

@@ -137,6 +137,8 @@ data class SeparationSpec(
     val mediaType: String,                  // "VIDEO" | "AUDIO"
     val numberOfSpeakers: Int,
     val sourceLanguageCode: String = "auto",
+    val trimStartMs: Long? = null,
+    val trimEndMs: Long? = null,
 ) {
     init {
         require(mediaType == "VIDEO" || mediaType == "AUDIO") {
@@ -144,6 +146,17 @@ data class SeparationSpec(
         }
         require(numberOfSpeakers in 1..10) {
             "numberOfSpeakers must be in 1..10 (got $numberOfSpeakers)"
+        }
+        // Trim is optional; both must be present together. File-duration
+        // check lives in the route where ffprobe is available.
+        // NOTE: error messages are wire error codes — clients switch on
+        // `ErrorResponse.error`, so don't reword without updating the
+        // SeparationSpec contract in README + separation-pipeline skill.
+        require((trimStartMs == null) == (trimEndMs == null)) { "partial_trim_range" }
+        if (trimStartMs != null && trimEndMs != null) {
+            require(trimStartMs >= 0) { "trim_start_negative" }
+            require(trimEndMs > trimStartMs) { "trim_range_invalid" }
+            require(trimEndMs - trimStartMs >= 500) { "trim_range_too_short" }
         }
     }
 }

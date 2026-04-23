@@ -2,8 +2,10 @@ package com.dubcast.bff.routes
 
 import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.model.*
+import com.dubcast.bff.plugins.ApiErrorException
 import com.dubcast.bff.plugins.NotFoundException
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.MediaTrimmer
 import com.dubcast.bff.service.SeparationService
 import com.dubcast.bff.service.SignedUrlService
 import com.dubcast.bff.service.StemMixService
@@ -12,6 +14,8 @@ import io.ktor.http.content.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import kotlinx.serialization.json.Json
 import java.io.File
 
@@ -56,7 +60,9 @@ fun Route.separationRoutes(
 
             val file = sourceFile ?: throw IllegalArgumentException("file is required")
             val s = spec ?: throw IllegalArgumentException("spec is required")
-            val jobId = separationService.submit(file, s)
+
+            val pipelineInput = maybeTrim(file, s)
+            val jobId = separationService.submit(pipelineInput, s)
             call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = jobId))
         }
 
@@ -195,4 +201,51 @@ fun Route.separationRoutes(
             call.respondFile(job.outputFile)
         }
     }
+}
+
+/**
+ * If [spec] carries a trim range, probe the file, validate against its
+ * actual duration, then stream-copy cut the window with ffmpeg. The
+ * trimmed file replaces the original upload (here we delete the original
+ * to free disk before the upstream upload begins). Blocking ffprobe /
+ * ffmpeg calls run on [Dispatchers.IO] so the Netty worker isn't held
+ * while a 500 MB file is being cut. Throws [ApiErrorException] with
+ * error codes the client can branch on.
+ */
+internal suspend fun maybeTrim(file: File, spec: SeparationSpec): File = withContext(Dispatchers.IO) {
+    val start = spec.trimStartMs
+    val end = spec.trimEndMs
+    if (start == null || end == null) return@withContext file
+
+    val durationMs = MediaTrimmer.probeDurationMs(file)
+        ?: run {
+            file.delete()
+            throw ApiErrorException(
+                HttpStatusCode.InternalServerError,
+                "ffmpeg_error",
+                "Could not probe source duration",
+            )
+        }
+    if (end > durationMs) {
+        file.delete()
+        throw ApiErrorException(
+            HttpStatusCode.BadRequest,
+            "trim_end_exceeds_duration",
+            "trimEndMs=$end but file duration=$durationMs",
+        )
+    }
+
+    val ext = file.extension.ifEmpty { "bin" }
+    val trimmed = File(file.parentFile, "${file.nameWithoutExtension}.trimmed.$ext")
+    val ok = MediaTrimmer.trim(file, start, end, trimmed)
+    if (!ok) {
+        file.delete()
+        throw ApiErrorException(
+            HttpStatusCode.InternalServerError,
+            "ffmpeg_error",
+            "Trim extraction failed",
+        )
+    }
+    file.delete()
+    trimmed
 }
