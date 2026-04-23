@@ -1,10 +1,10 @@
 # DubCast BFF
 
 Kotlin/Ktor Backend-For-Frontend for the DubCast Android app. Proxies the
-ElevenLabs API (voices, TTS, dubbing/lip-sync), proxies Perso AI for audio
-source separation (background / all-voice / per-speaker stems, plus user-
-selected stem remix), and runs a local ffmpeg-based video render pipeline
-(dub audio mixing, sticker overlays, multi-segment concat, subtitle burn-in).
+ElevenLabs API (voices, TTS), proxies Perso AI for audio source separation
+(background / all-voice / per-speaker stems, plus user-selected stem remix),
+and runs a local ffmpeg-based video render pipeline (dub audio mixing,
+sticker overlays, multi-segment concat, subtitle burn-in).
 
 > Detailed architecture notes live in [`CLAUDE.md`](./CLAUDE.md). The OpenAPI
 > spec is at `src/main/resources/openapi/dubcast-bff.yaml` and is served at
@@ -42,7 +42,7 @@ Environment variables (also loadable from system env):
 | `PERSO_POLL_INTERVAL_MS`     | `5000`                   | Perso progress polling interval                       |
 | `PERSO_MAX_POLL_MINUTES`     | `30`                     | Separation job polling timeout                        |
 | `PORT`                       | `8080`                   | Server port                                          |
-| `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `tts/`, `lipsync/`, `render/`, `separation/`) |
+| `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `tts/`, `render/`, `separation/`) |
 | `BFF_BASE_URL`               | `http://localhost:8080`  | Public base URL used in download links               |
 | `CORS_ALLOWED_ORIGINS`       | *(blank = any)*          | Comma-separated allow-list. Android-only deployments can set a sentinel such as `android-only.invalid` to lock out browsers. |
 | `SEPARATION_SIGNING_SECRET`  | —                        | **Required.** HMAC key (≥32 chars) for stem / mix URL signing. Generate with `openssl rand -hex 32`. |
@@ -72,7 +72,7 @@ to `C:/tmp/dubcast-bff-build` (configured in `build.gradle.kts`).
 
 Once running:
 - Swagger UI: <http://localhost:8080/swagger>
-- Static files: `/files/tts/*`, `/files/lipsync/*`
+- Static files: `/files/tts/*`
 
 ## API Overview
 
@@ -87,7 +87,6 @@ for backwards compatibility.
 | POST   | `/api/v1/upload`         | Generic blob upload; returns `blobPath`     |
 | GET    | `/api/v1/voices`         | ElevenLabs voice list                       |
 | POST   | `/api/v1/tts`            | Text-to-speech; JSON body                   |
-| POST   | `/api/v1/lipsync`        | Lip-sync; JSON with `blobPath`s from upload |
 
 ### v2
 
@@ -95,9 +94,6 @@ for backwards compatibility.
 |--------|----------------------------------------------|---------------------------------------------------------------|
 | GET    | `/api/v2/voices`                             | Includes `language` (extracted from ElevenLabs labels)        |
 | POST   | `/api/v2/tts`                                | Response includes `durationMs` (parsed from MP3 frames)       |
-| POST   | `/api/v2/lipsync`                            | Multipart: `video`, `audio`, `targetLang`, `startMs`, `durationMs` |
-| GET    | `/api/v2/lipsync/{jobId}/status`             | Polling                                                       |
-| GET    | `/api/v2/lipsync/{jobId}/download`           | Binary mp4                                                    |
 | POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint))         |
 | GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`|
 | GET    | `/api/v2/render/{jobId}/download`            | Binary mp4 (no static mount)                                  |

@@ -6,25 +6,18 @@ import com.dubcast.bff.plugins.ElevenLabsApiException
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.request.*
-import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
 import kotlinx.coroutines.sync.Mutex
 import kotlinx.coroutines.sync.withLock
 import org.slf4j.LoggerFactory
-import kotlinx.io.asSource
-import kotlinx.io.buffered
 import java.io.File
-import java.io.FileInputStream
-import java.util.concurrent.ConcurrentHashMap
 
 class ElevenLabsClient(
     private val config: ElevenLabsConfig,
     private val httpClient: HttpClient,
     private val voicesCacheTtlMs: Long = 600_000,
-    private val lipSyncStatusTtlMs: Long = 2_000,
-    private val lipSyncStatusTerminalTtlMs: Long = 3_600_000,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
 
@@ -136,98 +129,4 @@ class ElevenLabsClient(
         }
     }
 
-    // --- Lip-Sync ---
-    suspend fun createLipSync(
-        videoFile: File,
-        audioFile: File,
-        targetLang: String = "en",
-        startMs: Long? = null,
-        durationMs: Long? = null,
-    ): ElevenLabsLipSyncResponse {
-        log.info("Creating lip-sync: video={}, audio={}, targetLang={}, startMs={}, durationMs={}", videoFile.name, audioFile.name, targetLang, startMs, durationMs)
-        val response = httpClient.submitFormWithBinaryData(
-            url = url("/v1/dubbing"),
-            formData = formData {
-                append("file", ChannelProvider(videoFile.length()) { ByteReadChannel(FileInputStream(videoFile).asSource().buffered()) }, Headers.build {
-                    append(HttpHeaders.ContentType, "video/mp4")
-                    append(HttpHeaders.ContentDisposition, "filename=\"${videoFile.name}\"")
-                })
-                append("file", ChannelProvider(audioFile.length()) { ByteReadChannel(FileInputStream(audioFile).asSource().buffered()) }, Headers.build {
-                    append(HttpHeaders.ContentType, "audio/mpeg")
-                    append(HttpHeaders.ContentDisposition, "filename=\"${audioFile.name}\"")
-                })
-                append("target_lang", targetLang)
-                append("mode", "automatic")
-                if (startMs != null || durationMs != null) {
-                    val startSec = (startMs ?: 0) / 1000
-                    append("start_time", startSec.toString())
-                    if (durationMs != null) {
-                        val endSec = ((startMs ?: 0) + durationMs) / 1000
-                        append("end_time", endSec.toString())
-                    }
-                }
-            }
-        ) {
-            header("xi-api-key", config.apiKey)
-        }
-        checkResponse(response)
-        return response.body()
-    }
-
-    private data class CachedLipSyncStatus(val status: ElevenLabsLipSyncStatus, val cachedAt: Long)
-
-    private val lipSyncStatusCache = ConcurrentHashMap<String, CachedLipSyncStatus>()
-
-    private fun isLipSyncTerminal(status: String) = status == "dubbed" || status == "failed"
-
-    suspend fun getLipSyncStatus(id: String): ElevenLabsLipSyncStatus {
-        val now = System.currentTimeMillis()
-        lipSyncStatusCache[id]?.let { cached ->
-            val ttl = if (isLipSyncTerminal(cached.status.status)) lipSyncStatusTerminalTtlMs else lipSyncStatusTtlMs
-            if (now - cached.cachedAt < ttl) return cached.status
-        }
-        val response = httpClient.get(url("/v1/dubbing/$id")) {
-            header("xi-api-key", config.apiKey)
-        }
-        checkResponse(response)
-        val fresh: ElevenLabsLipSyncStatus = response.body()
-        lipSyncStatusCache[id] = CachedLipSyncStatus(fresh, System.currentTimeMillis())
-        return fresh
-    }
-
-    private val downloadInFlight = ConcurrentHashMap<String, Boolean>()
-
-    suspend fun downloadLipSyncResult(id: String, langCode: String, targetFile: File) {
-        if (targetFile.exists()) return
-        if (downloadInFlight.putIfAbsent(id, true) != null) {
-            log.info("Download already in flight for id={}, waiting", id)
-            while (downloadInFlight.containsKey(id)) {
-                kotlinx.coroutines.delay(500)
-            }
-            return
-        }
-        try {
-            log.info("Downloading lip-sync result: id={}", id)
-            val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
-            httpClient.prepareGet(url("/v1/dubbing/$id/audio/$langCode")) {
-                header("xi-api-key", config.apiKey)
-            }.execute { response ->
-                checkResponse(response)
-                val channel = response.bodyAsChannel()
-                tempFile.outputStream().use { output ->
-                    val buffer = ByteArray(8192)
-                    while (!channel.isClosedForRead) {
-                        val bytesRead = channel.readAvailable(buffer)
-                        if (bytesRead > 0) {
-                            output.write(buffer, 0, bytesRead)
-                        }
-                    }
-                }
-            }
-            tempFile.renameTo(targetFile)
-            log.info("Downloaded lip-sync result to {} ({} bytes)", targetFile.path, targetFile.length())
-        } finally {
-            downloadInFlight.remove(id)
-        }
-    }
 }

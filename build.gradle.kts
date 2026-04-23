@@ -54,7 +54,13 @@ dependencies {
     testImplementation("io.mockk:mockk:1.13.13")
 }
 
-layout.buildDirectory = file("C:/tmp/dubcast-bff-build")
+// Windows 의 260자 경로 제한 회피용으로 짧은 절대경로를 쓰되, 다른 OS 는 기본값 사용.
+// 환경변수 DUBCAST_BFF_BUILD_DIR 로 명시 override 가능.
+val buildDirOverride = System.getenv("DUBCAST_BFF_BUILD_DIR")
+    ?: if (System.getProperty("os.name").lowercase().contains("win")) "C:/tmp/dubcast-bff-build" else null
+if (buildDirOverride != null) {
+    layout.buildDirectory = file(buildDirOverride)
+}
 
 tasks.withType<Test> {
     useJUnitPlatform()
