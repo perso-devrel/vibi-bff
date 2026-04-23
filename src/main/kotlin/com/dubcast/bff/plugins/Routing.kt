@@ -1,8 +1,6 @@
 package com.dubcast.bff.plugins
 
 import com.dubcast.bff.config.AppConfig
-import com.dubcast.bff.routes.lipSyncRoutes
-import com.dubcast.bff.routes.lipSyncV2Routes
 import com.dubcast.bff.routes.renderRoutes
 import com.dubcast.bff.routes.separationRoutes
 import com.dubcast.bff.routes.ttsRoutes
@@ -34,19 +32,16 @@ fun Application.configureRouting(
         swaggerUI(path = "swagger", swaggerFile = "openapi/dubcast-bff.yaml")
 
         staticFiles("/files/tts", File(appConfig.storage.basePath + "/tts"))
-        staticFiles("/files/lipsync", File(appConfig.storage.basePath + "/lipsync"))
 
         route("/api/v1") {
             uploadRoutes(fileStorage)
             voiceRoutes(elevenLabsClient)
             ttsRoutes(elevenLabsClient, fileStorage, appConfig)
-            lipSyncRoutes(elevenLabsClient, fileStorage, appConfig)
         }
 
         route("/api/v2") {
             voiceRoutes(elevenLabsClient)
             ttsV2Routes(elevenLabsClient, fileStorage, appConfig)
-            lipSyncV2Routes(elevenLabsClient, fileStorage, appConfig)
             renderRoutes(renderService, fileStorage)
             separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig)
         }

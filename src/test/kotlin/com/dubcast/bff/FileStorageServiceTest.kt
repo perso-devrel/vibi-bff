@@ -28,7 +28,6 @@ class FileStorageServiceTest {
     fun `init creates required directories`() {
         assertTrue(File(testDir, "uploads").exists())
         assertTrue(File(testDir, "tts").exists())
-        assertTrue(File(testDir, "lipsync").exists())
     }
 
     @Test
@@ -81,14 +80,6 @@ class FileStorageServiceTest {
 
         assertEquals("tts/req-123.mp3", blobPath)
         assertEquals(File(testDir, "tts/req-123.mp3").canonicalPath, file.canonicalPath)
-    }
-
-    @Test
-    fun `getLipSyncResultFile returns correct path`() {
-        val (file, path) = service.getLipSyncResultFile("ls-456")
-
-        assertEquals("lipsync/ls-456.mp4", path)
-        assertTrue(file.path.endsWith("ls-456.mp4"))
     }
 
     @Test

@@ -17,8 +17,6 @@ tags:
     description: ElevenLabs 보이스 목록
   - name: TTS
     description: Text-to-Speech 음성 생성
-  - name: Lip-Sync
-    description: 립싱크 영상 처리
 
 paths:
   /api/v1/upload:
@@ -114,75 +112,6 @@ paths:
               schema:
                 $ref: '#/components/schemas/ErrorResponse'
 
-  /api/v1/lipsync:
-    post:
-      tags: [Lip-Sync]
-      summary: 립싱크 요청
-      description: |
-        업로드된 비디오와 TTS 오디오를 이용해 립싱크 처리를 요청합니다.
-        비동기 작업이며, 반환된 id로 상태를 폴링합니다.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema:
-              $ref: '#/components/schemas/LipSyncRequest'
-            example:
-              videoBlobPath: "uploads/550e8400_video.mp4"
-              audioBlobPath: "uploads/660e8400_audio.mp3"
-      responses:
-        '200':
-          description: 립싱크 작업 생성됨
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LipSyncStatusResponse'
-              example:
-                id: "abc123"
-                status: "processing"
-
-  /api/v1/lipsync/{id}/status:
-    get:
-      tags: [Lip-Sync]
-      summary: 립싱크 상태 확인
-      description: |
-        립싱크 작업의 진행 상태를 확인합니다.
-        - processing: 처리 중
-        - completed: 완료 (outputVideoUrl 포함)
-        - failed: 실패 (error 포함)
-      parameters:
-        - name: id
-          in: path
-          required: true
-          schema:
-            type: string
-          description: 립싱크 작업 ID
-      responses:
-        '200':
-          description: 상태 정보
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/LipSyncStatusResponse'
-              examples:
-                processing:
-                  summary: 처리 중
-                  value:
-                    id: "abc123"
-                    status: "processing"
-                completed:
-                  summary: 완료
-                  value:
-                    id: "abc123"
-                    status: "completed"
-                    outputVideoUrl: "http://localhost:8080/files/lipsync/abc123.mp4"
-                failed:
-                  summary: 실패
-                  value:
-                    id: "abc123"
-                    status: "failed"
-                    error: "Processing error"
-
 components:
   schemas:
     UploadResponse:
@@ -275,33 +204,3 @@ components:
           type: string
           description: 생성된 오디오 파일 다운로드 URL
 
-    LipSyncRequest:
-      type: object
-      required: [videoBlobPath, audioBlobPath]
-      properties:
-        videoBlobPath:
-          type: string
-          description: 업로드된 비디오 파일의 blob 경로
-        audioBlobPath:
-          type: string
-          description: TTS로 생성된 오디오 파일의 blob 경로
-
-    LipSyncStatusResponse:
-      type: object
-      required: [id, status]
-      properties:
-        id:
-          type: string
-          description: 립싱크 작업 ID
-        status:
-          type: string
-          enum: [processing, completed, failed]
-          description: 작업 상태
-        outputVideoUrl:
-          type: string
-          nullable: true
-          description: 완료 시 결과 비디오 URL
-        error:
-          type: string
-          nullable: true
-          description: 실패 시 에러 메시지

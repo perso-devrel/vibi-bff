@@ -36,17 +36,3 @@ data class ElevenLabsVoiceSettings(
     @SerialName("similarity_boost") val similarityBoost: Float,
 )
 
-// --- Lip-Sync ---
-@Serializable
-data class ElevenLabsLipSyncResponse(
-    @SerialName("dubbing_id") val id: String,
-    val status: String? = null,
-)
-
-@Serializable
-data class ElevenLabsLipSyncStatus(
-    @SerialName("dubbing_id") val id: String,
-    val status: String,
-    @SerialName("target_languages") val targetLanguages: List<String> = emptyList(),
-    val error: String? = null,
-)

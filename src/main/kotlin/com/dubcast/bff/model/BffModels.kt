@@ -213,17 +213,3 @@ data class StemMixStatusResponse(
     val downloadUrl: String? = null,
 )
 
-// --- Lip-Sync ---
-@Serializable
-data class LipSyncRequest(
-    val videoBlobPath: String,
-    val audioBlobPath: String,
-)
-
-@Serializable
-data class LipSyncStatusResponse(
-    val id: String,
-    val status: String,
-    val outputVideoUrl: String? = null,
-    val error: String? = null,
-)

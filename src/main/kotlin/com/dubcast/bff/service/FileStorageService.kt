@@ -12,14 +12,12 @@ class FileStorageService(private val config: StorageConfig) {
     private val baseDir get() = File(config.basePath)
     private val uploadsDir get() = File(baseDir, "uploads")
     private val ttsDir get() = File(baseDir, "tts")
-    private val lipsyncDir get() = File(baseDir, "lipsync")
     val renderDir get() = File(baseDir, "render")
     val separationDir get() = File(baseDir, "separation")
 
     fun init() {
         uploadsDir.mkdirs()
         ttsDir.mkdirs()
-        lipsyncDir.mkdirs()
         renderDir.mkdirs()
         separationDir.mkdirs()
         File(separationDir, "mix").mkdirs()
@@ -66,14 +64,6 @@ class FileStorageService(private val config: StorageConfig) {
         val target = File(ttsDir, "$requestId.mp3")
         val blobPath = "tts/$requestId.mp3"
         return target to blobPath
-    }
-
-    fun getLipSyncResultFile(lipSyncId: String): Pair<File, String> {
-        val target = File(lipsyncDir, "$lipSyncId.mp4")
-        require(target.canonicalPath.startsWith(lipsyncDir.canonicalPath)) {
-            "Invalid lip-sync ID: $lipSyncId"
-        }
-        return target to "lipsync/$lipSyncId.mp4"
     }
 
     fun resolveDownloadUrl(baseUrl: String, filePath: String): String {
