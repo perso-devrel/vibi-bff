@@ -6,8 +6,6 @@ import com.dubcast.bff.model.StemInfo
 import com.dubcast.bff.plugins.PersoApiException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
-import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import org.slf4j.LoggerFactory
 import java.io.File
@@ -142,7 +140,12 @@ class SeparationService(
         )
 
         job.status = "PROCESSING"
-        pollUntilComplete(job, projectSeq)
+        pollPersoUntilComplete(
+            persoClient, scope, projectSeq, pollIntervalMs, maxPollMinutes,
+        ) { progress, reason ->
+            job.progress = progress
+            job.progressReason = reason
+        }
 
         job.status = "DOWNLOADING"
         val plans = buildStemPlans(spec.numberOfSpeakers)
@@ -177,24 +180,6 @@ class SeparationService(
         job.progressReason = "Completed"
         job.status = "READY"
         log.info("Separation READY: jobId={} stems={}", job.jobId, local.map { it.stemId })
-    }
-
-    private suspend fun pollUntilComplete(job: SeparationJob, projectSeq: Long) {
-        val deadline = System.currentTimeMillis() + maxPollMinutes * 60_000L
-        while (scope.isActive) {
-            if (System.currentTimeMillis() > deadline) {
-                throw RuntimeException("Perso polling timed out after $maxPollMinutes minutes")
-            }
-            val p = persoClient.getProgress(projectSeq)
-            job.progress = p.progress
-            job.progressReason = p.progressReason
-            when {
-                p.hasFailed || p.progressReason == "Failed" ->
-                    throw PersoApiException(500, "Perso reported failure: ${p.progressReason}")
-                p.progressReason == "Completed" -> return
-            }
-            delay(pollIntervalMs)
-        }
     }
 
     // Intentionally ignores entry.name — we rename to speaker_{idx}.mp3 under
