@@ -32,7 +32,7 @@ class SeparationRoutesTest {
     @BeforeTest
     fun setup() {
         testDir.deleteRecursively()
-        fileStorage = FileStorageService(appConfig.storage).also { it.init() }
+        fileStorage = FileStorageService(appConfig.storage)
         separationService = mockk(relaxed = true)
         stemMixService = mockk(relaxed = true)
         signer = SignedUrlService(appConfig.separation.signingSecret)

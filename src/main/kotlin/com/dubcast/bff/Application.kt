@@ -2,8 +2,11 @@ package com.dubcast.bff
 
 import com.dubcast.bff.config.loadConfig
 import com.dubcast.bff.plugins.*
+import com.dubcast.bff.service.AutoDubService
+import com.dubcast.bff.service.AutoSubtitleService
 import com.dubcast.bff.service.ElevenLabsClient
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.GeminiClient
 import com.dubcast.bff.service.PersoClient
 import com.dubcast.bff.service.RenderService
 import com.dubcast.bff.service.SeparationService
@@ -50,6 +53,9 @@ fun Application.module() {
     require(appConfig.perso.apiKey.isNotBlank()) {
         "PERSO_API_KEY environment variable must be set"
     }
+    // Vertex AI / Gemini credentials are validated lazily on the first
+    // translation call, so the server can boot without them in dev when
+    // subtitle translation isn't being exercised.
 
     val httpClient = HttpClient(CIO) {
         install(ContentNegotiation) {
@@ -68,9 +74,9 @@ fun Application.module() {
         }
     }
 
-    val fileStorage = FileStorageService(appConfig.storage).also { it.init() }
+    val fileStorage = FileStorageService(appConfig.storage)
     val elevenLabsClient = ElevenLabsClient(appConfig.elevenLabs, httpClient)
-    val renderService = RenderService(fileStorage.renderDir).also { it.init() }
+    val renderService = RenderService(fileStorage.renderDir)
 
     val persoClient = PersoClient(appConfig.perso, httpClient)
     val signedUrlService = SignedUrlService(appConfig.separation.signingSecret)
@@ -80,11 +86,26 @@ fun Application.module() {
         config = appConfig.separation,
         pollIntervalMs = appConfig.perso.pollIntervalMs,
         maxPollMinutes = appConfig.perso.maxPollMinutes,
-    ).also { it.init() }
+    )
     val stemMixService = StemMixService(
         mixDir = File(fileStorage.separationDir, "mix"),
         mixTtlMs = appConfig.separation.mixTtlMs,
-    ).also { it.init() }
+    )
+
+    val geminiClient = GeminiClient(appConfig.gemini, httpClient)
+    val autoSubtitleService = AutoSubtitleService(
+        persoClient = persoClient,
+        geminiClient = geminiClient,
+        outputDir = File(fileStorage.separationDir.parentFile, "subtitles"),
+        pollIntervalMs = appConfig.perso.pollIntervalMs,
+        maxPollMinutes = appConfig.perso.maxPollMinutes,
+    )
+    val autoDubService = AutoDubService(
+        persoClient = persoClient,
+        outputDir = File(fileStorage.separationDir.parentFile, "autodub"),
+        pollIntervalMs = appConfig.perso.pollIntervalMs,
+        maxPollMinutes = appConfig.perso.maxPollMinutes,
+    )
 
     install(CallLogging) {
         level = Level.INFO
@@ -107,12 +128,18 @@ fun Application.module() {
     configureRouting(
         fileStorage, elevenLabsClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
+        autoSubtitleService, autoDubService,
     )
 
+    val shutdownHooks: List<() -> Unit> = listOf(
+        httpClient::close,
+        renderService::shutdown,
+        separationService::shutdown,
+        stemMixService::shutdown,
+        autoSubtitleService::shutdown,
+        autoDubService::shutdown,
+    )
     monitor.subscribe(ApplicationStopped) {
-        httpClient.close()
-        renderService.shutdown()
-        separationService.shutdown()
-        stemMixService.shutdown()
+        shutdownHooks.forEach { it() }
     }
 }

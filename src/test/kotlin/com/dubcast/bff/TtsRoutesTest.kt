@@ -30,7 +30,7 @@ class TtsRoutesTest {
     fun setup() {
         testDir.deleteRecursively()
         elevenLabsClient = mockk()
-        fileStorage = FileStorageService(appConfig.storage).also { it.init() }
+        fileStorage = FileStorageService(appConfig.storage)
     }
 
     @AfterTest

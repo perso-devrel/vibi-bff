@@ -45,7 +45,7 @@ class AutoDubService(
         Thread(r, "autodub-cleanup").apply { isDaemon = true }
     }
 
-    fun init() {
+    init {
         outputDir.mkdirs()
         cleanup.scheduleAtFixedRate(::cleanupExpired, 10, 10, TimeUnit.MINUTES)
     }

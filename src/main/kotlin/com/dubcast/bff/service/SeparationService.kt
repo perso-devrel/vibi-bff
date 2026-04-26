@@ -57,7 +57,7 @@ class SeparationService(
         Thread(r, "separation-cleanup").apply { isDaemon = true }
     }
 
-    fun init() {
+    init {
         separationDir.mkdirs()
         cleanup.scheduleAtFixedRate(::cleanupAbandoned, 10, 10, TimeUnit.MINUTES)
     }

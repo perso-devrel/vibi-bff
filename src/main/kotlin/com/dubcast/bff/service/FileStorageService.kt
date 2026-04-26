@@ -15,7 +15,7 @@ class FileStorageService(private val config: StorageConfig) {
     val renderDir get() = File(baseDir, "render")
     val separationDir get() = File(baseDir, "separation")
 
-    fun init() {
+    init {
         uploadsDir.mkdirs()
         ttsDir.mkdirs()
         renderDir.mkdirs()

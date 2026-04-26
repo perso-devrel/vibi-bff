@@ -33,7 +33,7 @@ class UploadRoutesTest {
     }
 
     private fun testApp(block: suspend ApplicationTestBuilder.() -> Unit) = testApplication {
-        val fileStorage = FileStorageService(StorageConfig(testDir.path)).also { it.init() }
+        val fileStorage = FileStorageService(StorageConfig(testDir.path))
 
         application {
             configureSerialization()

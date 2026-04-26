@@ -31,7 +31,7 @@ class StemMixService(
         Thread(r, "stem-mix-cleanup").apply { isDaemon = true }
     }
 
-    fun init() {
+    init {
         mixDir.mkdirs()
         cleanup.scheduleAtFixedRate(::cleanupExpired, 5, 5, TimeUnit.MINUTES)
     }

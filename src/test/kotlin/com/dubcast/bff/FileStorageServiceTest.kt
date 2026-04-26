@@ -16,7 +16,6 @@ class FileStorageServiceTest {
     fun setup() {
         testDir.deleteRecursively()
         service = FileStorageService(config)
-        service.init()
     }
 
     @AfterTest

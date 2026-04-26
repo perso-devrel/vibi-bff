@@ -44,7 +44,7 @@ class RenderService(
         Thread(r, "render-cleanup").apply { isDaemon = true }
     }
 
-    fun init() {
+    init {
         renderDir.mkdirs()
         cleanup.scheduleAtFixedRate(::cleanupExpiredJobs, 10, 10, TimeUnit.MINUTES)
         log.info("Render directory initialized at {}", renderDir.absolutePath)

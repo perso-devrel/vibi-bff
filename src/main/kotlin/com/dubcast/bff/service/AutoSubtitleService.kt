@@ -51,7 +51,7 @@ class AutoSubtitleService(
         Thread(r, "subtitle-cleanup").apply { isDaemon = true }
     }
 
-    fun init() {
+    init {
         outputDir.mkdirs()
         cleanup.scheduleAtFixedRate(::cleanupExpired, 10, 10, TimeUnit.MINUTES)
     }
