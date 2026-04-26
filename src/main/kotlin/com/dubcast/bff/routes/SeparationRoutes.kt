@@ -10,13 +10,11 @@ import com.dubcast.bff.service.SeparationService
 import com.dubcast.bff.service.SignedUrlService
 import com.dubcast.bff.service.StemMixService
 import io.ktor.http.*
-import io.ktor.http.content.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
-import kotlinx.serialization.json.Json
 import java.io.File
 
 private const val MAX_SEPARATION_FILE_SIZE = 500L * 1024 * 1024 // 500MB
@@ -31,38 +29,11 @@ fun Route.separationRoutes(
     route("/separate") {
         // POST /api/v2/separate — submit job
         post {
-            val multipart = call.receiveMultipart()
-            var sourceFile: File? = null
-            var spec: SeparationSpec? = null
-
-            multipart.forEachPart { part ->
-                when (part) {
-                    is PartData.FileItem -> {
-                        if (part.name == "file") {
-                            @Suppress("DEPRECATION")
-                            val blobPath = fileStorage.saveUpload(
-                                part.originalFileName ?: "source.bin",
-                                part.streamProvider(),
-                                MAX_SEPARATION_FILE_SIZE,
-                            )
-                            sourceFile = fileStorage.getUploadFile(blobPath)
-                        }
-                    }
-                    is PartData.FormItem -> {
-                        if (part.name == "spec") {
-                            spec = Json.decodeFromString<SeparationSpec>(part.value)
-                        }
-                    }
-                    else -> {}
-                }
-                part.dispose()
-            }
-
-            val file = sourceFile ?: throw IllegalArgumentException("file is required")
-            val s = spec ?: throw IllegalArgumentException("spec is required")
-
-            val pipelineInput = maybeTrim(file, s)
-            val jobId = separationService.submit(pipelineInput, s)
+            val (file, spec) = parseUploadAndSpec<SeparationSpec>(
+                call.receiveMultipart(), fileStorage, MAX_SEPARATION_FILE_SIZE,
+            )
+            val pipelineInput = maybeTrim(file, spec)
+            val jobId = separationService.submit(pipelineInput, spec)
             call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = jobId))
         }
 
