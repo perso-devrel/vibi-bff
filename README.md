@@ -1,14 +1,18 @@
-# DubCast BFF
+# vibi BFF
 
-Kotlin/Ktor Backend-For-Frontend for the DubCast Android app. Proxies the
-ElevenLabs API (voices, TTS), proxies Perso AI for audio source separation
+Kotlin/Ktor Backend-For-Frontend for the vibi mobile app (Android + iOS, KMP/CMP).
+Proxies the ElevenLabs API (voices, TTS), proxies Perso AI for audio source separation
 (background / all-voice / per-speaker stems, plus user-selected stem remix),
 and runs a local ffmpeg-based video render pipeline (dub audio mixing,
 sticker overlays, multi-segment concat, subtitle burn-in).
 
 > Detailed architecture notes live in [`CLAUDE.md`](./CLAUDE.md). The OpenAPI
-> spec is at `src/main/resources/openapi/dubcast-bff.yaml` and is served at
-> `/swagger` when the app is running.
+> spec is at `src/main/resources/openapi/dubcast-bff.yaml` (filename is legacy)
+> and is served at `/swagger` when the app is running.
+>
+> The folder is now `vibi-bff/`, but Kotlin packages (`com.dubcast.bff.*`),
+> the build-output path (`C:/tmp/dubcast-bff-build`), and the OpenAPI filename
+> still use the legacy `dubcast` name. Package migration is tracked separately.
 
 ## Prerequisites
 
@@ -72,13 +76,13 @@ to `C:/tmp/dubcast-bff-build` (configured in `build.gradle.kts`).
 
 Once running:
 - Swagger UI: <http://localhost:8080/swagger>
-- Static files: `/files/tts/*`
+- Static files: `/files/tts/*`, `/files/lipsync/*` (render outputs / separation stems / mix outputs are **not** static-mounted — see API section below)
 
 ## API Overview
 
 Two versioned surfaces are mounted under `/api/v1` and `/api/v2`.
-v2 is the spec-aligned surface the Android client targets; v1 is retained
-for backwards compatibility.
+v2 is the spec-aligned surface the mobile client (Android + iOS) targets;
+v1 is retained for backwards compatibility.
 
 ### v1 (legacy)
 
@@ -172,7 +176,7 @@ that output resolution. `imageClips` are gated via ffmpeg `enable='between(t,…
 ### Separation endpoints
 
 `POST /api/v2/separate` uploads a video or audio file, submits it to Perso's
-dubbing pipeline, and exposes the byproduct stems for the Android client to
+dubbing pipeline, and exposes the byproduct stems for the mobile client to
 pick and remix.
 
 #### Multipart fields
@@ -283,7 +287,7 @@ src/main/kotlin/com/dubcast/bff/
 Tests run with Ktor `testApplication` + MockK. Test files mirror route files
 (e.g. `TtsRoutesTest.kt` covers `TtsRoutes.kt`). The render service is not
 currently covered by tests — it spawns real ffmpeg processes and is exercised
-end-to-end against the Android client.
+end-to-end against the mobile client.
 
 ## Troubleshooting
 
