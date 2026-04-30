@@ -8,6 +8,21 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class PersoEnvelope<T>(val result: T)
 
+// --- Languages: 지원 타깃 언어 목록 (GET /video-translator/api/v1/languages) ---
+@Serializable
+data class PersoLanguage(
+    val code: String,
+    val name: String,
+    @SerialName("native_name") val nativeName: String? = null,
+    @SerialName("supports_dubbing") val supportsDubbing: Boolean = true,
+    @SerialName("supports_subtitles") val supportsSubtitles: Boolean = true,
+)
+
+@Serializable
+data class PersoLanguagesResponse(
+    val languages: List<PersoLanguage> = emptyList(),
+)
+
 // --- Upload: SAS token ---
 @Serializable
 data class PersoSasTokenResponse(
@@ -32,6 +47,52 @@ data class PersoMediaRegistration(
     val thumbnailFilePath: String? = null,
     val size: Long? = null,
     val durationMs: Long? = null,
+)
+
+// --- STT / Audio-separation submit (전용 endpoint) ---
+// `POST /video-translator/api/v1/projects/spaces/{spaceSeq}/stt`
+// `POST /video-translator/api/v1/projects/spaces/{spaceSeq}/audio-separation`
+// 두 endpoint 가 request body 형식이 동일.
+@Serializable
+data class PersoSttRequest(
+    val mediaSeq: Long,
+    val isVideoProject: Boolean,
+    val title: String? = null,
+)
+
+@Serializable
+data class PersoAudioSeparationRequest(
+    val mediaSeq: Long,
+    val isVideoProject: Boolean,
+    val title: String? = null,
+)
+
+// STT/audio-separation script — sentences + speakers (paginated by nextCursorId).
+// `audioUrl` 은 audio-separation 응답에만 존재 (STT 는 null).
+@Serializable
+data class PersoScriptResponse(
+    val hasNext: Boolean = false,
+    val nextCursorId: Long? = null,
+    val sentences: List<PersoScriptSentence> = emptyList(),
+    val speakers: List<PersoScriptSpeaker> = emptyList(),
+)
+
+@Serializable
+data class PersoScriptSentence(
+    val seq: Long,
+    val externalScriptSeq: String? = null,
+    val speakerOrderIndex: Int = 1,
+    val offsetMs: Long = 0,
+    val durationMs: Long = 0,
+    val originalDraftText: String? = null,
+    val originalText: String? = null,
+    val audioUrl: String? = null,
+)
+
+@Serializable
+data class PersoScriptSpeaker(
+    val speakerOrderIndex: Int,
+    val externalSpeakerSeq: String? = null,
 )
 
 // --- Translate submit ---
@@ -106,6 +167,8 @@ data class PersoAudioFileLinks(
     val backgroundAudioDownloadLink: String? = null,
     val voiceWithBackgroundAudioDownloadLink: String? = null,
     val translatedAudioDownloadLink: String? = null,
+    /** target=translatedVoice 응답의 더빙 오디오 링크 — 정식 필드. */
+    val translatedVoiceDownloadLink: String? = null,
     // Speaker collection (typically ZIP); field name is best-effort —
     // Perso returns it for target=originalVoiceSpeakers. Keep loose parsing
     // via ignoreUnknownKeys = true in the client Json config.

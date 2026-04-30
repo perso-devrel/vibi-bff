@@ -1,5 +1,7 @@
 package com.dubcast.bff
 
+import com.dubcast.bff.service.DirectiveStem
+import com.dubcast.bff.service.DirectiveWithStemFiles
 import com.dubcast.bff.service.RenderService
 import java.io.File
 import kotlin.test.*
@@ -69,5 +71,64 @@ class RenderServiceUtilsTest {
         // coroutine indefinitely.
         assertFailsWith<IllegalArgumentException> { service.atempoChain(0.0f) }
         assertFailsWith<IllegalArgumentException> { service.atempoChain(-1.0f) }
+    }
+
+    // ── separationDirectives → ffmpeg command ────────────────────────────────
+
+    @Test
+    fun `buildFfmpegCommand wires directive stems into amix and mutes base`() {
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-stems").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val stem0 = File(tmp, "s0.mp3").apply { writeText("x") }
+        val stem1 = File(tmp, "s1.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            audioFiles = emptyMap(),
+            imageFiles = emptyMap(),
+            subtitlesFile = null,
+            dubClips = emptyList(),
+            imageClips = emptyList(),
+            videoDurationMs = 10_000,
+            outputFile = out,
+            separationDirectives = listOf(
+                DirectiveWithStemFiles(
+                    rangeStartMs = 1000,
+                    rangeEndMs = 4000,
+                    muteOriginalSegmentAudio = true,
+                    stems = listOf(
+                        DirectiveStem(file = stem0, volume = 1.0f),
+                        DirectiveStem(file = stem1, volume = 0.5f),
+                    ),
+                ),
+            ),
+        )
+
+        // stem 파일들이 -i 입력으로 추가됐는지
+        assertTrue(cmd.contains(stem0.absolutePath), "stem0 not in inputs: $cmd")
+        assertTrue(cmd.contains(stem1.absolutePath), "stem1 not in inputs: $cmd")
+
+        // filter_complex 내용 점검
+        val filterIdx = cmd.indexOf("-filter_complex")
+        assertTrue(filterIdx >= 0)
+        val filter = cmd[filterIdx + 1]
+
+        // base mute (rangeStartMs=1000 → 1.0s, rangeEndMs=4000 → 4.0s)
+        assertTrue(
+            filter.contains("[0:a]volume=enable='gt(between(t,1.0,4.0),0)':volume=0[base_muted]"),
+            "expected base mute filter not found in: $filter",
+        )
+        // stem filters with atrim+adelay+volume
+        assertTrue(
+            filter.contains("atrim=0:3.0,asetpts=PTS-STARTPTS,adelay=1000|1000,volume=1.0[stem_0_0]"),
+            "expected stem_0_0 filter not found in: $filter",
+        )
+        assertTrue(
+            filter.contains("atrim=0:3.0,asetpts=PTS-STARTPTS,adelay=1000|1000,volume=0.5[stem_0_1]"),
+            "expected stem_0_1 filter not found in: $filter",
+        )
+        // stems and base_muted go into the final amix
+        assertTrue(filter.contains("[base_muted][stem_0_0][stem_0_1]amix="), "amix wiring missing in: $filter")
     }
 }

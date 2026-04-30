@@ -68,6 +68,7 @@ class PersoClient(
     // ── Step 3: Register media with Perso backend ────────────────────────────
     // The `fileUrl` must be the SAS URL with the ?query-string stripped —
     // Perso stores the path-only form and signs its own reads internally.
+    // Perso 가 일시적 5xx (특히 F5001 INTERNAL_SERVER_ERROR) 던질 때가 있어 짧은 backoff 재시도.
     suspend fun registerMedia(
         mediaType: PersoMediaType,
         sasUrl: String,
@@ -78,17 +79,29 @@ class PersoClient(
             PersoMediaType.AUDIO -> "/file/api/upload/audio"
         }
         val fileUrl = sasUrl.substringBefore('?')
-        val response = httpClient.put(url(path)) {
-            authHeader()
-            contentType(ContentType.Application.Json)
-            setBody(PersoRegisterMediaRequest(
-                spaceSeq = config.spaceSeq,
-                fileUrl = fileUrl,
-                fileName = fileName,
-            ))
+        var lastErr: PersoApiException? = null
+        repeat(3) { attempt ->
+            try {
+                val response = httpClient.put(url(path)) {
+                    authHeader()
+                    contentType(ContentType.Application.Json)
+                    setBody(PersoRegisterMediaRequest(
+                        spaceSeq = config.spaceSeq,
+                        fileUrl = fileUrl,
+                        fileName = fileName,
+                    ))
+                }
+                checkResponse(response)
+                return response.body()
+            } catch (e: PersoApiException) {
+                lastErr = e
+                // 4xx (인증/요청 오류) 는 retry 의미 없음 — 즉시 throw.
+                if (e.statusCode in 400..499) throw e
+                log.warn("registerMedia {} (attempt {}/3) — retrying in 3s: {}", e.statusCode, attempt + 1, e.message)
+                kotlinx.coroutines.delay(3000)
+            }
         }
-        checkResponse(response)
-        return response.body()
+        throw lastErr ?: RuntimeException("Perso registerMedia failed after retries")
     }
 
     // Convenience: SAS + blob upload + register in one call.
@@ -97,6 +110,104 @@ class PersoClient(
         val sas = getSasToken(file.name)
         uploadToBlob(sas.blobSasUrl, file)
         return registerMedia(mediaType, sas.blobSasUrl, file.name)
+    }
+
+    // ── STT (전용) ───────────────────────────────────────────────────────────
+    // 자막 생성 전용. `submitTranslate` source==target 트릭 폐기 — Perso 가 정식 STT API 제공.
+    suspend fun submitStt(
+        mediaSeq: Long,
+        isVideoProject: Boolean,
+        title: String? = null,
+    ): Long {
+        val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/stt")) {
+            authHeader()
+            contentType(ContentType.Application.Json)
+            setBody(PersoSttRequest(mediaSeq, isVideoProject, title))
+        }
+        checkResponse(response)
+        val env: PersoEnvelope<PersoTranslateResult> = response.body()
+        val first = env.result.startGenerateProjectIdList.firstOrNull()
+            ?: throw PersoApiException(500, "Perso STT returned empty startGenerateProjectIdList")
+        log.info("Perso STT project submitted: projectSeq={}, mediaSeq={}", first, mediaSeq)
+        return first
+    }
+
+    suspend fun applySttChanges(projectSeq: Long) {
+        val response = httpClient.post(url(
+            "/video-translator/api/v1/project/$projectSeq/space/${config.spaceSeq}/stt/apply-changes"
+        )) { authHeader() }
+        checkResponse(response)
+    }
+
+    // STT script — paginated. `cursorId` null=처음부터, 응답의 `nextCursorId` 를 다음 호출에 전달.
+    suspend fun getSttScript(projectSeq: Long, cursorId: Long? = null): PersoScriptResponse {
+        val response = httpClient.get(url(
+            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/stt/script"
+        )) {
+            authHeader()
+            if (cursorId != null) parameter("cursorId", cursorId)
+        }
+        checkResponse(response)
+        return response.body()
+    }
+
+    // ── Audio Separation (전용) ─────────────────────────────────────────────
+    // 음성분리 전용. 응답은 화자별 utterance 단위 audioUrl 의 paginated stream.
+    suspend fun submitAudioSeparation(
+        mediaSeq: Long,
+        isVideoProject: Boolean,
+        title: String? = null,
+    ): Long {
+        val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/audio-separation")) {
+            authHeader()
+            contentType(ContentType.Application.Json)
+            setBody(PersoAudioSeparationRequest(mediaSeq, isVideoProject, title))
+        }
+        checkResponse(response)
+        val env: PersoEnvelope<PersoTranslateResult> = response.body()
+        val first = env.result.startGenerateProjectIdList.firstOrNull()
+            ?: throw PersoApiException(500, "Perso audio-separation returned empty startGenerateProjectIdList")
+        log.info("Perso audio-separation project submitted: projectSeq={}, mediaSeq={}", first, mediaSeq)
+        return first
+    }
+
+    suspend fun getAudioSeparationScript(projectSeq: Long, cursorId: Long? = null): PersoScriptResponse {
+        val response = httpClient.get(url(
+            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/audio-separation/script"
+        )) {
+            authHeader()
+            if (cursorId != null) parameter("cursorId", cursorId)
+        }
+        checkResponse(response)
+        return response.body()
+    }
+
+    // 인증이 필요한 Perso 내부 endpoint (예: 상대 경로 audioUrl `/perso-storage/...`) 다운로드.
+    // SAS pre-signed URL 은 `streamDownload` 사용 (헤더 X). 둘을 분리해서 잘못된 헤더가 SAS 서명 깨뜨리는
+    // 케이스 방지.
+    suspend fun streamDownloadAuthorized(downloadUrl: String, targetFile: File) {
+        val absUrl = if (downloadUrl.startsWith("http")) downloadUrl else url(downloadUrl)
+        val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
+        try {
+            httpClient.prepareGet(absUrl) { authHeader() }.execute { response ->
+                checkResponse(response)
+                val channel = response.bodyAsChannel()
+                tempFile.outputStream().use { output ->
+                    val buffer = ByteArray(8192)
+                    while (!channel.isClosedForRead) {
+                        val bytesRead = channel.readAvailable(buffer)
+                        if (bytesRead > 0) output.write(buffer, 0, bytesRead)
+                    }
+                }
+            }
+            if (!tempFile.renameTo(targetFile)) {
+                tempFile.delete()
+                throw RuntimeException("Failed to rename download temp file to ${targetFile.absolutePath}")
+            }
+        } catch (e: Throwable) {
+            tempFile.delete()
+            throw e
+        }
     }
 
     // ── Translate / submit ───────────────────────────────────────────────────
@@ -139,23 +250,53 @@ class PersoClient(
 
     // ── Download info / links ────────────────────────────────────────────────
     suspend fun getDownloadInfo(projectSeq: Long): PersoDownloadInfo {
-        val response = httpClient.get(url(
-            "/file/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download-info"
-        )) { authHeader() }
-        checkResponse(response)
-        // download-info is NOT enveloped per the doc — parsed directly.
-        return response.body()
+        val targetPath = "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download-info"
+        log.info("Perso getDownloadInfo: GET {}{}", config.baseUrl, targetPath)
+        val response = httpClient.get(url(targetPath)) { authHeader() }
+        if (!response.status.isSuccess()) {
+            val body = response.bodyAsText()
+            log.error("Perso getDownloadInfo failed: status={} body={} url={}{}",
+                response.status.value, body, config.baseUrl, targetPath)
+            throw PersoApiException(response.status.value, body)
+        }
+        // Perso download-info 응답은 envelope `{"result":{...}}` — envelope 벗겨야 함.
+        return response.body<PersoEnvelope<PersoDownloadInfo>>().result
     }
 
     suspend fun getDownloadLinks(projectSeq: Long, target: String): PersoDownloadLinksResult {
-        val response = httpClient.get(url(
-            "/file/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download"
-        )) {
+        // Perso download endpoint 일시 5xx 가 자주 발생 → registerMedia 와 동일 backoff retry. 4xx 즉시 throw.
+        var lastErr: PersoApiException? = null
+        repeat(3) { attempt ->
+            val response = httpClient.get(url(
+                "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download"
+            )) {
+                authHeader()
+                parameter("target", target)
+            }
+            if (response.status.isSuccess()) {
+                return response.body<PersoEnvelope<PersoDownloadLinksResult>>().result
+            }
+            val body = response.bodyAsText()
+            val err = PersoApiException(response.status.value, body)
+            lastErr = err
+            if (err.statusCode in 400..499) throw err
+            log.warn("getDownloadLinks {} (attempt {}/3) — retrying in 3s: target={} body={}",
+                err.statusCode, attempt + 1, target, body)
+            kotlinx.coroutines.delay(3000)
+        }
+        throw lastErr ?: RuntimeException("Perso getDownloadLinks failed after retries")
+    }
+
+    /**
+     * 지원 언어 목록 — `GET /video-translator/api/v1/languages`.
+     * 모바일 클라이언트의 타깃 언어 드롭다운을 동적으로 채우기 위함.
+     */
+    suspend fun getLanguages(): PersoLanguagesResponse {
+        val response = httpClient.get(url("/video-translator/api/v1/languages")) {
             authHeader()
-            parameter("target", target)
         }
         checkResponse(response)
-        return response.body<PersoEnvelope<PersoDownloadLinksResult>>().result
+        return response.body()
     }
 
     // Stream a pre-signed download URL to a local file (atomic: tmp → rename).

@@ -3,9 +3,11 @@ val kotlin_version: String by project
 val logback_version: String by project
 
 plugins {
+    application
     kotlin("jvm") version "2.0.21"
-    id("io.ktor.plugin") version "3.0.3"
     kotlin("plugin.serialization") version "2.0.21"
+    // io.ktor.plugin (fat-jar/Docker support) 는 dev 에서 불필요해 제거 — application plugin
+    // 만으로 ./gradlew run 충분. 빌드 그래프 단순화 + configuration cache 호환성 향상.
 }
 
 group = "com.dubcast"
@@ -45,6 +47,9 @@ dependencies {
 
     // .env file support
     implementation("io.github.cdimascio:dotenv-kotlin:6.4.2")
+
+    // Google Cloud auth (Vertex AI access tokens via service account JSON)
+    implementation("com.google.auth:google-auth-library-oauth2-http:1.27.0")
 
     // Testing
     testImplementation("io.ktor:ktor-server-test-host:$ktor_version")

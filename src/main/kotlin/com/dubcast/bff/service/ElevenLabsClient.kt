@@ -6,6 +6,7 @@ import com.dubcast.bff.plugins.ElevenLabsApiException
 import io.ktor.client.*
 import io.ktor.client.call.*
 import io.ktor.client.request.*
+import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.utils.io.*
@@ -129,4 +130,6 @@ class ElevenLabsClient(
         }
     }
 
+    // STT (transcribe) 는 Perso 로 이전됨 (AutoSubtitleService) — ElevenLabs 사용 폐기.
+    // TTS (textToSpeech) + voices (getVoices, voice cloning UI 용) 만 유지.
 }

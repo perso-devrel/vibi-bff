@@ -36,3 +36,20 @@ data class ElevenLabsVoiceSettings(
     @SerialName("similarity_boost") val similarityBoost: Float,
 )
 
+// --- Speech-to-text (my_plan: 자막 STT 엔진을 ElevenLabs 로) ---
+@Serializable
+data class ElevenLabsSttWord(
+    val text: String,
+    val start: Double = 0.0,
+    val end: Double = 0.0,
+    val type: String? = null
+)
+
+@Serializable
+data class ElevenLabsSttResponse(
+    val text: String,
+    @SerialName("language_code") val languageCode: String? = null,
+    @SerialName("language_probability") val languageProbability: Double? = null,
+    val words: List<ElevenLabsSttWord> = emptyList()
+)
+

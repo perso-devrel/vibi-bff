@@ -29,6 +29,18 @@ data class RenderJob(
     @Volatile var error: String? = null,
     val outputFile: File,
     val createdAt: Long = System.currentTimeMillis(),
+    /** "queued" while waiting for an ffmpeg permit; null once acquired or done. */
+    @Volatile var progressReason: String? = null,
+)
+
+/** 한 separationDirective 의 ffmpeg 입력용 형태. selections 의 audioUrl 은 라우트 단계에서
+ * 로컬 파일로 해석되어 본 구조체로 들어온다. range 는 mute 윈도우 + adelay 의 base 이다. */
+data class DirectiveStem(val file: File, val volume: Float)
+data class DirectiveWithStemFiles(
+    val rangeStartMs: Long,
+    val rangeEndMs: Long,
+    val muteOriginalSegmentAudio: Boolean,
+    val stems: List<DirectiveStem>,
 )
 
 private const val MAX_PARALLEL_SEGMENTS = 2
@@ -37,17 +49,27 @@ class RenderService(
     private val renderDir: File,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     private val jobTtlMs: Long = 3600_000,
+    /** Hard cap on concurrent top-level render jobs that can spawn ffmpeg.
+     * 5+ variant fan-out otherwise saturates CPU + memory. submitRender
+     * returns immediately; the launched coroutine acquires the permit
+     * before doing any ffmpeg work, so queued jobs report status=PROCESSING
+     * with progressReason="queued" until a slot frees up. */
+    maxConcurrentRenders: Int = defaultMaxConcurrent(),
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, RenderJob>()
     private val cleanup = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "render-cleanup").apply { isDaemon = true }
     }
+    private val ffmpegSemaphore = Semaphore(maxConcurrentRenders.coerceAtLeast(1))
 
     init {
         renderDir.mkdirs()
         cleanup.scheduleAtFixedRate(::cleanupExpiredJobs, 10, 10, TimeUnit.MINUTES)
-        log.info("Render directory initialized at {}", renderDir.absolutePath)
+        log.info(
+            "Render directory initialized at {} (maxConcurrent={})",
+            renderDir.absolutePath, maxConcurrentRenders.coerceAtLeast(1)
+        )
     }
 
     fun shutdown() {
@@ -71,6 +93,8 @@ class RenderService(
         bgmAudioFiles: Map<String, File> = emptyMap(),
         bgmClips: List<BgmClip> = emptyList(),
         frame: FrameConfig? = null,
+        audioOverrideFile: File? = null,
+        separationDirectives: List<DirectiveWithStemFiles> = emptyList(),
         inputFilesToCleanup: List<File> = emptyList(),
     ): String {
         val jobId = "render-${UUID.randomUUID()}"
@@ -80,15 +104,22 @@ class RenderService(
 
         scope.launch {
             var process: Process? = null
+            // While waiting for an ffmpeg permit, mark the job as PROCESSING with
+            // progressReason="queued" so polling clients see meaningful state
+            // instead of a stale PENDING. We acquire BEFORE entering the try
+            // block so we can release symmetrically in finally.
+            job.status = "PROCESSING"
+            job.progress = 0
+            job.progressReason = if (ffmpegSemaphore.availablePermits == 0) "queued" else null
+            ffmpegSemaphore.acquire()
+            job.progressReason = null
             try {
-                job.status = "PROCESSING"
-                job.progress = 0
-
                 if (segments != null) {
                     runMultiSegmentRender(
                         job, segments, videoFiles, segmentImageFiles,
                         audioFiles, imageFiles, subtitlesFile, dubClips, imageClips,
-                        frame, bgmAudioFiles, bgmClips,
+                        frame, bgmAudioFiles, bgmClips, audioOverrideFile,
+                        separationDirectives,
                     )
                 } else {
                     // Legacy path: single video
@@ -103,7 +134,8 @@ class RenderService(
                     val command = buildFfmpegCommand(
                         videoFile, audioFiles, imageFiles, subtitlesFile,
                         dubClips, imageClips, duration, outputFile, outW, outH,
-                        bgmAudioFiles, bgmClips,
+                        bgmAudioFiles, bgmClips, audioOverrideFile,
+                        separationDirectives,
                     )
                     log.info("Starting legacy ffmpeg render: jobId={}", jobId)
                     process = ProcessBuilder(command).redirectErrorStream(true).start()
@@ -133,6 +165,7 @@ class RenderService(
                 log.error("Render error: jobId={}", jobId, e)
             } finally {
                 inputFilesToCleanup.forEach { it.delete() }
+                ffmpegSemaphore.release()
             }
         }
 
@@ -154,6 +187,8 @@ class RenderService(
         frame: FrameConfig?,
         bgmAudioFiles: Map<String, File>,
         bgmClips: List<BgmClip>,
+        audioOverrideFile: File?,
+        separationDirectives: List<DirectiveWithStemFiles>,
     ) {
         require(segments.isNotEmpty()) { "segments must not be empty" }
         val tempDir = File(renderDir, "tmp_${job.jobId}")
@@ -217,7 +252,8 @@ class RenderService(
             val command = buildFfmpegCommand(
                 concatFile, audioFiles, imageFiles, subtitlesFile,
                 dubClips, imageClips, totalDurationMs, job.outputFile, outW, outH,
-                bgmAudioFiles, bgmClips,
+                bgmAudioFiles, bgmClips, audioOverrideFile,
+                separationDirectives,
             )
             log.info("Starting final ffmpeg render: jobId={}", job.jobId)
             val proc = ProcessBuilder(command).redirectErrorStream(true).start()
@@ -380,6 +416,12 @@ class RenderService(
 
     companion object {
         private val HEX_COLOR_REGEX = Regex("^#?([0-9a-fA-F]{6})$")
+
+        /** Default ffmpeg concurrency = max(1, CPU count / 2). Override via
+         * RENDER_MAX_CONCURRENT env wired in Application.kt. libx264 uses all
+         * cores per ffmpeg process, so anything past CPU/2 typically thrashes. */
+        fun defaultMaxConcurrent(): Int =
+            (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
     }
 
     private fun concatSegments(segments: List<File>, output: File) {
@@ -420,13 +462,24 @@ class RenderService(
         outHeight: Int = 0,
         bgmAudioFiles: Map<String, File> = emptyMap(),
         bgmClips: List<BgmClip> = emptyList(),
+        audioOverrideFile: File? = null,
+        separationDirectives: List<DirectiveWithStemFiles> = emptyList(),
     ): List<String> {
         val cmd = mutableListOf("ffmpeg", "-y")
         cmd.addAll(listOf("-i", videoFile.absolutePath))
 
+        // Audio override (Phase 3 auto-dub) becomes the new "base" audio
+        // track. We still consume the source video's stream slot, but its
+        // [0:a] is dropped from the mix in favor of [overrideIdx:a].
+        var inputIdx = 1
+        var overrideAudioIdx: Int? = null
+        if (audioOverrideFile != null) {
+            cmd.addAll(listOf("-i", audioOverrideFile.absolutePath))
+            overrideAudioIdx = inputIdx++
+        }
+
         // Audio inputs
         val clipInputIndices = mutableListOf<Int>()
-        var inputIdx = 1
         for (clip in dubClips) {
             val f = audioFiles[clip.audioFileKey]
                 ?: throw IllegalArgumentException("Audio file not found: ${clip.audioFileKey}")
@@ -441,6 +494,17 @@ class RenderService(
                 ?: throw IllegalArgumentException("BGM audio file not found: ${clip.audioFileKey}")
             cmd.addAll(listOf("-i", f.absolutePath))
             bgmInputIndices.add(inputIdx++)
+        }
+
+        // Separation directive stems — each directive carries N stems whose
+        // audioUrl 들이 라우트 단계에서 로컬 파일로 해석되어 들어왔다. 각 stem 을
+        // 별개 -i 로 추가, filter graph 에서 atrim+asetpts+adelay+volume 으로
+        // directive range 에 정확히 박는다.
+        val stemInputIndices: List<List<Int>> = separationDirectives.map { directive ->
+            directive.stems.map { stem ->
+                cmd.addAll(listOf("-i", stem.file.absolutePath))
+                inputIdx++
+            }
         }
 
         // Sticker image inputs (deduplicated, order preserved)
@@ -464,13 +528,38 @@ class RenderService(
 
         // Audio mixing: pass-through when there's nothing to mix; otherwise
         // build adelay+volume chains for each dub/bgm clip and amix them
-        // together with the original video audio. amix duration=first caps
-        // output to the source video's length, so BGM shorter than the
-        // video ends naturally and longer BGM is truncated (no looping).
-        if (dubClips.isEmpty() && bgmClips.isEmpty()) {
+        // together with the base audio. amix duration=first caps output to
+        // the first input's length (the video's, when present), so BGM
+        // shorter than the video ends naturally and longer BGM is truncated.
+        // Auto-dub: when audioOverrideFile is set, the override REPLACES
+        // [0:a] as the base track — the source video's audio is dropped.
+        val initialBaseRef = if (overrideAudioIdx != null) "[$overrideAudioIdx:a]" else "[0:a]"
+
+        // muteOriginalSegmentAudio=true 인 directive 들의 range 동안 base audio 를
+        // 0 으로. enable= expression 안에 OR 로 모든 mute window 를 합쳐 한 번의
+        // volume 필터로 처리. (분리된 enable= 윈도우끼리 chain 해도 의미는 같지만
+        // 단일 expression 이 더 깔끔하고 race 없음.)
+        val muteWindows = separationDirectives.filter { it.muteOriginalSegmentAudio }
+        val baseAudioRef: String = if (muteWindows.isEmpty()) {
+            initialBaseRef
+        } else {
+            val expr = muteWindows.joinToString("+") {
+                "between(t,${it.rangeStartMs / 1000.0},${it.rangeEndMs / 1000.0})"
+            }
+            // volume= enable= 'expr' 에서 expr 가 nonzero (true) 면 volume 적용.
+            // 여러 윈도우를 OR 로 합치려면 + 로 충분 (between 결과 0/1 이라 합 ≥ 1 이면
+            // nonzero → mute). 'gt(...,0)' 로 명시해도 동일.
+            filters.add("${initialBaseRef}volume=enable='gt($expr,0)':volume=0[base_muted]")
+            "[base_muted]"
+        }
+
+        val hasAnyAudio = dubClips.isNotEmpty() || bgmClips.isNotEmpty() ||
+            overrideAudioIdx != null || separationDirectives.any { it.stems.isNotEmpty() } ||
+            muteWindows.isNotEmpty()
+        if (!hasAnyAudio) {
             filters.add("[0:a]anull[aout]")
         } else {
-            val mixInputs = mutableListOf<String>("[0:a]")
+            val mixInputs = mutableListOf(baseAudioRef)
             for ((i, clip) in dubClips.withIndex()) {
                 filters.add(audioClipFilter(clipInputIndices[i], clip.startMs, clip.volume, "dub$i"))
                 mixInputs.add("[dub$i]")
@@ -479,7 +568,30 @@ class RenderService(
                 filters.add(audioClipFilter(bgmInputIndices[i], clip.startMs, clip.volume, "bgm$i"))
                 mixInputs.add("[bgm$i]")
             }
-            filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0[aout]")
+            // Directive stems: directive 마다 stem 들을 atrim 으로 range 길이만큼
+            // 자르고, asetpts 로 PTS 리셋, adelay 로 rangeStartMs 만큼 밀고, volume.
+            // stem 본체 길이가 directive 길이보다 길면 truncate, 짧으면 amix
+            // duration=first 로 video 길이까지 패딩됨.
+            for ((dIdx, directive) in separationDirectives.withIndex()) {
+                val rangeMs = (directive.rangeEndMs - directive.rangeStartMs).coerceAtLeast(0L)
+                val rangeSec = rangeMs / 1000.0
+                for ((sIdx, stem) in directive.stems.withIndex()) {
+                    val inputIndex = stemInputIndices[dIdx][sIdx]
+                    val label = "stem_${dIdx}_${sIdx}"
+                    filters.add(
+                        "[$inputIndex:a]atrim=0:$rangeSec,asetpts=PTS-STARTPTS," +
+                            "adelay=${directive.rangeStartMs}|${directive.rangeStartMs}," +
+                            "volume=${stem.volume}[$label]"
+                    )
+                    mixInputs.add("[$label]")
+                }
+            }
+            if (mixInputs.size == 1) {
+                // Only base track present (e.g., override + no clips, no stems).
+                filters.add("${mixInputs[0]}anull[aout]")
+            } else {
+                filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0[aout]")
+            }
         }
 
         // Video chain: subtitle → sticker overlays

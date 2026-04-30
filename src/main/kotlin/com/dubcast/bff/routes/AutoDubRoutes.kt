@@ -25,7 +25,7 @@ fun Route.autoDubRoutes(
         // POST /api/v2/autodub — submit
         post {
             val (file, spec) = parseUploadAndSpec<AutoDubSpec>(
-                call.receiveMultipart(), fileStorage, MAX_AUTODUB_FILE_SIZE,
+                call.receiveMultipart(formFieldLimit = MAX_AUTODUB_FILE_SIZE), fileStorage, MAX_AUTODUB_FILE_SIZE,
             )
             val jobId = autoDubService.submit(file, spec)
             call.respond(HttpStatusCode.Accepted, AutoDubJobResponse(jobId = jobId))
@@ -43,6 +43,10 @@ fun Route.autoDubRoutes(
                 val token = signer.sign(jobId, "dubbed", ttl)
                 "/api/v2/autodub/$jobId/audio?token=$token"
             } else null
+            val dubbedVideoUrl = if (job.status == "READY" && job.dubbedVideoFile != null) {
+                val token = signer.sign(jobId, "dubbedvideo", ttl)
+                "/api/v2/autodub/$jobId/video?token=$token"
+            } else null
 
             call.respond(HttpStatusCode.OK, AutoDubStatusResponse(
                 jobId = jobId,
@@ -51,7 +55,32 @@ fun Route.autoDubRoutes(
                 progressReason = job.progressReason,
                 error = job.error,
                 dubbedAudioUrl = dubbedUrl,
+                dubbedVideoUrl = dubbedVideoUrl,
             ))
+        }
+
+        // GET /api/v2/autodub/{jobId}/video?token=...
+        get("/{jobId}/video") {
+            val jobId = call.parameters["jobId"]
+                ?: throw NotFoundException("jobId required")
+            val token = call.request.queryParameters["token"]
+                ?: throw IllegalArgumentException("token required")
+            if (!signer.verify(jobId, "dubbedvideo", token)) {
+                call.respond(HttpStatusCode.Forbidden)
+                return@get
+            }
+            val job = autoDubService.getJob(jobId)
+                ?: throw NotFoundException("AutoDub job not found: $jobId")
+            val file = job.dubbedVideoFile
+                ?: throw NotFoundException("Dubbed video not ready")
+            if (!file.exists()) throw NotFoundException("Dubbed video file missing on disk")
+            call.response.header(
+                HttpHeaders.ContentDisposition,
+                ContentDisposition.Attachment.withParameter(
+                    ContentDisposition.Parameters.FileName, "$jobId.mp4"
+                ).toString()
+            )
+            call.respondFile(file)
         }
 
         // GET /api/v2/autodub/{jobId}/audio?token=...

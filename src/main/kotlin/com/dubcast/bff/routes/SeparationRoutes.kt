@@ -30,7 +30,7 @@ fun Route.separationRoutes(
         // POST /api/v2/separate — submit job
         post {
             val (file, spec) = parseUploadAndSpec<SeparationSpec>(
-                call.receiveMultipart(), fileStorage, MAX_SEPARATION_FILE_SIZE,
+                call.receiveMultipart(formFieldLimit = MAX_SEPARATION_FILE_SIZE), fileStorage, MAX_SEPARATION_FILE_SIZE,
             )
             val pipelineInput = maybeTrim(file, spec)
             val jobId = separationService.submit(pipelineInput, spec)

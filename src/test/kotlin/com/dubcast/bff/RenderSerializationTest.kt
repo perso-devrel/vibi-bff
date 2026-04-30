@@ -4,6 +4,7 @@ import com.dubcast.bff.model.BgmClip
 import com.dubcast.bff.model.DubClip
 import com.dubcast.bff.model.FrameConfig
 import com.dubcast.bff.model.RenderConfig
+import com.dubcast.bff.model.RenderInputCacheResponse
 import com.dubcast.bff.model.Segment
 import com.dubcast.bff.plugins.AppJson
 import kotlinx.serialization.json.Json
@@ -142,5 +143,68 @@ class RenderSerializationTest {
 
         assertNull(cfg.frame)
         assertTrue(cfg.bgmClips.isEmpty())
+    }
+
+    // ── separationDirectives wire format (mobile sends selections[]) ────────
+
+    @Test
+    fun `RenderConfig decodes separationDirectives with selections from mobile`() {
+        val raw = """
+            {
+              "dubClips":[],
+              "separationDirectives":[
+                {
+                  "id":"d1",
+                  "rangeStartMs":1000,
+                  "rangeEndMs":4000,
+                  "numberOfSpeakers":2,
+                  "muteOriginalSegmentAudio":true,
+                  "selections":[
+                    {"stemId":"speaker_0","audioUrl":"/api/v2/separate/sep-x/stem/speaker_0?token=t.s","volume":0.8},
+                    {"stemId":"speaker_1","audioUrl":"https://cdn.example/extern.mp3","volume":1.0}
+                  ]
+                }
+              ]
+            }
+        """.trimIndent()
+
+        val cfg: RenderConfig = json.decodeFromString(raw)
+        assertEquals(1, cfg.separationDirectives.size)
+        val d = cfg.separationDirectives.first()
+        assertEquals("d1", d.id)
+        assertEquals(1000L, d.rangeStartMs)
+        assertEquals(4000L, d.rangeEndMs)
+        assertTrue(d.muteOriginalSegmentAudio)
+        assertEquals(2, d.selections.size)
+        assertEquals("speaker_0", d.selections[0].stemId)
+        assertEquals(0.8f, d.selections[0].volume)
+        assertEquals("https://cdn.example/extern.mp3", d.selections[1].audioUrl)
+    }
+
+    @Test
+    fun `RenderConfig separationDirectives defaults to empty`() {
+        val raw = """{"dubClips":[]}"""
+        val cfg: RenderConfig = json.decodeFromString(raw)
+        assertTrue(cfg.separationDirectives.isEmpty())
+    }
+
+    // ── RenderInputCacheResponse — multipart-cache wire shape ────────────────
+
+    @Test
+    fun `RenderInputCacheResponse encodes all fields with snake-cased equivalents`() {
+        val original = RenderInputCacheResponse(
+            inputId = "0123456789abcdef0123456789abcdef",
+            expiresAt = 1714502400000L,
+            videoSizeBytes = 12_345_678L,
+            audioCount = 3,
+        )
+        val encoded = json.encodeToString(original)
+        // Mobile parses by camelCase field names — snake/camel mix would break it.
+        assertTrue(encoded.contains("\"inputId\""), "inputId should be camelCase: $encoded")
+        assertTrue(encoded.contains("\"expiresAt\""), "expiresAt should be camelCase: $encoded")
+        assertTrue(encoded.contains("\"videoSizeBytes\""), "videoSizeBytes should be camelCase: $encoded")
+        assertTrue(encoded.contains("\"audioCount\""), "audioCount should be camelCase: $encoded")
+        val restored: RenderInputCacheResponse = json.decodeFromString(encoded)
+        assertEquals(original, restored)
     }
 }

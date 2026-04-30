@@ -5,14 +5,23 @@ import com.dubcast.bff.plugins.*
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
 import com.dubcast.bff.service.ElevenLabsClient
-import com.dubcast.bff.service.FileStorageService
 import com.dubcast.bff.service.GeminiClient
+import com.dubcast.bff.service.FileStorageService
 import com.dubcast.bff.service.PersoClient
+import com.dubcast.bff.service.RenderInputCacheService
 import com.dubcast.bff.service.RenderService
 import com.dubcast.bff.service.SeparationService
 import com.dubcast.bff.service.SignedUrlService
 import com.dubcast.bff.service.StemMixService
 import java.io.File
+import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.isActive
+import kotlinx.coroutines.launch
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.contentnegotiation.*
@@ -69,16 +78,54 @@ fun Application.module() {
             level = LogLevel.NONE
         }
         install(HttpTimeout) {
-            connectTimeoutMillis = 60_000
-            requestTimeoutMillis = 300_000
+            // 큰 영상 (수십~수백 MB) Perso 업로드는 socket-level 으로 1+분 걸릴 수 있어 longer.
+            connectTimeoutMillis = 120_000  // 2분 — TLS handshake + SAS upload init 여유
+            requestTimeoutMillis = 600_000  // 10분 — 큰 영상 stream upload 여유
+            socketTimeoutMillis = 600_000   // 10분 — read/write idle 허용
+        }
+        // CIO engine 의 endpoint connect attempts — timeout 만 늘리지 말고 재시도도 enable.
+        engine {
+            requestTimeout = 600_000
+            endpoint {
+                connectAttempts = 3
+                connectTimeout = 120_000
+            }
         }
     }
 
     val fileStorage = FileStorageService(appConfig.storage)
     val elevenLabsClient = ElevenLabsClient(appConfig.elevenLabs, httpClient)
-    val renderService = RenderService(fileStorage.renderDir)
+
+    // Concurrency cap for ffmpeg fan-out. RENDER_MAX_CONCURRENT can be set
+    // explicitly in deployments where the autoreckoned (CPU/2) value is wrong
+    // (containerized hosts often misreport availableProcessors).
+    val renderMaxConcurrent = System.getenv("RENDER_MAX_CONCURRENT")?.toIntOrNull()
+        ?: RenderService.defaultMaxConcurrent()
+    val renderService = RenderService(fileStorage.renderDir, maxConcurrentRenders = renderMaxConcurrent)
+
+    // Shared input cache. RENDER_INPUT_CACHE_TTL_HOURS overrides the 24h default
+    // when a deployment needs longer reuse windows (long-running mobile session
+    // editing N variants over hours).
+    val renderInputCacheTtlHours = System.getenv("RENDER_INPUT_CACHE_TTL_HOURS")?.toLongOrNull() ?: 24L
+    val renderInputCache = RenderInputCacheService(
+        baseDir = File(fileStorage.renderDir.parentFile, "render-input-cache"),
+        ttlMs = TimeUnit.HOURS.toMillis(renderInputCacheTtlHours),
+    )
+    val cacheCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    cacheCleanupScope.launch {
+        // Sweep once on startup (recover from crash-leftover entries), then
+        // hourly. Sleeping 1h between sweeps is fine — TTL is 24h, slop tolerated.
+        while (isActive) {
+            runCatching { renderInputCache.cleanExpired() }
+            delay(TimeUnit.HOURS.toMillis(1))
+        }
+    }
 
     val persoClient = PersoClient(appConfig.perso, httpClient)
+    org.slf4j.LoggerFactory.getLogger("BootCheck").info(
+        "Perso config: baseUrl={} spaceSeq={} pollIntervalMs={}",
+        appConfig.perso.baseUrl, appConfig.perso.spaceSeq, appConfig.perso.pollIntervalMs
+    )
     val signedUrlService = SignedUrlService(appConfig.separation.signingSecret)
     val separationService = SeparationService(
         persoClient = persoClient,
@@ -126,9 +173,9 @@ fun Application.module() {
     configureCors()
     configureErrorHandling()
     configureRouting(
-        fileStorage, elevenLabsClient, appConfig, renderService,
+        fileStorage, elevenLabsClient, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
-        autoSubtitleService, autoDubService,
+        autoSubtitleService, autoDubService, httpClient, renderInputCache,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(
@@ -138,6 +185,7 @@ fun Application.module() {
         stemMixService::shutdown,
         autoSubtitleService::shutdown,
         autoDubService::shutdown,
+        { cacheCleanupScope.cancel() },
     )
     monitor.subscribe(ApplicationStopped) {
         shutdownHooks.forEach { it() }

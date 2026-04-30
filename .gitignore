@@ -4,3 +4,6 @@ build/
 *.iml
 .env
 storage/
+credentials/
+.kotlin/
+bin/

@@ -7,6 +7,7 @@ data class AppConfig(
     val storage: StorageConfig,
     val baseUrl: String,
     val perso: PersoConfig,
+    val gemini: GeminiConfig,
     val separation: SeparationConfig,
 )
 
@@ -34,6 +35,25 @@ data class PersoConfig(
     }
 }
 
+/**
+ * Vertex AI configuration. We authenticate via a GCP service account JSON
+ * (path lives in [credentialsPath], typically the same file Google's tooling
+ * already expects under `GOOGLE_APPLICATION_CREDENTIALS`). Validation is
+ * deferred to [com.dubcast.bff.service.GeminiClient]'s first call so the
+ * server can boot even when subtitle translation is disabled in dev.
+ */
+data class GeminiConfig(
+    val projectId: String,
+    val location: String,
+    val credentialsPath: String,
+    val model: String,
+) {
+    init {
+        require(model.isNotBlank()) { "GEMINI_MODEL must not be blank" }
+        require(location.isNotBlank()) { "GCP_LOCATION must not be blank" }
+    }
+}
+
 data class SeparationConfig(
     val abandonTtlMs: Long,
     val mixTtlMs: Long,
@@ -58,6 +78,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val el = dubcast.config("elevenlabs")
     val storage = dubcast.config("storage")
     val perso = dubcast.config("perso")
+    val gemini = dubcast.config("gemini")
     val separation = dubcast.config("separation")
 
     return AppConfig(
@@ -75,6 +96,12 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
             spaceSeq = perso.property("spaceSeq").getString().toInt(),
             pollIntervalMs = perso.property("pollIntervalMs").getString().toLong(),
             maxPollMinutes = perso.property("maxPollMinutes").getString().toInt(),
+        ),
+        gemini = GeminiConfig(
+            projectId = gemini.property("projectId").getString(),
+            location = gemini.property("location").getString(),
+            credentialsPath = gemini.property("credentialsPath").getString(),
+            model = gemini.property("model").getString(),
         ),
         separation = SeparationConfig(
             abandonTtlMs = separation.property("abandonTtlMs").getString().toLong(),

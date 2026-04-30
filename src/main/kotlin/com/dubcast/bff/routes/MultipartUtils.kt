@@ -52,6 +52,11 @@ internal suspend inline fun <reified T> parseUploadAndSpec(
     }
 
     val file = sourceFile ?: throw IllegalArgumentException("$fileFieldName is required")
-    val s = spec ?: throw IllegalArgumentException("$specFieldName is required")
+    val s = spec ?: run {
+        // Don't strand the upload on disk when the caller forgot the spec —
+        // the request is rejected, so the bytes are dead weight.
+        file.delete()
+        throw IllegalArgumentException("$specFieldName is required")
+    }
     return file to s
 }

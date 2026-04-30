@@ -2,6 +2,7 @@ package com.dubcast.bff
 
 import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.config.ElevenLabsConfig
+import com.dubcast.bff.config.GeminiConfig
 import com.dubcast.bff.config.PersoConfig
 import com.dubcast.bff.config.SeparationConfig
 import com.dubcast.bff.config.StorageConfig
@@ -20,6 +21,12 @@ fun testAppConfig(
         spaceSeq = 1,
         pollIntervalMs = 5000,
         maxPollMinutes = 30,
+    ),
+    gemini = GeminiConfig(
+        projectId = "",
+        location = "us-central1",
+        credentialsPath = "",
+        model = "gemini-2.5-flash",
     ),
     separation = SeparationConfig(
         abandonTtlMs = 1_800_000,

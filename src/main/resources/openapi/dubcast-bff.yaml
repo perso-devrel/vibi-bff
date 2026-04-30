@@ -11,117 +11,161 @@ servers:
     description: Local development
 
 tags:
-  - name: Upload
-    description: 파일 업로드
   - name: Voices
     description: ElevenLabs 보이스 목록
   - name: TTS
     description: Text-to-Speech 음성 생성
+  - name: Subtitles
+    description: 자동 자막 (Perso STT + Gemini 번역)
+  - name: AutoDub
+    description: 자동 더빙 (Perso translate)
 
 paths:
-  /api/v1/upload:
+  /api/v2/subtitles:
     post:
-      tags: [Upload]
-      summary: 파일 업로드
+      tags: [Subtitles]
+      summary: 자동 자막 생성 잡 제출
       description: |
-        비디오/오디오 파일을 업로드합니다.
-        - 최대 500MB
-        - 허용 확장자: mp4, mkv, avi, mov, webm, mp3, wav, flac
+        업로드된 영상/오디오를 Perso 에 보내 원본 SRT 를 추출한다. spec.targetLanguageCode 가
+        sourceLanguageCode 와 다르면 Gemini 번역 SRT 도 생성한다.
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
+              required: [file, spec]
               properties:
                 file:
                   type: string
                   format: binary
-                  description: 업로드할 파일
+                spec:
+                  type: string
+                  description: SubtitleSpec JSON
       responses:
-        '200':
-          description: 업로드 성공
+        '202':
+          description: 잡 접수
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/UploadResponse'
-              example:
-                blobPath: "uploads/550e8400-e29b-41d4-a716-446655440000_video.mp4"
-        '400':
-          description: 파일 없음 또는 지원하지 않는 파일 타입
-          content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+                $ref: '#/components/schemas/SubtitleJobResponse'
 
-  /api/v1/voices:
+  /api/v2/subtitles/{jobId}:
     get:
-      tags: [Voices]
-      summary: 보이스 목록 조회
-      description: ElevenLabs에서 사용 가능한 TTS 보이스 목록을 반환합니다.
+      tags: [Subtitles]
+      summary: 자막 잡 상태
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
       responses:
         '200':
-          description: 보이스 목록
+          description: 상태
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/VoiceListResponse'
-              example:
-                voices:
-                  - voiceId: "21m00Tcm4TlvDq8ikWAM"
-                    name: "Rachel"
-                    previewUrl: "https://storage.googleapis.com/eleven-public-prod/premade/voices/21m00Tcm4TlvDq8ikWAM/df6788f9-5c96-470d-8571-1c93e4de2711.mp3"
-                    category: "premade"
-                    labels:
-                      accent: "american"
-                      description: "calm"
-                      gender: "female"
+                $ref: '#/components/schemas/SubtitleStatusResponse'
 
-  /api/v1/tts:
+  /api/v2/subtitles/{jobId}/srt:
+    get:
+      tags: [Subtitles]
+      summary: SRT 스트림 (HMAC 토큰 필수)
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: lang
+          required: true
+          schema:
+            type: string
+            enum: [original, translated]
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: SRT 본문
+          content:
+            application/x-subrip:
+              schema: { type: string }
+        '403':
+          description: 토큰 검증 실패
+        '404':
+          description: 잡/SRT 없음
+
+  /api/v2/autodub:
     post:
-      tags: [TTS]
-      summary: TTS 음성 생성
-      description: |
-        텍스트를 음성으로 변환합니다. 생성된 오디오 파일은 서버에 저장되며, 다운로드 URL을 반환합니다.
+      tags: [AutoDub]
+      summary: 자동 더빙 잡 제출
       requestBody:
         required: true
         content:
-          application/json:
+          multipart/form-data:
             schema:
-              $ref: '#/components/schemas/TtsRequest'
-            example:
-              text: "안녕하세요"
-              voiceId: "21m00Tcm4TlvDq8ikWAM"
-              languageCode: "ko"
-              modelId: "eleven_multilingual_v2"
-              stability: 0.5
-              similarityBoost: 0.75
+              type: object
+              required: [file, spec]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                spec:
+                  type: string
+                  description: AutoDubSpec JSON
+      responses:
+        '202':
+          description: 잡 접수
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AutoDubJobResponse'
+
+  /api/v2/autodub/{jobId}:
+    get:
+      tags: [AutoDub]
+      summary: 더빙 잡 상태
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
       responses:
         '200':
-          description: TTS 생성 성공
+          description: 상태
           content:
             application/json:
               schema:
-                $ref: '#/components/schemas/TtsResponse'
-              example:
-                audioUrl: "http://localhost:8080/files/tts/550e8400-e29b-41d4-a716-446655440000.mp3"
-        '400':
-          description: 잘못된 요청
+                $ref: '#/components/schemas/AutoDubStatusResponse'
+
+  /api/v2/autodub/{jobId}/audio:
+    get:
+      tags: [AutoDub]
+      summary: 더빙 오디오 스트림 (HMAC 토큰 필수)
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: mp3 스트림
           content:
-            application/json:
-              schema:
-                $ref: '#/components/schemas/ErrorResponse'
+            audio/mpeg:
+              schema: { type: string, format: binary }
+        '403':
+          description: 토큰 검증 실패
+        '404':
+          description: 잡 없음
 
 components:
   schemas:
-    UploadResponse:
-      type: object
-      required: [blobPath]
-      properties:
-        blobPath:
-          type: string
-          description: 저장된 파일의 blob 경로
-
     ErrorResponse:
       type: object
       required: [error]
@@ -203,4 +247,80 @@ components:
         audioUrl:
           type: string
           description: 생성된 오디오 파일 다운로드 URL
+
+    SubtitleSpec:
+      type: object
+      required: [mediaType, sourceLanguageCode]
+      properties:
+        mediaType:
+          type: string
+          enum: [VIDEO, AUDIO]
+        sourceLanguageCode:
+          type: string
+        targetLanguageCode:
+          type: string
+          nullable: true
+          description: null 또는 source 와 동일하면 번역 생략
+        numberOfSpeakers:
+          type: integer
+          default: 1
+          minimum: 1
+          maximum: 10
+
+    SubtitleJobResponse:
+      type: object
+      required: [jobId]
+      properties:
+        jobId: { type: string }
+
+    SubtitleStatusResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status:
+          type: string
+          enum: [PENDING, UPLOADING_UPSTREAM, SUBMITTED, PROCESSING, DOWNLOADING, READY, FAILED]
+        progress: { type: integer, nullable: true }
+        progressReason: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        originalSrtUrl: { type: string, nullable: true }
+        translatedSrtUrl: { type: string, nullable: true }
+
+    AutoDubSpec:
+      type: object
+      required: [mediaType, sourceLanguageCode, targetLanguageCode]
+      properties:
+        mediaType:
+          type: string
+          enum: [VIDEO, AUDIO]
+        sourceLanguageCode: { type: string }
+        targetLanguageCode: { type: string }
+        numberOfSpeakers:
+          type: integer
+          default: 1
+          minimum: 1
+          maximum: 10
+        ttsModel:
+          type: string
+          nullable: true
+
+    AutoDubJobResponse:
+      type: object
+      required: [jobId]
+      properties:
+        jobId: { type: string }
+
+    AutoDubStatusResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status:
+          type: string
+          enum: [PENDING, UPLOADING_UPSTREAM, SUBMITTED, PROCESSING, DOWNLOADING, READY, FAILED]
+        progress: { type: integer, nullable: true }
+        progressReason: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        dubbedAudioUrl: { type: string, nullable: true }
 
