@@ -7,3 +7,4 @@ storage/
 credentials/
 .kotlin/
 bin/
+.DS_Store
