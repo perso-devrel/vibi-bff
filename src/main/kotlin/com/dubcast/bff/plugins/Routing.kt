@@ -60,8 +60,10 @@ fun Application.configureRouting(
             autoDubRoutes(autoDubService, signedUrlService, fileStorage, appConfig)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.
-            // 각 폴더 안에 stem mp3 들 (background.mp3 / speaker1.mp3 / ... / 또는 한글 파일명).
-            // 모바일은 list endpoint 로 폴더 목록 + stem 이름 받아 directive 들로 등록.
+            // 각 폴더 안에 stem 오디오 파일들 (배경음/화자1/... 한글 파일명, .wav/.mp3/.m4a 등).
+            // 실제 음성분리 결과는 .wav 로 떨어져 — 확장자 화이트리스트는 일반 오디오 포맷 다수 허용.
+            // 모바일은 list endpoint 로 폴더 목록 + stem 이름(확장자 제외) 받아 directive 등록.
+            val audioExtensions = setOf("wav", "mp3", "m4a", "aac", "ogg", "flac")
             get("/testdata/separation/list") {
                 val testdataRoots = listOf(
                     File("testdata"),
@@ -78,7 +80,7 @@ fun Application.configureRouting(
                         val startSec = match.groupValues[1].toInt()
                         val endSec = match.groupValues[2].toInt()
                         val stems = (folder.listFiles { f ->
-                            f.isFile && f.extension.equals("mp3", ignoreCase = true)
+                            f.isFile && f.extension.lowercase() in audioExtensions
                         } ?: emptyArray()).map { it.nameWithoutExtension }
                         com.dubcast.bff.model.TestdataSeparationFolder(
                             folder = folder.name,
@@ -91,20 +93,32 @@ fun Application.configureRouting(
                 call.respond(folders)
             }
 
-            // 폴더별 stem mp3 — 모바일이 SeparationDirective.audioUrl 로 직접 가리킴.
+            // 폴더별 stem 오디오 — 모바일이 SeparationDirective.audioUrl 로 직접 가리킴.
+            // {stem} 은 확장자 제외 basename — 폴더에서 audioExtensions 중 첫 번째 매치 파일 서브.
             get("/testdata/separation/{folder}/{stem}") {
                 val folder = call.parameters["folder"] ?: throw NotFoundException("folder required")
                 val stem = call.parameters["stem"] ?: throw NotFoundException("stem required")
                 if (!folder.matches(Regex("^\\d+-\\d+$"))) throw NotFoundException("invalid folder: $folder")
-                val candidates = listOf(
-                    File("testdata/$folder/$stem.mp3"),
-                    File("../testdata/$folder/$stem.mp3"),
-                    File(System.getProperty("user.dir"), "testdata/$folder/$stem.mp3"),
-                    File(System.getProperty("user.dir"), "../testdata/$folder/$stem.mp3"),
+                val roots = listOf(
+                    File("testdata/$folder"),
+                    File("../testdata/$folder"),
+                    File(System.getProperty("user.dir"), "testdata/$folder"),
+                    File(System.getProperty("user.dir"), "../testdata/$folder"),
                 )
-                val file = candidates.firstOrNull { it.exists() }
-                    ?: throw NotFoundException("testdata stem missing: $folder/$stem.mp3")
-                call.response.header(HttpHeaders.ContentType, ContentType("audio", "mpeg").toString())
+                val dir = roots.firstOrNull { it.exists() && it.isDirectory }
+                    ?: throw NotFoundException("testdata folder missing: $folder")
+                val file = audioExtensions.asSequence()
+                    .map { ext -> File(dir, "$stem.$ext") }
+                    .firstOrNull { it.exists() }
+                    ?: throw NotFoundException("testdata stem missing: $folder/$stem.<audio>")
+                val mime = when (file.extension.lowercase()) {
+                    "wav" -> ContentType("audio", "wav")
+                    "m4a", "aac" -> ContentType("audio", "aac")
+                    "ogg" -> ContentType("audio", "ogg")
+                    "flac" -> ContentType("audio", "flac")
+                    else -> ContentType("audio", "mpeg")
+                }
+                call.response.header(HttpHeaders.ContentType, mime.toString())
                 call.respondFile(file)
             }
         }
