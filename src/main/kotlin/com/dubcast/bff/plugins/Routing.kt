@@ -2,12 +2,14 @@ package com.dubcast.bff.plugins
 
 import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.routes.autoDubRoutes
+import com.dubcast.bff.routes.chatRoutes
 import com.dubcast.bff.routes.languageRoutes
 import com.dubcast.bff.routes.renderRoutes
 import com.dubcast.bff.routes.separationRoutes
 import com.dubcast.bff.routes.subtitleRoutes
 import com.dubcast.bff.routes.ttsV2Routes
 import com.dubcast.bff.routes.voiceRoutes
+import com.dubcast.bff.service.GeminiClient
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
 import com.dubcast.bff.service.ElevenLabsClient
@@ -39,6 +41,7 @@ fun Application.configureRouting(
     signedUrlService: SignedUrlService,
     autoSubtitleService: AutoSubtitleService,
     autoDubService: AutoDubService,
+    geminiClient: GeminiClient,
     httpClient: HttpClient,
     renderInputCache: RenderInputCacheService,
 ) {
@@ -58,6 +61,7 @@ fun Application.configureRouting(
             separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig)
             subtitleRoutes(autoSubtitleService, signedUrlService, fileStorage, appConfig)
             autoDubRoutes(autoDubService, signedUrlService, fileStorage, appConfig)
+            chatRoutes(geminiClient)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.
             // 각 폴더 안에 stem 오디오 파일들 (배경음/화자1/... 한글 파일명, .wav/.mp3/.m4a 등).

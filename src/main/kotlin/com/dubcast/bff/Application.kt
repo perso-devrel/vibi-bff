@@ -175,7 +175,7 @@ fun Application.module() {
     configureRouting(
         fileStorage, elevenLabsClient, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
-        autoSubtitleService, autoDubService, httpClient, renderInputCache,
+        autoSubtitleService, autoDubService, geminiClient, httpClient, renderInputCache,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(

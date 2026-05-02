@@ -107,6 +107,28 @@ v1 is retained for backwards compatibility.
 | POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems; disposes source stems on success          |
 | GET    | `/api/v2/separate/mix/{mixJobId}`            | Mix status + signed download URL when `COMPLETED`             |
 | GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`)                        |
+| POST   | `/api/v2/chat`                               | Gemini function-calling assistant — returns `{kind:"text"\|"proposal"}` (see [Chat](#chat-endpoint)) |
+
+### Chat endpoint
+
+`POST /api/v2/chat` accepts JSON `{messages, projectContext, locale}`. The
+service forwards the conversation + a registered set of `EDIT_TOOLS`
+function declarations to Vertex AI Gemini (`generateContent`). Gemini either
+returns plain text (read-only / clarification) or one or more `functionCall`
+parts that the BFF relays as `proposal.steps` (max 5). The mobile dispatcher
+then maps each step name to the matching `TimelineViewModel.onXxx`.
+
+Tool registry (`service/ChatToolDefs.kt`): `delete_segment_range`,
+`duplicate_segment_range`, `update_segment_volume`, `update_segment_speed`,
+`separate_audio_range`, `update_stem_volume`, `update_subtitle_text`,
+`generate_subtitles`, `generate_dub`, `move_bgm_clip`, `update_bgm_volume`,
+`generate_subtitles_for_bgm`, `generate_dub_for_bgm`.
+
+System instruction enforces: respond in user's language, never invent IDs,
+single tool kind per response (`text` or `proposal`), confirmation gate on
+the mobile side. ProjectContext (segments / subtitles / dubs / BGM clips /
+stems / playhead / selectionId) is inlined as a system prefix on the first
+user turn.
 
 ### Render endpoint
 

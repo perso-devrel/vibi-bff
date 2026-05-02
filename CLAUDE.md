@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-vibi BFF — Kotlin/Ktor backend. ElevenLabs (TTS / voices / lip-sync dubbing) 프록시 + Perso AI (오디오 분리) 프록시 + 로컬 ffmpeg 렌더 파이프라인 (dub audio mix, sticker overlays, multi-segment concat, subtitle burn-in).
+vibi BFF — Kotlin/Ktor backend. ElevenLabs (TTS / voices / lip-sync dubbing) 프록시 + Perso AI (오디오 분리) 프록시 + Vertex AI Gemini (자막 번역 + 채팅 function calling) 프록시 + 로컬 ffmpeg 렌더 파이프라인 (dub audio mix, sticker overlays, multi-segment concat, subtitle burn-in).
 
 - **Stack**: Kotlin 2.0, Ktor 3.0.3, Netty, kotlinx.serialization, JDK 21
 - **Runtime deps**: `ffmpeg`, `ffprobe` on `PATH`

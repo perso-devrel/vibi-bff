@@ -1,0 +1,201 @@
+package com.dubcast.bff.service
+
+import kotlinx.serialization.json.JsonObject
+import kotlinx.serialization.json.buildJsonObject
+import kotlinx.serialization.json.put
+import kotlinx.serialization.json.putJsonObject
+
+/**
+ * Gemini Vertex AI 의 functionDeclarations 단일 진실 공급원.
+ * 모바일 dispatcher 는 여기 등록된 name 외엔 거부 (방어선). v1 사용자 선택 도구 범위:
+ *  - 영상 편집: delete/duplicate range, volume/speed
+ *  - 음성 분리: range 기반 separate, stem 볼륨
+ *  - 자막·더빙: 텍스트 수정, 자동 생성 (영상/BGM 모두)
+ *  - 음원/녹음: 위치/볼륨
+ *
+ * 새 tool 추가 시: (1) 여기 declaration, (2) 모바일 ChatToolDispatcher when 분기.
+ */
+object ChatToolDefs {
+
+    /** Vertex `tools[0].functionDeclarations` JsonArray 직렬화 형태로 반환. */
+    fun functionDeclarations(): List<JsonObject> = listOf(
+        // --- 영상 편집 ---
+        fn(
+            name = "delete_segment_range",
+            description = "Delete a range from a video segment. The range is in milliseconds within the segment timeline.",
+            properties = mapOf(
+                "segmentId" to schema("string", "Target segment id from projectContext.segments."),
+                "startMs" to schema("integer", "Range start ms (inclusive)."),
+                "endMs" to schema("integer", "Range end ms (exclusive)."),
+            ),
+            required = listOf("segmentId", "startMs", "endMs"),
+        ),
+        fn(
+            name = "duplicate_segment_range",
+            description = "Duplicate a sub-range of a video segment, inserting the copy after the original.",
+            properties = mapOf(
+                "segmentId" to schema("string", "Target segment id."),
+                "startMs" to schema("integer", "Range start ms."),
+                "endMs" to schema("integer", "Range end ms."),
+            ),
+            required = listOf("segmentId", "startMs", "endMs"),
+        ),
+        fn(
+            name = "update_segment_volume",
+            description = "Set the playback volume for a video segment (range applies to whole segment in v1).",
+            properties = mapOf(
+                "segmentId" to schema("string", "Target segment id."),
+                "volumeScale" to schema("number", "0..2 multiplier. 1.0 = original."),
+            ),
+            required = listOf("segmentId", "volumeScale"),
+        ),
+        fn(
+            name = "update_segment_speed",
+            description = "Set the playback speed for a video segment.",
+            properties = mapOf(
+                "segmentId" to schema("string", "Target segment id."),
+                "speedScale" to schema("number", "0.25..4 multiplier. 1.0 = original."),
+            ),
+            required = listOf("segmentId", "speedScale"),
+        ),
+        // --- 음원 분리 ---
+        fn(
+            name = "separate_audio_range",
+            description = "Run audio separation on a segment range or whole BGM clip. Use trimStartMs/trimEndMs for partial range.",
+            properties = mapOf(
+                "segmentId" to schema("string", "Target segment id (for video). Omit for BGM-only separation."),
+                "bgmClipId" to schema("string", "Target BGM clip id (instead of segmentId)."),
+                "numberOfSpeakers" to schema("integer", "Hint 1..10. 2 if unknown."),
+                "trimStartMs" to schema("integer", "Optional partial range start ms within segment."),
+                "trimEndMs" to schema("integer", "Optional partial range end ms within segment."),
+            ),
+            required = listOf("numberOfSpeakers"),
+        ),
+        fn(
+            name = "update_stem_volume",
+            description = "Set volume of a separated stem (in-memory; effective at next render). 0..2.",
+            properties = mapOf(
+                "stemId" to schema("string", "Stem id from projectContext.separationStems."),
+                "volume" to schema("number", "0..2 multiplier."),
+            ),
+            required = listOf("stemId", "volume"),
+        ),
+        // --- 자막·더빙 ---
+        fn(
+            name = "update_subtitle_text",
+            description = "Replace a subtitle clip's text. Preserve language unless user explicitly switches.",
+            properties = mapOf(
+                "clipId" to schema("string", "Target subtitle clip id."),
+                "text" to schema("string", "New text. Use the user's language verbatim — do not auto-translate."),
+            ),
+            required = listOf("clipId", "text"),
+        ),
+        fn(
+            name = "generate_subtitles",
+            description = "Trigger automatic subtitle generation for the project's video. Costs minutes.",
+            properties = mapOf(
+                "sourceLanguageCode" to schema("string", "BCP-47 source language or 'auto'."),
+                "targetLanguageCodes" to schema("array", "Target codes, e.g., ['en','ja']."),
+            ),
+            required = listOf("targetLanguageCodes"),
+        ),
+        fn(
+            name = "generate_dub",
+            description = "Trigger automatic dubbing for the project's video into a single target language. Costs minutes.",
+            properties = mapOf(
+                "sourceLanguageCode" to schema("string", "BCP-47 source language or 'auto'."),
+                "targetLanguageCode" to schema("string", "Single target lang code."),
+            ),
+            required = listOf("targetLanguageCode"),
+        ),
+        // --- BGM 위치·볼륨 ---
+        fn(
+            name = "move_bgm_clip",
+            description = "Set a BGM clip's start position (timeline insertion point) in ms.",
+            properties = mapOf(
+                "clipId" to schema("string", "Target BGM clip id."),
+                "newStartMs" to schema("integer", "New start ms."),
+            ),
+            required = listOf("clipId", "newStartMs"),
+        ),
+        fn(
+            name = "update_bgm_volume",
+            description = "Set BGM clip volume (0..2).",
+            properties = mapOf(
+                "clipId" to schema("string", "Target BGM clip id."),
+                "volumeScale" to schema("number", "0..2 multiplier."),
+            ),
+            required = listOf("clipId", "volumeScale"),
+        ),
+        // --- BGM 자막·더빙 (Stage -1 prereq 완료 후 활성) ---
+        fn(
+            name = "generate_subtitles_for_bgm",
+            description = "Trigger automatic subtitle generation for a BGM clip's audio.",
+            properties = mapOf(
+                "clipId" to schema("string", "Target BGM clip id."),
+                "targetLanguageCodes" to schema("array", "Target codes."),
+            ),
+            required = listOf("clipId", "targetLanguageCodes"),
+        ),
+        fn(
+            name = "generate_dub_for_bgm",
+            description = "Trigger automatic dubbing for a BGM clip's audio into a target language.",
+            properties = mapOf(
+                "clipId" to schema("string", "Target BGM clip id."),
+                "targetLanguageCode" to schema("string", "Single target lang code."),
+            ),
+            required = listOf("clipId", "targetLanguageCode"),
+        ),
+    )
+
+    /** v1 systemInstruction — 도구 외 동작 금지, 신뢰도 분기, 비용 힌트, 다국어 응답 규칙. */
+    val SYSTEM_INSTRUCTION = """
+        You are a video-editing assistant integrated into a mobile timeline editor. You can only call the registered functions below; you cannot invent actions or write free-form code. Respect these rules strictly:
+
+        1. RESPOND IN THE USER'S LANGUAGE. Detect the language from the latest user turn and answer in that language (rationale, clarifications, search results). The locale field is only a fallback. Never auto-translate the user's text values (e.g., subtitle text arguments) — pass them verbatim.
+
+        2. DECIDE OUTPUT KIND:
+           - kind="text": for read-only questions ("how many subtitles", "find clips that say X") or clarifications when references in the user message cannot be resolved against projectContext (do not fabricate ids/timestamps).
+           - kind="proposal": whenever the user expresses an editing intent. Even single-action intents go through proposal — the mobile UI requires user confirmation before any change.
+
+        3. CONFIDENCE-DRIVEN PROPOSALS:
+           - High confidence (tool + args clearly identifiable from projectContext + user message): single-step proposal.
+           - Low confidence (vague phrases like "make this more energetic"): infer the most plausible multi-step plan (≤5 steps) and explain your interpretation in `rationale` with phrasing like "이렇게 해석했어요. 다른 방향이라면 알려주세요" / "I interpreted this as ... let me know if you wanted something else".
+           - Impossible (referenced ids/timestamps not in projectContext): kind=text clarification question.
+
+        4. PROPOSAL.STEPS limit: 5 max. If the user's intent suggests more, pick the most impactful 5 and add a note in rationale to ask for further refinements.
+
+        5. COST HINTS: if proposal includes generate_subtitles, generate_dub, generate_subtitles_for_bgm, generate_dub_for_bgm, or separate_audio_range, append a cost hint to rationale (e.g., "(예상 소요 약 N분)" / "(estimated ~N min)").
+
+        6. CONTEXT ANCHORS: use projectContext.currentPlayheadMs to resolve "여기"/"here", and projectContext.selectedSegmentId / selectedClipId for "이 클립"/"this clip".
+
+        7. NEVER include tool calls inline with kind=text. Choose one kind per response.
+    """.trimIndent()
+
+    private fun fn(
+        name: String,
+        description: String,
+        properties: Map<String, JsonObject>,
+        required: List<String>,
+    ): JsonObject = buildJsonObject {
+        put("name", name)
+        put("description", description)
+        putJsonObject("parameters") {
+            put("type", "object")
+            putJsonObject("properties") {
+                properties.forEach { (k, v) -> put(k, v) }
+            }
+            put(
+                "required",
+                kotlinx.serialization.json.buildJsonArray {
+                    required.forEach { add(kotlinx.serialization.json.JsonPrimitive(it)) }
+                },
+            )
+        }
+    }
+
+    private fun schema(type: String, description: String): JsonObject = buildJsonObject {
+        put("type", type)
+        put("description", description)
+    }
+}
