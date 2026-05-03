@@ -20,13 +20,7 @@ object MediaTrimmer {
             file.absolutePath,
         )
         return try {
-            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val output = proc.inputStream.bufferedReader().readText().trim()
-            val exit = proc.waitFor()
-            if (exit != 0) {
-                log.warn("ffprobe exit={} for {}: {}", exit, file.name, output.takeLast(200))
-                return null
-            }
+            val output = FfmpegRunner.run(cmd, "ffprobe ${file.name}", timeoutMinutes = 1).trim()
             val seconds = output.lines().firstOrNull()?.toDoubleOrNull() ?: return null
             (seconds * 1000).toLong()
         } catch (e: Exception) {
@@ -55,11 +49,9 @@ object MediaTrimmer {
             outFile.absolutePath,
         )
         return try {
-            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val output = proc.inputStream.bufferedReader().readText()
-            val exit = proc.waitFor()
-            if (exit != 0 || !outFile.exists() || outFile.length() == 0L) {
-                log.error("ffmpeg trim failed exit={}: {}", exit, output.takeLast(500))
+            FfmpegRunner.run(cmd, "ffmpeg trim ${src.name}", timeoutMinutes = 5)
+            if (!outFile.exists() || outFile.length() == 0L) {
+                log.error("ffmpeg trim produced empty output for {}", src.name)
                 outFile.delete()
                 false
             } else true

@@ -58,27 +58,22 @@ class StemMixService(
         jobs[mixJobId] = job
 
         scope.launch {
-            var process: Process? = null
             try {
                 job.status = "PROCESSING"
                 val command = buildStemMixCommand(stemFiles, outputFile)
                 log.info("Starting stem mix: mixJobId={} inputs={}", mixJobId, stemFiles.size)
-                process = ProcessBuilder(command).redirectErrorStream(true).start()
-                process.inputStream.bufferedReader().use { it.readText() }
-                val exit = process.waitFor()
-                if (exit == 0 && outputFile.exists()) {
+                FfmpegRunner.run(command, "stem mix $mixJobId", timeoutMinutes = 10)
+                if (outputFile.exists()) {
                     job.status = "COMPLETED"
                     job.progress = 100
                     log.info("Stem mix completed: mixJobId={} size={}", mixJobId, outputFile.length())
                     onCompleted(job)
                 } else {
                     job.status = "FAILED"
-                    job.error = "ffmpeg exited with code $exit"
-                    outputFile.delete()
-                    log.error("Stem mix failed: mixJobId={} exit={}", mixJobId, exit)
+                    job.error = "ffmpeg produced no output"
+                    log.error("Stem mix failed: mixJobId={} no output", mixJobId)
                 }
             } catch (e: Exception) {
-                process?.destroyForcibly()
                 outputFile.delete()
                 job.status = "FAILED"
                 job.error = e.message

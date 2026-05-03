@@ -1,5 +1,6 @@
 package com.dubcast.bff.service
 
+import com.dubcast.bff.FAILED_JOB_TTL_MS
 import com.dubcast.bff.config.SeparationConfig
 import com.dubcast.bff.model.PersoScriptSentence
 import com.dubcast.bff.model.SeparationSpec
@@ -23,7 +24,6 @@ import java.util.concurrent.TimeUnit
 // READY + consumedByMixJobId=set  → mix in flight; blocks re-submit.
 // COMPLETED mix triggers dispose(jobId); FAILED is kept briefly so clients
 // can read the error before the cleanup task reaps it.
-private const val FAILED_JOB_TTL_MS = 5 * 60 * 1000L
 
 data class SeparationJob(
     val jobId: String,
@@ -155,7 +155,7 @@ class SeparationService(
         delay(initialDelayMs)
         pollPersoUntilComplete(
             persoClient, scope, projectSeq,
-            pollIntervalMs = 10_000L,
+            pollIntervalMs = pollIntervalMs,
             maxPollMinutes = maxPollMinutes,
         ) { progress, reason ->
             job.progress = progress
@@ -252,13 +252,25 @@ class SeparationService(
         }
 
         val downloaded = mutableListOf<Pair<File, Long>>() // file → offsetMs
+        var skipped = 0
         try {
             utterances.forEachIndexed { idx, s ->
                 val url = s.audioUrl ?: return@forEachIndexed
                 val tmp = File(workDir, "u_${outputFile.nameWithoutExtension}_$idx.mp3")
-                persoClient.streamDownloadAuthorized(url, tmp)
-                downloaded.add(tmp to s.offsetMs)
+                try {
+                    persoClient.streamDownloadAuthorized(url, tmp)
+                    downloaded.add(tmp to s.offsetMs)
+                } catch (e: Exception) {
+                    skipped++
+                    log.warn("utterance download failed (skip): idx={} offsetMs={} url={} err={}",
+                        idx, s.offsetMs, url, e.message)
+                    tmp.delete()
+                }
             }
+            if (downloaded.isEmpty() && skipped > 0) {
+                throw RuntimeException("All ${utterances.size} utterance downloads failed for ${outputFile.name}")
+            }
+            if (skipped > 0) log.warn("buildSpeakerStem {}: {} utterances skipped, {} kept", outputFile.name, skipped, downloaded.size)
             ffmpegMixWithOffsets(downloaded, totalDurationMs, outputFile)
         } finally {
             downloaded.forEach { (f, _) -> f.delete() }
@@ -350,21 +362,7 @@ class SeparationService(
     }
 
     private fun drainAndAwait(process: Process, label: String) {
-        val out = StringBuilder()
-        val reader = Thread {
-            process.inputStream.bufferedReader().useLines { lines ->
-                lines.forEach { out.appendLine(it) }
-            }
-        }.also { it.isDaemon = true; it.start() }
-        val finished = process.waitFor(10, TimeUnit.MINUTES)
-        reader.join(2000)
-        if (!finished) {
-            process.destroyForcibly()
-            throw RuntimeException("$label timed out\n${out.toString().takeLast(2000)}")
-        }
-        if (process.exitValue() != 0) {
-            throw RuntimeException("$label failed (exit=${process.exitValue()}):\n${out.toString().takeLast(3000)}")
-        }
+        FfmpegRunner.drainAndAwait(process, label, timeoutMinutes = 10)
     }
 
     private fun cleanupAbandoned() {

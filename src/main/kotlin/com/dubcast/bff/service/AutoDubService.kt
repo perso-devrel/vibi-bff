@@ -1,5 +1,7 @@
 package com.dubcast.bff.service
 
+import com.dubcast.bff.FAILED_JOB_TTL_MS
+import com.dubcast.bff.READY_JOB_TTL_MS as READY_TTL_MS
 import com.dubcast.bff.model.AutoDubSpec
 import com.dubcast.bff.plugins.PersoApiException
 import kotlinx.coroutines.CoroutineScope
@@ -11,9 +13,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-
-private const val FAILED_JOB_TTL_MS = 5 * 60 * 1000L
-private const val READY_TTL_MS = 60 * 60 * 1000L
 
 data class AutoDubJob(
     val jobId: String,
@@ -86,9 +85,14 @@ class AutoDubService(
         val registration = persoClient.uploadMedia(mediaType, sourceFile)
         // 원본 영상은 ffmpeg mux 단계에서 사용해야 하므로 outputDir 로 이동 후 보관
         // (Perso 업로드 직후 dispose 하던 기존 동작 변경).
+        // renameTo 는 cross-filesystem 일 경우 false 반환 — 실패 시 copy 로 fallback.
+        // 큰 영상 (수백 MB) 일 때 disk I/O 절반 절감.
         val keptSource = File(job.outputDir, "source.${sourceFile.extension.ifBlank { "mp4" }}")
-        sourceFile.copyTo(keptSource, overwrite = true)
-        sourceFile.delete()
+        if (keptSource.exists()) keptSource.delete()
+        if (!sourceFile.renameTo(keptSource)) {
+            sourceFile.copyTo(keptSource, overwrite = true)
+            sourceFile.delete()
+        }
 
         job.status = "SUBMITTED"
         val projectSeq = persoClient.submitTranslate(
@@ -157,37 +161,6 @@ class AutoDubService(
     }
 
     /**
-     * 영상의 video 트랙 + 더빙 audio 트랙만 결합 — 영상의 원본 audio 는 -map 0:v 로만 가져오므로
-     * 자연스럽게 빠진다. video 는 stream copy (-c:v copy) 로 빠르게.
-     */
-    private fun ffmpegMux(videoFile: File, audioFile: File, outputFile: File): Boolean {
-        val cmd = listOf(
-            "ffmpeg", "-y",
-            "-i", videoFile.absolutePath,
-            "-i", audioFile.absolutePath,
-            "-c:v", "copy",
-            "-c:a", "aac",
-            "-map", "0:v:0",
-            "-map", "1:a:0",
-            "-shortest",
-            outputFile.absolutePath
-        )
-        return try {
-            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val finished = proc.waitFor(2, TimeUnit.MINUTES)
-            if (!finished) {
-                proc.destroyForcibly()
-                false
-            } else {
-                proc.exitValue() == 0 && outputFile.exists() && outputFile.length() > 0
-            }
-        } catch (e: Exception) {
-            log.error("ffmpeg mux exception", e)
-            false
-        }
-    }
-
-    /**
      * 더빙 mp4 의 audio 트랙만 mp3 로 추출 — re-encode 로 호환성 보장.
      */
     private fun ffmpegExtractAudio(videoFile: File, outputFile: File): Boolean {
@@ -200,14 +173,8 @@ class AutoDubService(
             outputFile.absolutePath
         )
         return try {
-            val proc = ProcessBuilder(cmd).redirectErrorStream(true).start()
-            val finished = proc.waitFor(2, TimeUnit.MINUTES)
-            if (!finished) {
-                proc.destroyForcibly()
-                false
-            } else {
-                proc.exitValue() == 0 && outputFile.exists() && outputFile.length() > 0
-            }
+            FfmpegRunner.run(cmd, "ffmpeg extract-audio ${videoFile.name}", timeoutMinutes = 2)
+            outputFile.exists() && outputFile.length() > 0
         } catch (e: Exception) {
             log.error("ffmpeg extract-audio exception", e)
             false

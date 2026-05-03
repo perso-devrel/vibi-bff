@@ -127,12 +127,12 @@ class PersoClientTest {
     fun `getDownloadInfo returns availability flags`() = runBlocking {
         val client = clientWith {
             respond(
-                content = """{
+                content = """{"result":{
                     "hasOriginalVoiceOnly":true,
                     "hasOriginalBackground":true,
                     "hasOriginalSpeakerAudioCollection":true,
                     "hasZipDownload":true
-                }""",
+                }}""",
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )

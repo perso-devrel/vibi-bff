@@ -332,7 +332,8 @@ class RenderService(
     ): File {
         val outFile = File(tempDir, "seg_vid_$idx.mp4")
         val trimStart = (seg.trimStartMs ?: 0L) / 1000.0
-        val trimEnd = (seg.trimEndMs ?: seg.durationMs) / 1000.0
+        // Mobile sends 0L as "no trim" sentinel — treat both null and <=0 as full duration.
+        val trimEnd = (seg.trimEndMs?.takeIf { it > 0L } ?: seg.durationMs) / 1000.0
         val sourceDurationSec = trimEnd - trimStart
         val speed = seg.speedScale
         val volume = seg.volumeScale
@@ -440,11 +441,17 @@ class RenderService(
     }
 
     private fun runFfmpegBlocking(command: List<String>): Int {
-        val proc = ProcessBuilder(command).redirectErrorStream(true).start()
-        val out = proc.inputStream.bufferedReader().readText()
-        val exit = proc.waitFor()
-        if (exit != 0) log.error("ffmpeg step failed (exit {}): {}", exit, out.takeLast(500))
-        return exit
+        // Drains stdout on a daemon thread to avoid OS pipe-buffer deadlock
+        // when ffmpeg fills the ~64KB pipe before the parent reads.
+        return try {
+            FfmpegRunner.run(command, "ffmpeg step", timeoutMinutes = 30)
+            0
+        } catch (e: Exception) {
+            log.error("ffmpeg step failed: {}", e.message)
+            // Try to recover an exit code from the message; otherwise return -1.
+            val match = Regex("exit=(-?\\d+)").find(e.message ?: "")
+            match?.groupValues?.get(1)?.toIntOrNull() ?: -1
+        }
     }
 
     // ── FFmpeg command builder ────────────────────────────────────────────────
@@ -645,15 +652,17 @@ class RenderService(
 
     private fun getVideoSize(videoFile: File): Pair<Int, Int> {
         return try {
-            val proc = ProcessBuilder(
-                "ffprobe", "-v", "quiet",
-                "-show_entries", "stream=width,height",
-                "-select_streams", "v:0",
-                "-of", "csv=p=0",
-                videoFile.absolutePath,
-            ).start()
-            val output = proc.inputStream.bufferedReader().readText().trim()
-            proc.waitFor()
+            val output = FfmpegRunner.run(
+                listOf(
+                    "ffprobe", "-v", "quiet",
+                    "-show_entries", "stream=width,height",
+                    "-select_streams", "v:0",
+                    "-of", "csv=p=0",
+                    videoFile.absolutePath,
+                ),
+                "ffprobe size ${videoFile.name}",
+                timeoutMinutes = 1,
+            ).trim()
             val parts = output.lines().first().split(",")
             val w = parts.getOrNull(0)?.toIntOrNull() ?: 1920
             val h = parts.getOrNull(1)?.toIntOrNull() ?: 1080

@@ -29,7 +29,9 @@ fun Application.configureErrorHandling() {
         }
         exception<ElevenLabsApiException> { call, cause ->
             log.error("ElevenLabs API error: {} - {}", cause.statusCode, cause.body)
+            // 401 must precede the in 400..499 branch — otherwise it falls through to BadRequest.
             val status = when (cause.statusCode) {
+                401 -> HttpStatusCode.Unauthorized
                 429 -> HttpStatusCode.TooManyRequests
                 in 400..499 -> HttpStatusCode.BadRequest
                 else -> HttpStatusCode.BadGateway
@@ -45,6 +47,7 @@ fun Application.configureErrorHandling() {
         exception<PersoApiException> { call, cause ->
             log.error("Perso API error: {} - {}", cause.statusCode, cause.body)
             val status = when (cause.statusCode) {
+                401 -> HttpStatusCode.Unauthorized
                 402 -> HttpStatusCode.PaymentRequired
                 429 -> HttpStatusCode.TooManyRequests
                 in 400..499 -> HttpStatusCode.BadRequest

@@ -1,5 +1,7 @@
 package com.dubcast.bff.service
 
+import com.dubcast.bff.FAILED_JOB_TTL_MS
+import com.dubcast.bff.READY_JOB_TTL_MS as READY_TTL_MS
 import com.dubcast.bff.model.PersoScriptSentence
 import com.dubcast.bff.model.SubtitleSpec
 import kotlinx.coroutines.CoroutineScope
@@ -12,9 +14,6 @@ import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
-
-private const val FAILED_JOB_TTL_MS = 5 * 60 * 1000L
-private const val READY_TTL_MS = 60 * 60 * 1000L
 
 data class SubtitleJob(
     val jobId: String,
@@ -199,7 +198,7 @@ class AutoSubtitleService(
         delay(15_000L)
         pollPersoUntilComplete(
             persoClient, scope, projectSeq,
-            pollIntervalMs = 10_000L,
+            pollIntervalMs = pollIntervalMs,
             maxPollMinutes = maxPollMinutes,
         ) { progress, reason ->
             job.progress = progress
@@ -365,33 +364,18 @@ class AutoSubtitleService(
      */
     private fun extractAudioForStt(input: File, output: File) {
         log.info("ffmpeg extract audio: input={} ({} bytes) output={}", input.name, input.length(), output.absolutePath)
-        val process = ProcessBuilder(
-            "ffmpeg", "-y",
-            "-i", input.absolutePath,
-            "-vn",
-            "-c:a", "libmp3lame",
-            "-q:a", "5",
-            output.absolutePath
-        ).redirectErrorStream(true).start()
-
-        val ffmpegOutput = StringBuilder()
-        val readerThread = Thread {
-            process.inputStream.bufferedReader().useLines { lines ->
-                lines.forEach { ffmpegOutput.appendLine(it) }
-            }
-        }.also { it.isDaemon = true; it.start() }
-
-        val finished = process.waitFor(5, TimeUnit.MINUTES)
-        readerThread.join(2000)
-        if (!finished) {
-            process.destroyForcibly()
-            throw RuntimeException("ffmpeg audio extract timed out\n${ffmpegOutput.takeLast(2000)}")
-        }
-        if (process.exitValue() != 0) {
-            throw RuntimeException("ffmpeg audio extract failed (exit=${process.exitValue()}):\n${ffmpegOutput.toString().takeLast(3000)}")
-        }
+        FfmpegRunner.run(
+            listOf(
+                "ffmpeg", "-y",
+                "-i", input.absolutePath,
+                "-vn",
+                "-c:a", "libmp3lame",
+                "-q:a", "5",
+                output.absolutePath,
+            ),
+            "ffmpeg audio extract",
+            timeoutMinutes = 5,
+        )
         log.info("ffmpeg audio extract done: output={} ({} bytes)", output.name, output.length())
     }
 }
-
-private fun StringBuilder.takeLast(n: Int): String = toString().takeLast(n)

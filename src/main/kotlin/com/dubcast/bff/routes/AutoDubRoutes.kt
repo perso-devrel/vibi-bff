@@ -1,5 +1,6 @@
 package com.dubcast.bff.routes
 
+import com.dubcast.bff.MAX_UPLOAD_FILE_SIZE
 import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.model.AutoDubJobResponse
 import com.dubcast.bff.model.AutoDubSpec
@@ -13,8 +14,6 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 
-private const val MAX_AUTODUB_FILE_SIZE = 500L * 1024 * 1024 // 500MB
-
 fun Route.autoDubRoutes(
     autoDubService: AutoDubService,
     signer: SignedUrlService,
@@ -25,7 +24,7 @@ fun Route.autoDubRoutes(
         // POST /api/v2/autodub — submit
         post {
             val (file, spec) = parseUploadAndSpec<AutoDubSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_AUTODUB_FILE_SIZE), fileStorage, MAX_AUTODUB_FILE_SIZE,
+                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE), fileStorage, MAX_UPLOAD_FILE_SIZE,
             )
             val jobId = autoDubService.submit(file, spec)
             call.respond(HttpStatusCode.Accepted, AutoDubJobResponse(jobId = jobId))

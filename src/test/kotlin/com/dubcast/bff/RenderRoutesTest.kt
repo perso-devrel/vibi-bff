@@ -240,7 +240,7 @@ class RenderRoutesTest {
         // Verify the resolved video file was forwarded to the render service.
         verify(exactly = 1) {
             renderService.submitRender(
-                legacyVideoFile = match { it != null && it.absolutePath == cached.videoFile.absolutePath },
+                legacyVideoFile = matchNullable<File> { it != null && it.absolutePath == cached.videoFile.absolutePath },
                 videoFiles = any(),
                 segmentImageFiles = any(),
                 audioFiles = any(),

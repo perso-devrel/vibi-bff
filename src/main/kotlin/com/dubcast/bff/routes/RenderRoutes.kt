@@ -1,5 +1,6 @@
 package com.dubcast.bff.routes
 
+import com.dubcast.bff.MAX_UPLOAD_FILE_SIZE
 import com.dubcast.bff.model.RenderConfig
 import com.dubcast.bff.model.RenderInputCacheResponse
 import com.dubcast.bff.model.RenderResponse
@@ -27,7 +28,11 @@ import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
 
-private const val MAX_FILE_SIZE = 500L * 1024 * 1024 // 500MB
+// Hot-path regex — moving from inline-`Regex(...)` (recompiled per directive)
+// to top-level vals avoids O(directives) regex compilation per render submit.
+// 자체 BFF URL: "/api/v2/separate/{jobId}/stem/{stemId}?token=..."
+private val SEP_URL_REGEX = Regex("""(?:.*?)/api/v2/separate/([^/?#]+)/stem/([^/?#]+)\??(.*)$""")
+private val MIX_URL_REGEX = Regex("""(?:.*?)/api/v2/separate/mix/([^/?#]+)/download\??(.*)$""")
 
 fun Route.renderRoutes(
     renderService: RenderService,
@@ -45,7 +50,7 @@ fun Route.renderRoutes(
         // the bytes. inputId is sha256(video)[:16 bytes hex] so the same
         // video resolves to the same slot on retry.
         post("/inputs") {
-            val multipart = call.receiveMultipart(formFieldLimit = MAX_FILE_SIZE)
+            val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
             // Buffer audios on disk first (multipart parser is single-pass; we
             // need the video stream to flow into sha256 BEFORE we know the id).
@@ -112,7 +117,7 @@ fun Route.renderRoutes(
                     videoFileName = vName,
                     videoStream = vTemp.inputStream(),
                     audios = audioParts,
-                    maxVideoBytes = MAX_FILE_SIZE,
+                    maxVideoBytes = MAX_UPLOAD_FILE_SIZE,
                 )
                 runCatching { vTemp.delete() }
 
@@ -135,7 +140,7 @@ fun Route.renderRoutes(
 
         post {
             // Ktor 3.x default formFieldLimit 50MB → 70MB+ 영상 multipart 거부됨. 500MB 까지 허용.
-            val multipart = call.receiveMultipart(formFieldLimit = MAX_FILE_SIZE)
+            val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
             var legacyVideoFile: File? = null
             val videoFiles = mutableMapOf<String, File>()
@@ -153,7 +158,7 @@ fun Route.renderRoutes(
                 val blobPath = fileStorage.saveUpload(
                     part.originalFileName ?: defaultName,
                     part.streamProvider(),
-                    MAX_FILE_SIZE,
+                    MAX_UPLOAD_FILE_SIZE,
                 )
                 return fileStorage.getUploadFile(blobPath)
             }
@@ -167,12 +172,12 @@ fun Route.renderRoutes(
                                 legacyVideoFile = saveFile(part, "video.mp4")
                             name.startsWith("video_") ->
                                 videoFiles[name] = saveFile(part, "$name.mp4")
+                            name.startsWith("audio_override") ->
+                                overrideAudioFiles[name] = saveFile(part, "$name.mp3")
                             name.startsWith("audio_") ->
                                 audioFiles[name] = saveFile(part, "$name.mp3")
                             name.startsWith("bgm_") ->
                                 bgmAudioFiles[name] = saveFile(part, "$name.mp3")
-                            name.startsWith("audio_override") ->
-                                overrideAudioFiles[name] = saveFile(part, "$name.mp3")
                             name.startsWith("segment_image_") ->
                                 segmentImageFiles[name] = saveFile(part, "$name.jpg")
                             name.startsWith("image_") ->
@@ -378,11 +383,7 @@ private suspend fun resolveStemUrlToFile(
     httpClient: HttpClient,
     tempStemFiles: MutableList<File>,
 ): File {
-    // 자체 BFF URL: "/api/v2/separate/{jobId}/stem/{stemId}?token=..."
-    val sepRegex = Regex("""(?:.*?)/api/v2/separate/([^/?#]+)/stem/([^/?#]+)\??(.*)$""")
-    val mixRegex = Regex("""(?:.*?)/api/v2/separate/mix/([^/?#]+)/download\??(.*)$""")
-
-    sepRegex.matchEntire(audioUrl)?.let { m ->
+    SEP_URL_REGEX.matchEntire(audioUrl)?.let { m ->
         val jobId = m.groupValues[1]
         val stemId = m.groupValues[2]
         val query = m.groupValues[3]
@@ -396,7 +397,7 @@ private suspend fun resolveStemUrlToFile(
         // host 라도 BFF 가 다른 인스턴스라면 받을 수 있게.
     }
 
-    mixRegex.matchEntire(audioUrl)?.let { _ ->
+    MIX_URL_REGEX.matchEntire(audioUrl)?.let { _ ->
         // mix URL 로컬 매핑은 의도적으로 skip — render 가 자기 BFF 의 mix 를 끌어 쓰는
         // 케이스는 거의 없고, 굳이 끌 거면 외부 다운로드로도 동일 결과.
     }

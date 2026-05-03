@@ -1,5 +1,6 @@
 package com.dubcast.bff.routes
 
+import com.dubcast.bff.MAX_UPLOAD_FILE_SIZE
 import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.model.SubtitleJobResponse
 import com.dubcast.bff.model.SubtitleSpec
@@ -13,8 +14,6 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 
-private const val MAX_SUBTITLE_FILE_SIZE = 500L * 1024 * 1024 // 500MB
-
 fun Route.subtitleRoutes(
     subtitleService: AutoSubtitleService,
     signer: SignedUrlService,
@@ -25,7 +24,7 @@ fun Route.subtitleRoutes(
         // POST /api/v2/subtitles — submit
         post {
             val (file, spec) = parseUploadAndSpec<SubtitleSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_SUBTITLE_FILE_SIZE), fileStorage, MAX_SUBTITLE_FILE_SIZE,
+                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE), fileStorage, MAX_UPLOAD_FILE_SIZE,
             )
             val jobId = subtitleService.submit(file, spec)
             call.respond(HttpStatusCode.Accepted, SubtitleJobResponse(jobId = jobId))
@@ -36,7 +35,7 @@ fun Route.subtitleRoutes(
         // mediaType 은 무시됨 (Perso STT 안 씀). 응답 폴링/다운로드는 기존 /subtitles/{jobId} 라우트 그대로.
         post("/regenerate") {
             val (file, spec) = parseUploadAndSpec<SubtitleSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_SUBTITLE_FILE_SIZE), fileStorage, MAX_SUBTITLE_FILE_SIZE,
+                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE), fileStorage, MAX_UPLOAD_FILE_SIZE,
                 defaultFileName = "edited.srt",
             )
             val jobId = subtitleService.submitRegenerate(file, spec)

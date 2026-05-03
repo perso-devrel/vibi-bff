@@ -1,5 +1,6 @@
 package com.dubcast.bff.routes
 
+import com.dubcast.bff.MAX_UPLOAD_FILE_SIZE
 import com.dubcast.bff.config.AppConfig
 import com.dubcast.bff.model.*
 import com.dubcast.bff.plugins.ApiErrorException
@@ -17,8 +18,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 
-private const val MAX_SEPARATION_FILE_SIZE = 500L * 1024 * 1024 // 500MB
-
 fun Route.separationRoutes(
     separationService: SeparationService,
     stemMixService: StemMixService,
@@ -30,7 +29,7 @@ fun Route.separationRoutes(
         // POST /api/v2/separate — submit job
         post {
             val (file, spec) = parseUploadAndSpec<SeparationSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_SEPARATION_FILE_SIZE), fileStorage, MAX_SEPARATION_FILE_SIZE,
+                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE), fileStorage, MAX_UPLOAD_FILE_SIZE,
             )
             val pipelineInput = maybeTrim(file, spec)
             val jobId = separationService.submit(pipelineInput, spec)
