@@ -409,7 +409,9 @@ class RenderService(
     private fun segmentOutputDurationMs(seg: Segment): Long = when (seg.type) {
         "VIDEO" -> {
             val trimStart = seg.trimStartMs ?: 0L
-            val trimEnd = seg.trimEndMs ?: seg.durationMs
+            // 모바일이 0L 을 "no trim" sentinel 로 보내므로 null 외에 <=0 도 durationMs 로 fallback.
+            // 누락 시 모든 VIDEO 세그먼트의 출력 길이가 0 으로 계산됨.
+            val trimEnd = seg.trimEndMs?.takeIf { it > 0L } ?: seg.durationMs
             ((trimEnd - trimStart) / seg.speedScale).toLong().coerceAtLeast(0L)
         }
         else -> seg.durationMs

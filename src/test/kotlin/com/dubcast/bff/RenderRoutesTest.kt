@@ -304,4 +304,59 @@ class RenderRoutesTest {
         // here proves audio key resolution went through the cache.
         assertEquals(HttpStatusCode.OK, response.status)
     }
+
+    /**
+     * audio_override 멀티파트 파일은 audio_ prefix 분기에 먼저 매치되면 안 됨.
+     * 이전 버그: audio_ 분기가 먼저 → audio_override 가 audioFiles 슬롯으로 들어가
+     *           audioOverrideKey 검증에서 항상 IllegalArgumentException → autodub→render 항상 fail.
+     */
+    @Test
+    fun `POST render routes audio_override file to override slot, not audio slot`() = testApp {
+        val capturedOverride = slot<File?>()
+        val capturedAudios = slot<Map<String, File>>()
+        every {
+            renderService.submitRender(
+                legacyVideoFile = any(),
+                videoFiles = any(),
+                segmentImageFiles = any(),
+                audioFiles = capture(capturedAudios),
+                imageFiles = any(),
+                subtitlesFile = any(),
+                dubClips = any(),
+                imageClips = any(),
+                videoDurationMs = any(),
+                segments = any(),
+                bgmAudioFiles = any(),
+                bgmClips = any(),
+                frame = any(),
+                audioOverrideFile = capture(capturedOverride),
+                separationDirectives = any(),
+                inputFilesToCleanup = any(),
+            )
+        } returns "render-override-1"
+
+        val cfg = """
+            {"dubClips":[],"videoDurationMs":3000,"audioOverrideKey":"audio_override"}
+        """.trimIndent()
+        val response = client.post("/api/v2/render") {
+            setBody(MultiPartFormDataContent(formData {
+                append("video", ByteArray(64), Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
+                })
+                append("audio_override", "override-bytes".toByteArray(), Headers.build {
+                    append(HttpHeaders.ContentType, "audio/mpeg")
+                    append(HttpHeaders.ContentDisposition, "filename=\"o.mp3\"")
+                })
+                append("config", cfg)
+            }))
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        // audio_override 가 override slot 으로 — 분기 순서 정합성 보장.
+        assertNotNull(capturedOverride.captured, "audio_override file must reach the override slot")
+        assertTrue(
+            capturedAudios.captured.keys.none { it.startsWith("audio_override") },
+            "audio_override must NOT leak into audioFiles map",
+        )
+    }
 }
