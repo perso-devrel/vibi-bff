@@ -1,9 +1,10 @@
 # vibi BFF
 
 Kotlin/Ktor Backend-For-Frontend for the vibi mobile app (Android + iOS, KMP/CMP).
-Proxies the ElevenLabs API (voices, TTS), proxies Perso AI for audio source separation
-(background / all-voice / per-speaker stems, plus user-selected stem remix),
-and runs a local ffmpeg-based video render pipeline (dub audio mixing,
+Proxies Perso AI for audio source separation (background / all-voice / per-speaker
+stems, plus user-selected stem remix), STT, and automatic dubbing; proxies
+Vertex AI Gemini for subtitle translation and the chat-assistant function-calling
+router; and runs a local ffmpeg-based video render pipeline (dub audio mixing,
 sticker overlays, multi-segment concat, subtitle burn-in).
 
 > Detailed architecture notes live in [`CLAUDE.md`](./CLAUDE.md). The OpenAPI
@@ -18,8 +19,8 @@ sticker overlays, multi-segment concat, subtitle burn-in).
 
 - **JDK 21**
 - **ffmpeg** and **ffprobe** on `PATH` (required by the render pipeline)
-- An **ElevenLabs API key**
-- A **Perso AI API key** and workspace `spaceSeq` (required for the separation endpoints)
+- A **Perso AI API key** and workspace `spaceSeq` (required for separation, STT, auto-dubbing)
+- *(Optional)* GCP service-account credentials for Vertex AI Gemini if subtitle translation / chat is exercised
 
 On Windows, verify:
 
@@ -32,21 +33,20 @@ ffprobe -version
 
 ```bash
 cp .env.example .env
-# then edit .env and set ELEVENLABS_API_KEY
+# then edit .env and set PERSO_API_KEY + PERSO_SPACE_SEQ
 ```
 
 Environment variables (also loadable from system env):
 
 | Key                          | Default                  | Description                                          |
 |------------------------------|--------------------------|------------------------------------------------------|
-| `ELEVENLABS_API_KEY`         | —                        | **Required.** ElevenLabs API key                     |
-| `PERSO_API_KEY`              | —                        | **Required.** Perso AI API key (used for separation) |
+| `PERSO_API_KEY`              | —                        | **Required.** Perso AI API key (separation / STT / auto-dub) |
 | `PERSO_SPACE_SEQ`            | —                        | **Required.** Your Perso workspace id (`GET /portal/api/v1/spaces`) |
 | `PERSO_BASE_URL`             | `https://api.perso.ai`   | Perso base URL                                        |
 | `PERSO_POLL_INTERVAL_MS`     | `5000`                   | Perso progress polling interval                       |
 | `PERSO_MAX_POLL_MINUTES`     | `30`                     | Separation job polling timeout                        |
 | `PORT`                       | `8080`                   | Server port                                          |
-| `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `tts/`, `render/`, `separation/`) |
+| `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `render/`, `separation/`) |
 | `BFF_BASE_URL`               | `http://localhost:8080`  | Public base URL used in download links               |
 | `CORS_ALLOWED_ORIGINS`       | *(blank = any)*          | Comma-separated allow-list. Android-only deployments can set a sentinel such as `android-only.invalid` to lock out browsers. |
 | `SEPARATION_SIGNING_SECRET`  | —                        | **Required.** HMAC key (≥32 chars) for stem / mix URL signing. Generate with `openssl rand -hex 32`. |
@@ -65,7 +65,7 @@ Environment variables (also loadable from system env):
 ./gradlew test
 
 # Run a single test class
-./gradlew test --tests "com.dubcast.bff.TtsRoutesTest"
+./gradlew test --tests "com.dubcast.bff.SeparationRoutesTest"
 
 # Run the server (port 8080 by default)
 ./gradlew run
@@ -76,28 +76,17 @@ to `C:/tmp/dubcast-bff-build` (configured in `build.gradle.kts`).
 
 Once running:
 - Swagger UI: <http://localhost:8080/swagger>
-- Static files: `/files/tts/*`, `/files/lipsync/*` (render outputs / separation stems / mix outputs are **not** static-mounted — see API section below)
+- Render outputs / separation stems / mix outputs / auto-subtitle SRT / auto-dub audio are **not** static-mounted — see API section below
 
 ## API Overview
 
-Two versioned surfaces are mounted under `/api/v1` and `/api/v2`.
-v2 is the spec-aligned surface the mobile client (Android + iOS) targets;
-v1 is retained for backwards compatibility.
-
-### v1 (legacy)
-
-| Method | Path                     | Notes                                       |
-|--------|--------------------------|---------------------------------------------|
-| POST   | `/api/v1/upload`         | Generic blob upload; returns `blobPath`     |
-| GET    | `/api/v1/voices`         | ElevenLabs voice list                       |
-| POST   | `/api/v1/tts`            | Text-to-speech; JSON body                   |
+The mobile client (Android + iOS, KMP/CMP) targets `/api/v2` exclusively.
+v1 has been retired.
 
 ### v2
 
 | Method | Path                                         | Notes                                                         |
 |--------|----------------------------------------------|---------------------------------------------------------------|
-| GET    | `/api/v2/voices`                             | Includes `language` (extracted from ElevenLabs labels)        |
-| POST   | `/api/v2/tts`                                | Response includes `durationMs` (parsed from MP3 frames)       |
 | POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint))         |
 | GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`|
 | GET    | `/api/v2/render/{jobId}/download`            | Binary mp4 (no static mount)                                  |
@@ -107,6 +96,11 @@ v1 is retained for backwards compatibility.
 | POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems; disposes source stems on success          |
 | GET    | `/api/v2/separate/mix/{mixJobId}`            | Mix status + signed download URL when `COMPLETED`             |
 | GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`)                        |
+| POST   | `/api/v2/subtitles`                          | Multipart auto-subtitle job (Perso STT + Gemini translation)  |
+| GET    | `/api/v2/subtitles/{jobId}`                  | Subtitle job status; signed `originalSrtUrl` / `translatedSrtUrlsByLang` when ready |
+| POST   | `/api/v2/autodub`                            | Multipart auto-dub job (Perso translate + voice synthesis)    |
+| GET    | `/api/v2/autodub/{jobId}`                    | Auto-dub job status; signed `dubbedAudioUrl` / `dubbedVideoUrl` when ready |
+| GET    | `/api/v2/languages`                          | Perso-supported target language list                          |
 | POST   | `/api/v2/chat`                               | Gemini function-calling assistant — returns `{kind:"text"\|"proposal"}` (see [Chat](#chat-endpoint)) |
 
 ### Chat endpoint
@@ -284,37 +278,38 @@ return `409 Conflict`. Download any stems you want to keep **before** calling
 ```
 src/main/kotlin/com/dubcast/bff/
 ├── Application.kt              # Ktor entry point + DI wiring
-├── config/AppConfig.kt         # HOCON + env var loading (ElevenLabs, Perso, Separation)
+├── config/AppConfig.kt         # HOCON + env var loading (Perso, Gemini, Separation, Storage)
 ├── plugins/
 │   ├── Cors.kt, Serialization.kt, Routing.kt
 │   └── ErrorHandling.kt        # StatusPages → ErrorResponse
 ├── model/
 │   ├── BffModels.kt            # BFF request/response DTOs
-│   ├── ElevenLabsModels.kt     # ElevenLabs upstream DTOs
+│   ├── ChatModels.kt           # Chat / Gemini DTOs
 │   └── PersoModels.kt          # Perso upstream DTOs
-├── routes/                     # v1 + v2 route definitions (incl. SeparationRoutes)
+├── routes/                     # /api/v2 route definitions (Render, Separation, Subtitles, AutoDub, Chat, Languages)
 └── service/
-    ├── ElevenLabsClient.kt     # ElevenLabs upstream wrapper
     ├── PersoClient.kt          # Perso upstream wrapper (SAS upload / translate / poll / download)
+    ├── GeminiClient.kt         # Vertex AI Gemini wrapper (translation + function calling)
     ├── FileStorageService.kt   # Local blob storage
     ├── AudioUtils.kt           # MP3 frame parsing
     ├── RenderService.kt        # ffmpeg render orchestration
     ├── SeparationService.kt    # Perso-backed stem separation jobs
     ├── StemMixService.kt       # ffmpeg amix-based stem remix
+    ├── AutoSubtitleService.kt  # Perso STT + Gemini translation jobs
+    ├── AutoDubService.kt       # Perso translate-with-TTS jobs
     └── SignedUrlService.kt     # HMAC-SHA256 download URL signer
 ```
 
 ## Testing
 
 Tests run with Ktor `testApplication` + MockK. Test files mirror route files
-(e.g. `TtsRoutesTest.kt` covers `TtsRoutes.kt`). The render service is not
-currently covered by tests — it spawns real ffmpeg processes and is exercised
-end-to-end against the mobile client.
+(e.g. `SeparationRoutesTest.kt` covers `SeparationRoutes.kt`). The render
+service is not currently covered by tests — it spawns real ffmpeg processes
+and is exercised end-to-end against the mobile client.
 
 ## Troubleshooting
 
-- **`ELEVENLABS_API_KEY must be set`** — populate `.env` or the env var.
-- **`PERSO_API_KEY must be set`** — same; separation boots fail-fast without it.
+- **`PERSO_API_KEY must be set`** — populate `.env` or the env var; the boot fail-fast guards against missing credentials.
 - **`SEPARATION_SIGNING_SECRET must be at least 32 chars`** — the default template has a placeholder; generate one with `openssl rand -hex 32` and paste into `.env`.
 - **Render jobs stuck in `FAILED` with "ffmpeg exited with code …"** — check the server logs; the last 500 bytes of ffmpeg stderr are emitted on failure. The most common causes are missing `ffmpeg`/`ffprobe` on `PATH` or a segment referencing an unknown `sourceFileKey`.
 - **Subtitle burn-in silently fails on Windows** — `escapeFilterPath` preserves the drive-letter colon; if you see `No such file or directory` for a subtitle path in ffmpeg logs, verify the uploaded file exists under `STORAGE_PATH/uploads/`.

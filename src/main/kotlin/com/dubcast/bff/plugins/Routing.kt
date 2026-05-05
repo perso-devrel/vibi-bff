@@ -7,12 +7,9 @@ import com.dubcast.bff.routes.languageRoutes
 import com.dubcast.bff.routes.renderRoutes
 import com.dubcast.bff.routes.separationRoutes
 import com.dubcast.bff.routes.subtitleRoutes
-import com.dubcast.bff.routes.ttsV2Routes
-import com.dubcast.bff.routes.voiceRoutes
 import com.dubcast.bff.service.GeminiClient
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
-import com.dubcast.bff.service.ElevenLabsClient
 import com.dubcast.bff.service.FileStorageService
 import com.dubcast.bff.service.PersoClient
 import com.dubcast.bff.service.RenderInputCacheService
@@ -32,7 +29,6 @@ import java.io.File
 
 fun Application.configureRouting(
     fileStorage: FileStorageService,
-    elevenLabsClient: ElevenLabsClient,
     persoClient: PersoClient,
     appConfig: AppConfig,
     renderService: RenderService,
@@ -48,12 +44,8 @@ fun Application.configureRouting(
     routing {
         swaggerUI(path = "swagger", swaggerFile = "openapi/dubcast-bff.yaml")
 
-        staticFiles("/files/tts", File(appConfig.storage.basePath + "/tts"))
-
         route("/api/v2") {
-            voiceRoutes(elevenLabsClient)
             languageRoutes(persoClient)
-            ttsV2Routes(elevenLabsClient, fileStorage, appConfig)
             renderRoutes(
                 renderService, fileStorage, stemMixService,
                 separationService, signedUrlService, httpClient, renderInputCache,

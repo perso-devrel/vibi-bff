@@ -8,7 +8,6 @@ import io.ktor.server.response.*
 import org.slf4j.LoggerFactory
 
 class NotFoundException(message: String) : RuntimeException(message)
-class ElevenLabsApiException(val statusCode: Int, val body: String) : RuntimeException("ElevenLabs API error $statusCode: $body")
 class PersoApiException(val statusCode: Int, val body: String) : RuntimeException("Perso API error $statusCode: $body")
 
 // Structured API error: lets a handler specify the wire error code + detail
@@ -26,23 +25,6 @@ fun Application.configureErrorHandling() {
     install(StatusPages) {
         exception<NotFoundException> { call, cause ->
             call.respond(HttpStatusCode.NotFound, ErrorResponse(error = cause.message ?: "Not found"))
-        }
-        exception<ElevenLabsApiException> { call, cause ->
-            log.error("ElevenLabs API error: {} - {}", cause.statusCode, cause.body)
-            // 401 must precede the in 400..499 branch — otherwise it falls through to BadRequest.
-            val status = when (cause.statusCode) {
-                401 -> HttpStatusCode.Unauthorized
-                429 -> HttpStatusCode.TooManyRequests
-                in 400..499 -> HttpStatusCode.BadRequest
-                else -> HttpStatusCode.BadGateway
-            }
-            val message = when (cause.statusCode) {
-                401 -> "Authentication failed with upstream service"
-                429 -> "Rate limit exceeded, please try again later"
-                in 400..499 -> "Invalid request to upstream service"
-                else -> "Upstream service unavailable"
-            }
-            call.respond(status, ErrorResponse(error = message))
         }
         exception<PersoApiException> { call, cause ->
             log.error("Perso API error: {} - {}", cause.statusCode, cause.body)

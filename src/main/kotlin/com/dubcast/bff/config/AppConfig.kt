@@ -3,17 +3,11 @@ package com.dubcast.bff.config
 import io.ktor.server.config.*
 
 data class AppConfig(
-    val elevenLabs: ElevenLabsConfig,
     val storage: StorageConfig,
     val baseUrl: String,
     val perso: PersoConfig,
     val gemini: GeminiConfig,
     val separation: SeparationConfig,
-)
-
-data class ElevenLabsConfig(
-    val apiKey: String,
-    val baseUrl: String,
 )
 
 data class StorageConfig(
@@ -75,17 +69,12 @@ data class SeparationConfig(
 
 fun loadConfig(config: ApplicationConfig): AppConfig {
     val dubcast = config.config("dubcast")
-    val el = dubcast.config("elevenlabs")
     val storage = dubcast.config("storage")
     val perso = dubcast.config("perso")
     val gemini = dubcast.config("gemini")
     val separation = dubcast.config("separation")
 
     return AppConfig(
-        elevenLabs = ElevenLabsConfig(
-            apiKey = el.property("apiKey").getString(),
-            baseUrl = el.property("baseUrl").getString(),
-        ),
         storage = StorageConfig(
             basePath = storage.property("basePath").getString(),
         ),

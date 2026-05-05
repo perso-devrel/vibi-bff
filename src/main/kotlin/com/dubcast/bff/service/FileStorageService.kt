@@ -11,13 +11,11 @@ class FileStorageService(private val config: StorageConfig) {
 
     private val baseDir get() = File(config.basePath)
     private val uploadsDir get() = File(baseDir, "uploads")
-    private val ttsDir get() = File(baseDir, "tts")
     val renderDir get() = File(baseDir, "render")
     val separationDir get() = File(baseDir, "separation")
 
     init {
         uploadsDir.mkdirs()
-        ttsDir.mkdirs()
         renderDir.mkdirs()
         separationDir.mkdirs()
         File(separationDir, "mix").mkdirs()
@@ -58,12 +56,6 @@ class FileStorageService(private val config: StorageConfig) {
         }
         require(file.exists()) { "Upload file not found: $blobPath" }
         return file
-    }
-
-    fun reserveTtsPath(requestId: String): Pair<File, String> {
-        val target = File(ttsDir, "$requestId.mp3")
-        val blobPath = "tts/$requestId.mp3"
-        return target to blobPath
     }
 
     fun resolveDownloadUrl(baseUrl: String, filePath: String): String {

@@ -329,7 +329,7 @@ class RenderRoutesTest {
                 bgmAudioFiles = any(),
                 bgmClips = any(),
                 frame = any(),
-                audioOverrideFile = capture(capturedOverride),
+                audioOverrideFile = captureNullable(capturedOverride),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
             )

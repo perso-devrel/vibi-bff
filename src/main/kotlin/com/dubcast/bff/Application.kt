@@ -4,7 +4,6 @@ import com.dubcast.bff.config.loadConfig
 import com.dubcast.bff.plugins.*
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
-import com.dubcast.bff.service.ElevenLabsClient
 import com.dubcast.bff.service.GeminiClient
 import com.dubcast.bff.service.FileStorageService
 import com.dubcast.bff.service.PersoClient
@@ -56,9 +55,6 @@ private fun loadDotenv() {
 fun Application.module() {
     val appConfig = loadConfig(environment.config)
 
-    require(appConfig.elevenLabs.apiKey.isNotBlank()) {
-        "ELEVENLABS_API_KEY environment variable must be set"
-    }
     require(appConfig.perso.apiKey.isNotBlank()) {
         "PERSO_API_KEY environment variable must be set"
     }
@@ -71,10 +67,9 @@ fun Application.module() {
             json(AppJson)
         }
         install(Logging) {
-            // NONE in INFO would still dump XP-API-KEY / xi-api-key headers
-            // and SAS URLs (which are credentials themselves) at higher
-            // levels. Keep HTTP-level logging off; services log their own
-            // sanitized lines.
+            // NONE in INFO would still dump XP-API-KEY headers and SAS URLs
+            // (which are credentials themselves) at higher levels. Keep
+            // HTTP-level logging off; services log their own sanitized lines.
             level = LogLevel.NONE
         }
         install(HttpTimeout) {
@@ -94,7 +89,6 @@ fun Application.module() {
     }
 
     val fileStorage = FileStorageService(appConfig.storage)
-    val elevenLabsClient = ElevenLabsClient(appConfig.elevenLabs, httpClient)
 
     // Concurrency cap for ffmpeg fan-out. RENDER_MAX_CONCURRENT can be set
     // explicitly in deployments where the autoreckoned (CPU/2) value is wrong
@@ -173,7 +167,7 @@ fun Application.module() {
     configureCors()
     configureErrorHandling()
     configureRouting(
-        fileStorage, elevenLabsClient, persoClient, appConfig, renderService,
+        fileStorage, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
         autoSubtitleService, autoDubService, geminiClient, httpClient, renderInputCache,
     )

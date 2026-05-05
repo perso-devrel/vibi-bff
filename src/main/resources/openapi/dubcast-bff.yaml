@@ -1,20 +1,16 @@
 openapi: 3.0.3
 info:
-  title: DubCast BFF API
+  title: vibi BFF API
   description: |
-    DubCast Backend-For-Frontend API.
-    ElevenLabs API를 프록시하여 보이스 목록 조회, TTS 음성 생성, 립싱크 처리를 제공합니다.
-  version: 0.2.0
+    vibi Backend-For-Frontend API.
+    Perso AI (음성분리 + STT + 자동 더빙) 와 Vertex AI Gemini (자막 번역, 채팅 function calling) 를 프록시합니다.
+  version: 0.3.0
 
 servers:
   - url: http://localhost:8080
     description: Local development
 
 tags:
-  - name: Voices
-    description: ElevenLabs 보이스 목록
-  - name: TTS
-    description: Text-to-Speech 음성 생성
   - name: Subtitles
     description: 자동 자막 (Perso STT + Gemini 번역)
   - name: AutoDub
@@ -177,76 +173,6 @@ components:
           type: string
           nullable: true
           description: 상세 에러 정보
-
-    Voice:
-      type: object
-      required: [voiceId, name]
-      properties:
-        voiceId:
-          type: string
-          description: ElevenLabs 보이스 ID
-        name:
-          type: string
-          description: 보이스 이름
-        previewUrl:
-          type: string
-          nullable: true
-          description: 미리듣기 URL
-        category:
-          type: string
-          nullable: true
-          description: "카테고리 (premade, cloned 등)"
-        labels:
-          type: object
-          additionalProperties:
-            type: string
-          description: 보이스 라벨 (accent, gender 등)
-
-    VoiceListResponse:
-      type: object
-      required: [voices]
-      properties:
-        voices:
-          type: array
-          items:
-            $ref: '#/components/schemas/Voice'
-
-    TtsRequest:
-      type: object
-      required: [text, voiceId]
-      properties:
-        text:
-          type: string
-          description: 변환할 텍스트
-        voiceId:
-          type: string
-          description: 사용할 보이스 ID
-        languageCode:
-          type: string
-          nullable: true
-          description: "언어 코드 (ko, en, ja 등)"
-        modelId:
-          type: string
-          default: "eleven_multilingual_v2"
-          description: ElevenLabs 모델 ID
-        stability:
-          type: number
-          format: float
-          default: 0.5
-          description: "음성 안정성 (0.0 ~ 1.0)"
-        similarityBoost:
-          type: number
-          format: float
-          default: 0.75
-          description: "유사도 부스트 (0.0 ~ 1.0)"
-
-    TtsResponse:
-      type: object
-      required: [audioUrl]
-      properties:
-        audioUrl:
-          type: string
-          description: 생성된 오디오 파일 다운로드 URL
 
     SubtitleSpec:
       type: object

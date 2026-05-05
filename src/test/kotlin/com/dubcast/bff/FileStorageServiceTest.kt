@@ -26,7 +26,9 @@ class FileStorageServiceTest {
     @Test
     fun `init creates required directories`() {
         assertTrue(File(testDir, "uploads").exists())
-        assertTrue(File(testDir, "tts").exists())
+        assertTrue(File(testDir, "render").exists())
+        assertTrue(File(testDir, "separation").exists())
+        assertTrue(File(testDir, "separation/mix").exists())
     }
 
     @Test
@@ -74,16 +76,8 @@ class FileStorageServiceTest {
     }
 
     @Test
-    fun `reserveTtsPath returns target file and blob path`() {
-        val (file, blobPath) = service.reserveTtsPath("req-123")
-
-        assertEquals("tts/req-123.mp3", blobPath)
-        assertEquals(File(testDir, "tts/req-123.mp3").canonicalPath, file.canonicalPath)
-    }
-
-    @Test
     fun `resolveDownloadUrl builds correct URL`() {
-        val url = service.resolveDownloadUrl("http://localhost:8080", "tts/req-123.mp3")
-        assertEquals("http://localhost:8080/files/tts/req-123.mp3", url)
+        val url = service.resolveDownloadUrl("http://localhost:8080", "render/req-123.mp4")
+        assertEquals("http://localhost:8080/files/render/req-123.mp4", url)
     }
 }

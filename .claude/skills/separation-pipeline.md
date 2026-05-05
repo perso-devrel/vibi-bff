@@ -121,8 +121,8 @@ ffmpeg -y -i a.mp3 -i b.mp3 -i c.mp3 \
 
 ## 보안
 
-- 분리 결과는 **정적 마운트 금지**. `/files/separation` 같은 경로 만들지 말 것. 기존 `/files/tts`, `/files/lipsync` 와 다른 정책.
-- `CallLogging` format 이 `?token=...` 를 `?token=***` 로 마스킹. 추가로 Ktor Client `Logging.level = NONE` — `XP-API-KEY`, `xi-api-key`, SAS URL 이 평문 로깅되던 것 전부 차단.
+- 분리 결과는 **정적 마운트 금지**. `/files/separation` 같은 경로 만들지 말 것. HMAC 서명 토큰 엔드포인트로만 노출.
+- `CallLogging` format 이 `?token=...` 를 `?token=***` 로 마스킹. 추가로 Ktor Client `Logging.level = NONE` — `XP-API-KEY` 헤더와 SAS URL 이 평문 로깅되던 것 전부 차단.
 - `extractSpeakerZip` 은 우리가 파일명을 결정하지만(`speaker_{idx}.mp3`), canonical-path check 로 ZIP Slip 방어층 추가 — 미래에 `entry.name` 을 채택하는 리팩터가 들어와도 안전.
 - Path traversal: `FileStorageService.getUploadFile` 과 동일 패턴. `separationDir` 의 canonical prefix 체크로 escape 차단.
 
