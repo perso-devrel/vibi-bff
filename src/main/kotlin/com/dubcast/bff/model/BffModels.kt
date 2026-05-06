@@ -118,7 +118,25 @@ data class RenderConfig(
     val separationDirectives: List<SeparationDirectiveDto> = emptyList(),
     /** 결과 영상의 언어 (출력 파일명·메타에 활용). */
     val outputLanguageCode: String = "original",
-)
+    /**
+     * Phase 1.5 audio-only render path. "video" (default) preserves legacy
+     * full mp4 pipeline. "audio" trims/concats the segment audio tracks
+     * (with speed/volume) and mixes bgmClips on top — emitting a single
+     * .m4a (AAC). dubClips / audioOverride / separation stems are NOT
+     * applied in audio mode (그 단계 전에 호출되는 자막/분리 파이프라인의
+     * source 로 쓰이는 용도라 의미가 없음). sticker overlays · subtitle
+     * burn-in · imageClips 는 무시된다 (audio 라 무관).
+     *
+     * 기존 클라이언트가 필드 없이 보내면 default "video" 로 하위 호환.
+     */
+    val outputKind: String = "video",
+) {
+    init {
+        require(outputKind == "video" || outputKind == "audio") {
+            "outputKind must be 'video' or 'audio' (got '$outputKind')"
+        }
+    }
+}
 
 @Serializable
 data class SeparationDirectiveDto(
@@ -178,6 +196,10 @@ data class SeparationSpec(
     val sourceLanguageCode: String = "auto",
     val trimStartMs: Long? = null,
     val trimEndMs: Long? = null,
+    /** Phase 1: 모바일이 편집된 영상 jobId 를 source 로 재사용. multipart `file` 파트가
+     * 없으면 이 값으로 RenderService.getRenderOutputFile(jobId) 를 조회해 source 사용.
+     * 둘 다 있으면 이 값이 우선 (file 파트 무시). */
+    val editedRenderJobId: String? = null,
 ) {
     init {
         require(mediaType == "VIDEO" || mediaType == "AUDIO") {
@@ -260,6 +282,10 @@ data class SubtitleSpec(
     /** 번역해야 할 언어들. 빈 리스트면 STT 만 (originalSrt). source 와 동일 lang 은 무시. */
     val targetLanguageCodes: List<String> = emptyList(),
     val numberOfSpeakers: Int = 1,
+    /** Phase 1: 모바일이 편집된 영상 jobId 를 source 로 재사용. multipart `file` 파트가
+     * 없으면 이 값으로 RenderService.getRenderOutputFile(jobId) 를 조회해 source 사용.
+     * 둘 다 있으면 이 값이 우선 (file 파트 무시). */
+    val editedRenderJobId: String? = null,
 ) {
     init {
         require(mediaType == "VIDEO" || mediaType == "AUDIO") {
@@ -297,6 +323,10 @@ data class AutoDubSpec(
     val targetLanguageCode: String,
     val numberOfSpeakers: Int = 1,
     val ttsModel: String? = null,
+    /** Phase 1: 모바일이 편집된 영상 jobId 를 source 로 재사용. multipart `file` 파트가
+     * 없으면 이 값으로 RenderService.getRenderOutputFile(jobId) 를 조회해 source 사용.
+     * 둘 다 있으면 이 값이 우선 (file 파트 무시). */
+    val editedRenderJobId: String? = null,
 ) {
     init {
         require(mediaType == "VIDEO" || mediaType == "AUDIO") {

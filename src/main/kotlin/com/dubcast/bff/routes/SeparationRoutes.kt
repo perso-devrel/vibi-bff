@@ -6,6 +6,7 @@ import com.dubcast.bff.model.*
 import com.dubcast.bff.plugins.ApiErrorException
 import com.dubcast.bff.plugins.NotFoundException
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.MediaSourceResolver
 import com.dubcast.bff.service.MediaTrimmer
 import com.dubcast.bff.service.SeparationService
 import com.dubcast.bff.service.SignedUrlService
@@ -24,14 +25,26 @@ fun Route.separationRoutes(
     signer: SignedUrlService,
     fileStorage: FileStorageService,
     appConfig: AppConfig,
+    mediaSourceResolver: MediaSourceResolver,
 ) {
     route("/separate") {
         // POST /api/v2/separate — submit job
+        // Accepts either multipart `file` (legacy) or `spec.editedRenderJobId`
+        // referencing a completed /api/v2/render output. See MediaSourceResolver.
         post {
-            val (file, spec) = parseUploadAndSpec<SeparationSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE), fileStorage, MAX_UPLOAD_FILE_SIZE,
+            val (filePart, specOpt) = parseOptionalUploadAndSpec<SeparationSpec>(
+                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE),
+                fileStorage,
+                MAX_UPLOAD_FILE_SIZE,
             )
-            val pipelineInput = maybeTrim(file, spec)
+            val spec = specOpt ?: run {
+                filePart?.delete()
+                throw IllegalArgumentException("spec is required")
+            }
+            // resolve() 는 항상 owned copy(또는 caller-owned upload)를 돌려준다 —
+            // 따라서 maybeTrim 의 deleteOriginalOnFailure 분기가 필요 없다.
+            val source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId)
+            val pipelineInput = maybeTrim(source, spec)
             val jobId = separationService.submit(pipelineInput, spec)
             call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = jobId))
         }
@@ -176,13 +189,21 @@ fun Route.separationRoutes(
 /**
  * If [spec] carries a trim range, probe the file, validate against its
  * actual duration, then stream-copy cut the window with ffmpeg. The
- * trimmed file replaces the original upload (here we delete the original
- * to free disk before the upstream upload begins). Blocking ffprobe /
- * ffmpeg calls run on [Dispatchers.IO] so the Netty worker isn't held
- * while a 500 MB file is being cut. Throws [ApiErrorException] with
- * error codes the client can branch on.
+ * trimmed file replaces the source (the source is deleted to free disk
+ * before the upstream upload begins). Blocking ffprobe / ffmpeg calls
+ * run on [Dispatchers.IO] so the Netty worker isn't held while a 500 MB
+ * file is being cut. Throws [ApiErrorException] with error codes the
+ * client can branch on.
+ *
+ * Phase 1 follow-up: [MediaSourceResolver] now always returns a
+ * caller-owned file (a copy of the render output for editedRenderJobId,
+ * or the upload itself for legacy uploads), so we can unconditionally
+ * delete it on success/failure without risk of clobbering shared state.
  */
-internal suspend fun maybeTrim(file: File, spec: SeparationSpec): File = withContext(Dispatchers.IO) {
+internal suspend fun maybeTrim(
+    file: File,
+    spec: SeparationSpec,
+): File = withContext(Dispatchers.IO) {
     val start = spec.trimStartMs
     val end = spec.trimEndMs
     if (start == null || end == null) return@withContext file

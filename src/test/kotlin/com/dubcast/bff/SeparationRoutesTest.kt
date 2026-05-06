@@ -5,7 +5,9 @@ import com.dubcast.bff.plugins.configureErrorHandling
 import com.dubcast.bff.plugins.configureSerialization
 import com.dubcast.bff.routes.separationRoutes
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.MediaSourceResolver
 import com.dubcast.bff.service.MediaTrimmer
+import com.dubcast.bff.service.RenderService
 import com.dubcast.bff.service.SeparationService
 import com.dubcast.bff.service.SignedUrlService
 import com.dubcast.bff.service.StemMixService
@@ -28,6 +30,8 @@ class SeparationRoutesTest {
     private lateinit var stemMixService: StemMixService
     private lateinit var signer: SignedUrlService
     private lateinit var fileStorage: FileStorageService
+    private lateinit var renderService: RenderService
+    private lateinit var mediaSourceResolver: MediaSourceResolver
 
     @BeforeTest
     fun setup() {
@@ -36,6 +40,8 @@ class SeparationRoutesTest {
         separationService = mockk(relaxed = true)
         stemMixService = mockk(relaxed = true)
         signer = SignedUrlService(appConfig.separation.signingSecret)
+        renderService = mockk(relaxed = true)
+        mediaSourceResolver = MediaSourceResolver(renderService, fileStorage.editedSourceDir)
     }
 
     @AfterTest
@@ -51,7 +57,7 @@ class SeparationRoutesTest {
         }
         routing {
             route("/api/v2") {
-                separationRoutes(separationService, stemMixService, signer, fileStorage, appConfig)
+                separationRoutes(separationService, stemMixService, signer, fileStorage, appConfig, mediaSourceResolver)
             }
         }
         block()
@@ -299,5 +305,58 @@ class SeparationRoutesTest {
         verify(exactly = 0) { MediaTrimmer.probeDurationMs(any()) }
         verify(exactly = 0) { MediaTrimmer.trim(any(), any(), any(), any()) }
         verify(exactly = 1) { separationService.submit(any(), any()) }
+    }
+
+    // ── Phase 1: editedRenderJobId branch ──────────────────────────────────────
+
+    /** spec.editedRenderJobId 가 unknown → 400 (resolver throws IllegalArgumentException) */
+    @Test
+    fun `POST separate with unknown editedRenderJobId returns 400`() = testApp {
+        every { renderService.acquireRenderOutputCopy("render-missing", any()) } returns null
+
+        val response = client.post("/api/v2/separate") {
+            setBody(MultiPartFormDataContent(formData {
+                append("spec", """{"mediaType":"VIDEO","numberOfSpeakers":1,"editedRenderJobId":"render-missing"}""")
+            }))
+        }
+
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        verify(exactly = 0) { separationService.submit(any(), any()) }
+    }
+
+    /** spec.editedRenderJobId 가 valid → owned copy 가 separationService 로 전달 */
+    @Test
+    fun `POST separate with editedRenderJobId uses render output copy`() = testApp {
+        // mediaSourceResolver 가 acquireRenderOutputCopy 로부터 받아오는 copy 파일.
+        val copy = File(fileStorage.editedSourceDir, "source-fixture.mp4").apply {
+            parentFile.mkdirs()
+            writeText("fake-mp4-bytes")
+        }
+        every { renderService.acquireRenderOutputCopy("render-ok", any()) } returns copy
+        every { separationService.submit(any(), any()) } returns "sep-from-render"
+
+        val response = client.post("/api/v2/separate") {
+            setBody(MultiPartFormDataContent(formData {
+                append("spec", """{"mediaType":"VIDEO","numberOfSpeakers":1,"editedRenderJobId":"render-ok"}""")
+            }))
+        }
+
+        assertEquals(HttpStatusCode.Accepted, response.status)
+        verify(exactly = 1) {
+            renderService.acquireRenderOutputCopy("render-ok", fileStorage.editedSourceDir)
+        }
+        verify(exactly = 1) { separationService.submit(copy, any()) }
+    }
+
+    /** spec / file 둘 다 없으면 400 */
+    @Test
+    fun `POST separate without file or editedRenderJobId returns 400`() = testApp {
+        val response = client.post("/api/v2/separate") {
+            setBody(MultiPartFormDataContent(formData {
+                append("spec", """{"mediaType":"VIDEO","numberOfSpeakers":1}""")
+            }))
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        verify(exactly = 0) { separationService.submit(any(), any()) }
     }
 }

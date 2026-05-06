@@ -39,11 +39,13 @@ object MediaTrimmer {
         require(endMs > startMs) { "endMs must be > startMs" }
         val startSec = startMs / 1000.0
         val durationSec = (endMs - startMs) / 1000.0
+        // secondsToFfmpegArg: Double.toString 의 scientific notation 변환 회피.
+        // 예: 0.000670 → "6.7E-4" 가 ffmpeg `-t` 파서에서 "Invalid duration" 으로 거부됨.
         val cmd = listOf(
             "ffmpeg", "-y",
-            "-ss", startSec.toString(),
+            "-ss", secondsToFfmpegArg(startSec),
             "-i", src.absolutePath,
-            "-t", durationSec.toString(),
+            "-t", secondsToFfmpegArg(durationSec),
             "-c", "copy",
             "-avoid_negative_ts", "make_non_negative",
             outFile.absolutePath,

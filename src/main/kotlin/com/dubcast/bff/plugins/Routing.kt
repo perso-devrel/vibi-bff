@@ -11,6 +11,7 @@ import com.dubcast.bff.service.GeminiClient
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.MediaSourceResolver
 import com.dubcast.bff.service.PersoClient
 import com.dubcast.bff.service.RenderInputCacheService
 import com.dubcast.bff.service.RenderService
@@ -40,6 +41,7 @@ fun Application.configureRouting(
     geminiClient: GeminiClient,
     httpClient: HttpClient,
     renderInputCache: RenderInputCacheService,
+    mediaSourceResolver: MediaSourceResolver,
 ) {
     routing {
         swaggerUI(path = "swagger", swaggerFile = "openapi/dubcast-bff.yaml")
@@ -50,9 +52,9 @@ fun Application.configureRouting(
                 renderService, fileStorage, stemMixService,
                 separationService, signedUrlService, httpClient, renderInputCache,
             )
-            separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig)
-            subtitleRoutes(autoSubtitleService, signedUrlService, fileStorage, appConfig)
-            autoDubRoutes(autoDubService, signedUrlService, fileStorage, appConfig)
+            separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig, mediaSourceResolver)
+            subtitleRoutes(autoSubtitleService, signedUrlService, fileStorage, appConfig, mediaSourceResolver)
+            autoDubRoutes(autoDubService, signedUrlService, fileStorage, appConfig, mediaSourceResolver)
             chatRoutes(geminiClient)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.

@@ -8,6 +8,7 @@ import com.dubcast.bff.model.AutoDubStatusResponse
 import com.dubcast.bff.plugins.NotFoundException
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.MediaSourceResolver
 import com.dubcast.bff.service.SignedUrlService
 import io.ktor.http.*
 import io.ktor.server.request.*
@@ -19,14 +20,24 @@ fun Route.autoDubRoutes(
     signer: SignedUrlService,
     fileStorage: FileStorageService,
     appConfig: AppConfig,
+    mediaSourceResolver: MediaSourceResolver,
 ) {
     route("/autodub") {
         // POST /api/v2/autodub — submit
+        // Accepts either multipart `file` (legacy) or `spec.editedRenderJobId`
+        // referencing a completed /api/v2/render output. See MediaSourceResolver.
         post {
-            val (file, spec) = parseUploadAndSpec<AutoDubSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE), fileStorage, MAX_UPLOAD_FILE_SIZE,
+            val (filePart, specOpt) = parseOptionalUploadAndSpec<AutoDubSpec>(
+                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE),
+                fileStorage,
+                MAX_UPLOAD_FILE_SIZE,
             )
-            val jobId = autoDubService.submit(file, spec)
+            val spec = specOpt ?: run {
+                filePart?.delete()
+                throw IllegalArgumentException("spec is required")
+            }
+            val source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId)
+            val jobId = autoDubService.submit(source, spec)
             call.respond(HttpStatusCode.Accepted, AutoDubJobResponse(jobId = jobId))
         }
 

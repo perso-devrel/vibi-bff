@@ -25,6 +25,40 @@ internal suspend inline fun <reified T> parseUploadAndSpec(
     specFieldName: String = "spec",
     defaultFileName: String = "source.bin",
 ): Pair<File, T> {
+    val (file, spec) = parseOptionalUploadAndSpec<T>(
+        multipart, fileStorage, maxFileSize, fileFieldName, specFieldName, defaultFileName,
+    )
+    val resolvedFile = file ?: run {
+        spec ?: throw IllegalArgumentException("$specFieldName is required")
+        throw IllegalArgumentException("$fileFieldName is required")
+    }
+    val s = spec ?: run {
+        // Don't strand the upload on disk when the caller forgot the spec —
+        // the request is rejected, so the bytes are dead weight.
+        resolvedFile.delete()
+        throw IllegalArgumentException("$specFieldName is required")
+    }
+    return resolvedFile to s
+}
+
+/**
+ * Phase 1 variant — same shape as [parseUploadAndSpec] but tolerates a
+ * missing `file` part. Used by routes that accept either a fresh upload
+ * **or** a reference to an already-rendered output via the spec
+ * (`editedRenderJobId`). Caller is responsible for resolving the final
+ * source file (typically via [com.dubcast.bff.service.MediaSourceResolver]).
+ *
+ * Still requires the spec — without it we can't know which path the
+ * caller intended.
+ */
+internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
+    multipart: MultiPartData,
+    fileStorage: FileStorageService,
+    maxFileSize: Long,
+    fileFieldName: String = "file",
+    specFieldName: String = "spec",
+    defaultFileName: String = "source.bin",
+): Pair<File?, T?> {
     var sourceFile: File? = null
     var spec: T? = null
 
@@ -51,12 +85,5 @@ internal suspend inline fun <reified T> parseUploadAndSpec(
         part.dispose()
     }
 
-    val file = sourceFile ?: throw IllegalArgumentException("$fileFieldName is required")
-    val s = spec ?: run {
-        // Don't strand the upload on disk when the caller forgot the spec —
-        // the request is rejected, so the bytes are dead weight.
-        file.delete()
-        throw IllegalArgumentException("$specFieldName is required")
-    }
-    return file to s
+    return sourceFile to spec
 }

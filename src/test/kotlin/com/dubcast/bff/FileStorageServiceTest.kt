@@ -29,6 +29,10 @@ class FileStorageServiceTest {
         assertTrue(File(testDir, "render").exists())
         assertTrue(File(testDir, "separation").exists())
         assertTrue(File(testDir, "separation/mix").exists())
+        // Phase 1 follow-up: holds caller-owned copies of render outputs that
+        // downstream pipelines (auto-subtitle / auto-dub / separation) consume
+        // and may mutate.
+        assertTrue(File(testDir, "edited-source").exists())
     }
 
     @Test

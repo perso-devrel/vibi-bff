@@ -188,6 +188,29 @@ class RenderSerializationTest {
         assertTrue(cfg.separationDirectives.isEmpty())
     }
 
+    // ── outputKind — Phase 1.5 audio render path opt-in ─────────────────────
+
+    @Test
+    fun `RenderConfig defaults outputKind to video`() {
+        val raw = """{"dubClips":[]}"""
+        val cfg: RenderConfig = json.decodeFromString(raw)
+        assertEquals("video", cfg.outputKind)
+    }
+
+    @Test
+    fun `RenderConfig accepts outputKind audio`() {
+        val raw = """{"dubClips":[],"outputKind":"audio"}"""
+        val cfg: RenderConfig = json.decodeFromString(raw)
+        assertEquals("audio", cfg.outputKind)
+    }
+
+    @Test
+    fun `RenderConfig rejects invalid outputKind`() {
+        assertFailsWith<IllegalArgumentException> {
+            json.decodeFromString<RenderConfig>("""{"dubClips":[],"outputKind":"banana"}""")
+        }
+    }
+
     // ── RenderInputCacheResponse — multipart-cache wire shape ────────────────
 
     @Test

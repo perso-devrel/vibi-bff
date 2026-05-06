@@ -283,7 +283,9 @@ class SeparationService(
             "ffmpeg", "-y",
             "-f", "lavfi",
             "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            "-t", durSec.toString(),
+            // secondsToFfmpegArg: Double.toString 의 scientific notation 회피
+            // (RenderService 에서 동일 이슈로 exit 234 재현됨).
+            "-t", secondsToFfmpegArg(durSec),
             "-q:a", "4",
             output.absolutePath,
         ).redirectErrorStream(true).start()
@@ -316,7 +318,7 @@ class SeparationService(
         val mixCount = mixLabels.size
         filterParts.add("${mixLabels.joinToString("")}amix=inputs=$mixCount:duration=first:dropout_transition=0[out]")
         cmd += listOf("-filter_complex", filterParts.joinToString(";"))
-        cmd += listOf("-map", "[out]", "-t", durSec.toString(), "-q:a", "4", output.absolutePath)
+        cmd += listOf("-map", "[out]", "-t", secondsToFfmpegArg(durSec), "-q:a", "4", output.absolutePath)
 
         val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
         drainAndAwait(process, "ffmpeg mix (${inputs.size} inputs)")

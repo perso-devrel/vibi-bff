@@ -8,6 +8,7 @@ import com.dubcast.bff.model.SubtitleStatusResponse
 import com.dubcast.bff.plugins.NotFoundException
 import com.dubcast.bff.service.AutoSubtitleService
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.MediaSourceResolver
 import com.dubcast.bff.service.SignedUrlService
 import io.ktor.http.*
 import io.ktor.server.request.*
@@ -19,14 +20,24 @@ fun Route.subtitleRoutes(
     signer: SignedUrlService,
     fileStorage: FileStorageService,
     appConfig: AppConfig,
+    mediaSourceResolver: MediaSourceResolver,
 ) {
     route("/subtitles") {
         // POST /api/v2/subtitles — submit
+        // Accepts either multipart `file` (legacy) or `spec.editedRenderJobId`
+        // referencing a completed /api/v2/render output. See MediaSourceResolver.
         post {
-            val (file, spec) = parseUploadAndSpec<SubtitleSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE), fileStorage, MAX_UPLOAD_FILE_SIZE,
+            val (filePart, specOpt) = parseOptionalUploadAndSpec<SubtitleSpec>(
+                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE),
+                fileStorage,
+                MAX_UPLOAD_FILE_SIZE,
             )
-            val jobId = subtitleService.submit(file, spec)
+            val spec = specOpt ?: run {
+                filePart?.delete()
+                throw IllegalArgumentException("spec is required")
+            }
+            val source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId)
+            val jobId = subtitleService.submit(source, spec)
             call.respond(HttpStatusCode.Accepted, SubtitleJobResponse(jobId = jobId))
         }
 

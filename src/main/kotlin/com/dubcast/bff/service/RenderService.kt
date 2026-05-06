@@ -16,6 +16,7 @@ import kotlinx.coroutines.sync.Semaphore
 import kotlinx.coroutines.sync.withPermit
 import org.slf4j.LoggerFactory
 import java.io.File
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
@@ -31,6 +32,10 @@ data class RenderJob(
     val createdAt: Long = System.currentTimeMillis(),
     /** "queued" while waiting for an ffmpeg permit; null once acquired or done. */
     @Volatile var progressReason: String? = null,
+    /** Phase 1: jobs are referenced by downstream pipelines (subtitles / autodub /
+     * separation) via editedRenderJobId. cleanup is now last-access based so a
+     * referenced job stays alive as long as the client keeps touching it. */
+    @Volatile var lastAccessedAt: Long = System.currentTimeMillis(),
 )
 
 /** 한 separationDirective 의 ffmpeg 입력용 형태. selections 의 audioUrl 은 라우트 단계에서
@@ -45,10 +50,33 @@ data class DirectiveWithStemFiles(
 
 private const val MAX_PARALLEL_SEGMENTS = 2
 
+/**
+ * 너무 짧은 audio segment 는 ffmpeg/AAC 인코더가 받아도 의미 없고 (STT 도 인식 못 함),
+ * `Double.toString()` 의 scientific notation 변환과 결합해 ffmpeg `-t` 파싱 자체를
+ * 깨뜨려 본 파이프라인 전체를 fail 시킨다. 20ms 미만은 silent fallback 으로 직행하고,
+ * 그 fallback 도 최소 20ms 길이를 강제한다.
+ */
+private const val MIN_AUDIO_SEGMENT_SEC = 0.020
+
+/**
+ * ffmpeg 의 `-ss`, `-t`, `-to` 등은 fixed-decimal 시간 인자만 받는다 — Kotlin 의
+ * `Double.toString()` 은 작은 값(예: 0.000670)을 `"6.7E-4"` 같은 scientific
+ * notation 으로 출력해 ffmpeg 가 `Invalid duration for option t` 로 즉시 실패한다.
+ *
+ * 마이크로초(6 자리) 정밀도는 ffmpeg 가 사용하는 내부 PTS 단위(`AV_TIME_BASE=1e6`)
+ * 와 일치하므로 정확한 cutoff. Locale 을 US 로 고정해 콤마-decimal 로케일에서도
+ * 안전.
+ */
+internal fun secondsToFfmpegArg(seconds: Double): String =
+    String.format(Locale.US, "%.6f", seconds)
+
 class RenderService(
     private val renderDir: File,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
-    private val jobTtlMs: Long = 3600_000,
+    /** Phase 1: bumped from 1h → 2h to give downstream pipelines (subtitles /
+     * autodub / separation) a wider window to pick up the rendered output as
+     * source. cleanup uses lastAccessedAt so each touch resets the clock. */
+    private val jobTtlMs: Long = 7200_000,
     /** Hard cap on concurrent top-level render jobs that can spawn ffmpeg.
      * 5+ variant fan-out otherwise saturates CPU + memory. submitRender
      * returns immediately; the launched coroutine acquires the permit
@@ -79,6 +107,76 @@ class RenderService(
 
     fun getJob(jobId: String): RenderJob? = jobs[jobId]
 
+    /**
+     * Test seam: register a fully-formed [RenderJob] without going through
+     * ffmpeg. Used by `MediaSourceResolverTest` to exercise
+     * acquireRenderOutputCopy / cleanupExpiredJobs without spawning a real
+     * render. Production code never calls this.
+     */
+    internal fun registerJobForTest(job: RenderJob) {
+        jobs[job.jobId] = job
+    }
+
+    /** Test seam: exposes the otherwise-private cleanup pass. */
+    internal fun cleanupExpiredJobsForTest() = cleanupExpiredJobs()
+
+    /**
+     * Phase 1: returns the completed render output file for [jobId], or null
+     * when the job is missing / not yet COMPLETED / its file no longer
+     * exists on disk. Callers that consume this output as source for
+     * downstream pipelines (subtitles / autodub / separation) should pair
+     * this with [touchJob] so cleanup defers GC.
+     *
+     * Prefer [acquireRenderOutputCopy] for downstream pipeline source
+     * resolution — that copies the bytes and bumps lastAccessedAt under a
+     * single lock, so cleanup can't race with the consumer and the consumer
+     * can freely delete/rename its returned file.
+     */
+    fun getRenderOutputFile(jobId: String): File? {
+        val job = jobs[jobId] ?: return null
+        if (job.status != "COMPLETED") return null
+        if (!job.outputFile.exists()) return null
+        return job.outputFile
+    }
+
+    /**
+     * Phase 1: bump [RenderJob.lastAccessedAt] so the cleanup sweep treats
+     * the job as recently used. No-op when the jobId is unknown.
+     */
+    fun touchJob(jobId: String) {
+        jobs[jobId]?.lastAccessedAt = System.currentTimeMillis()
+    }
+
+    /**
+     * Phase 1 follow-up: returns an **owned copy** of the completed render
+     * output for [jobId] under [copyTargetDir], or null when the job is
+     * missing / not yet COMPLETED / its file has been reaped. The caller
+     * owns the returned file — it is safe to delete, rename, or feed into
+     * a pipeline that does so (auto-subtitle, auto-dub, separation).
+     *
+     * The exists-check, the byte copy, and the lastAccessedAt bump all run
+     * inside `synchronized(job)`. [cleanupExpiredJobs] takes the same lock
+     * before deleting outputFile, so the two can never interleave: either
+     * the copy completes (and lastAccessedAt is bumped, deferring cleanup)
+     * or cleanup wins entirely and we return null.
+     *
+     * The copy file is named `source-<uuid>.<ext>` to keep the original
+     * outputFile name and any sibling sticky-state files unambiguous.
+     */
+    fun acquireRenderOutputCopy(jobId: String, copyTargetDir: File): File? {
+        val job = jobs[jobId] ?: return null
+        synchronized(job) {
+            if (job.status != "COMPLETED") return null
+            if (!job.outputFile.exists()) return null
+            copyTargetDir.mkdirs()
+            val ext = job.outputFile.extension.ifEmpty { "bin" }
+            val copy = File(copyTargetDir, "source-${UUID.randomUUID()}.$ext")
+            job.outputFile.copyTo(copy, overwrite = false)
+            job.lastAccessedAt = System.currentTimeMillis()
+            return copy
+        }
+    }
+
     fun submitRender(
         legacyVideoFile: File?,
         videoFiles: Map<String, File>,
@@ -96,9 +194,18 @@ class RenderService(
         audioOverrideFile: File? = null,
         separationDirectives: List<DirectiveWithStemFiles> = emptyList(),
         inputFilesToCleanup: List<File> = emptyList(),
+        /** Phase 1.5: "video" (default mp4) | "audio" (m4a/AAC). audio mode
+         * 는 자막/분리 파이프라인 source 로 쓰일 결과만 만들어내므로 비디오 트랙 ·
+         * sticker overlay · subtitle burn-in · imageClips · dubClips ·
+         * audioOverride · separation stems 모두 무시된다. */
+        outputKind: String = "video",
     ): String {
+        require(outputKind == "video" || outputKind == "audio") {
+            "outputKind must be 'video' or 'audio' (got '$outputKind')"
+        }
         val jobId = "render-${UUID.randomUUID()}"
-        val outputFile = File(renderDir, "$jobId.mp4")
+        val outputExt = if (outputKind == "audio") "m4a" else "mp4"
+        val outputFile = File(renderDir, "$jobId.$outputExt")
         val job = RenderJob(jobId = jobId, outputFile = outputFile)
         jobs[jobId] = job
 
@@ -114,7 +221,32 @@ class RenderService(
             ffmpegSemaphore.acquire()
             job.progressReason = null
             try {
-                if (segments != null) {
+                if (outputKind == "audio") {
+                    // Audio-only path — segments 우선, 없으면 legacy single video.
+                    val audioSegments = segments
+                        ?: legacyVideoFile?.let {
+                            // legacy 단일 비디오를 단일 segment 로 매핑.
+                            val dur = videoDurationMs
+                                ?: throw IllegalArgumentException("videoDurationMs is required for legacy audio render")
+                            require(dur > 0) { "videoDurationMs must be positive" }
+                            listOf(
+                                Segment(
+                                    sourceFileKey = "video_0",
+                                    type = "VIDEO",
+                                    order = 0,
+                                    durationMs = dur,
+                                ),
+                            )
+                        }
+                        ?: throw IllegalArgumentException("audio render requires segments or legacy video")
+                    val legacyVideoMap = if (segments == null && legacyVideoFile != null) {
+                        mapOf("video_0" to legacyVideoFile)
+                    } else videoFiles
+                    runAudioOnlyRender(
+                        job, audioSegments, legacyVideoMap, segmentImageFiles,
+                        bgmAudioFiles, bgmClips,
+                    )
+                } else if (segments != null) {
                     runMultiSegmentRender(
                         job, segments, videoFiles, segmentImageFiles,
                         audioFiles, imageFiles, subtitlesFile, dubClips, imageClips,
@@ -149,6 +281,10 @@ class RenderService(
                     if (exitCode == 0 && outputFile.exists()) {
                         job.status = "COMPLETED"
                         job.progress = 100
+                        // Phase 1: bump access time so the TTL window effectively
+                        // starts at completion (not job creation) — long renders
+                        // shouldn't shrink the downstream-reference window.
+                        job.lastAccessedAt = System.currentTimeMillis()
                         log.info("Render completed: jobId={}, size={}", jobId, outputFile.length())
                     } else {
                         job.status = "FAILED"
@@ -170,6 +306,284 @@ class RenderService(
         }
 
         return jobId
+    }
+
+    // ── Audio-only pipeline (Phase 1.5) ──────────────────────────────────────
+    //
+    // 자막 / 음원분리 파이프라인이 편집된 영상의 audio 만 필요로 한다는 관찰에서
+    // 출발. 비디오 인코딩(libx264)을 통째로 건너뛰면 동일 segment list 기준으로
+    // mp4 렌더 대비 5~20x 빠르고 결과 사이즈도 ~1/30. 결과는 m4a (AAC LC).
+    //
+    // 처리되지 않는 input config (audio 와 무관해 의도적으로 무시):
+    //   • imageClips · sticker overlay · subtitlesFile (burn-in 대상 없음)
+    //   • IMAGE 타입 segment (audio 없음 — anullsrc 로 대체해 timeline 만 차지)
+    //   • dubClips · audioOverrideFile · separationDirectives (audio render
+    //     자체가 자막/분리/더빙 단계 BEFORE 호출되므로 mix 할 source 가 없음)
+    //
+    // 적용되는 것:
+    //   • Segment.trimStartMs/trimEndMs · speedScale (atempo) · volumeScale
+    //   • bgmClips (mix 대상으로 합류, dubClips 와 동일하게 adelay+volume 적용)
+    private fun runAudioOnlyRender(
+        job: RenderJob,
+        segments: List<Segment>,
+        videoFiles: Map<String, File>,
+        segmentImageFiles: Map<String, File>,
+        bgmAudioFiles: Map<String, File>,
+        bgmClips: List<BgmClip>,
+    ) {
+        require(segments.isNotEmpty()) { "segments must not be empty" }
+        val tempDir = File(renderDir, "tmp_${job.jobId}")
+        tempDir.mkdirs()
+        try {
+            val sorted = segments.sortedBy { it.order }
+            val totalSteps = sorted.size + 1 // per-segment + final mix
+            val stepsDone = AtomicInteger(0)
+            fun updateProgress() {
+                job.progress = ((stepsDone.get().toDouble() / totalSteps) * 95).toInt().coerceIn(0, 95)
+            }
+
+            // Step 1: per-segment audio extract → m4a. IMAGE segment 는
+            // anullsrc 로 무음 구간을 만들어 timeline 위치를 보존.
+            val segmentSemaphore = Semaphore(MAX_PARALLEL_SEGMENTS)
+            val processedFiles = runBlocking {
+                coroutineScope {
+                    sorted.mapIndexed { idx, seg ->
+                        async(Dispatchers.IO) {
+                            segmentSemaphore.withPermit {
+                                val file = when (seg.type) {
+                                    "IMAGE" -> silentAudioSegment(seg, tempDir, idx)
+                                    "VIDEO" -> {
+                                        val vidFile = videoFiles[seg.sourceFileKey]
+                                            ?: throw IllegalArgumentException(
+                                                "Video file not found: ${seg.sourceFileKey}"
+                                            )
+                                        extractAudioSegment(vidFile, seg, tempDir, idx)
+                                    }
+                                    else -> throw IllegalArgumentException("Unknown segment type: ${seg.type}")
+                                }
+                                stepsDone.incrementAndGet()
+                                updateProgress()
+                                file
+                            }
+                        }
+                    }.awaitAll()
+                }
+            }
+
+            // Step 2: concat audio streams + mix bgmClips → final m4a.
+            val totalDurationMs = sorted.sumOf { segmentOutputDurationMs(it) }
+            val command = buildAudioConcatCommand(
+                processedFiles, bgmAudioFiles, bgmClips,
+                totalDurationMs, job.outputFile,
+            )
+            log.info("Starting audio-only ffmpeg render: jobId={}", job.jobId)
+            val proc = ProcessBuilder(command).redirectErrorStream(true).start()
+            try {
+                val durationSec = totalDurationMs / 1000.0
+                proc.inputStream.bufferedReader().useLines { lines ->
+                    lines.forEach { line ->
+                        parseFfmpegProgress(line, durationSec)?.let { pct ->
+                            job.progress = 95 + (pct * 5 / 100)
+                        }
+                    }
+                }
+                val exitCode = proc.waitFor()
+                if (exitCode == 0 && job.outputFile.exists()) {
+                    job.status = "COMPLETED"
+                    job.progress = 100
+                    job.lastAccessedAt = System.currentTimeMillis()
+                    log.info(
+                        "Audio-only render completed: jobId={} size={}",
+                        job.jobId, job.outputFile.length(),
+                    )
+                } else {
+                    job.status = "FAILED"
+                    job.error = "ffmpeg audio-only step exited with code $exitCode"
+                    job.outputFile.delete()
+                    log.error(
+                        "Audio-only render failed: jobId={} exitCode={}",
+                        job.jobId, exitCode,
+                    )
+                }
+            } catch (e: Exception) {
+                proc.destroyForcibly()
+                throw e
+            }
+        } finally {
+            tempDir.deleteRecursively()
+        }
+    }
+
+    private fun extractAudioSegment(
+        vidFile: File,
+        seg: Segment,
+        tempDir: File,
+        idx: Int,
+    ): File {
+        val outFile = File(tempDir, "seg_aud_$idx.m4a")
+        val trimStart = (seg.trimStartMs ?: 0L) / 1000.0
+        val trimEnd = (seg.trimEndMs?.takeIf { it > 0L } ?: seg.durationMs) / 1000.0
+        val sourceDurationSec = (trimEnd - trimStart).coerceAtLeast(0.0)
+        val speed = seg.speedScale
+        val volume = seg.volumeScale
+        // -t 는 setpts 후 길이라 speed<1 (slow-mo) 보정 위해 source / speed.
+        val outputDurationSec = sourceDurationSec / speed
+
+        // Guard: 20ms 미만 segment 는 primary extract 시도 자체를 건너뛰고 silent
+        // fallback (≥20ms) 로 padding. 짧은 segment 는 STT/AAC 인코더 정밀도 한계로
+        // 의미 없고, 실제 사용자 trim 거의 0 케이스에서 ffmpeg `-t` 파싱이 깨지면서
+        // exit 234 로 전체 render 가 실패한 적 있음 (참고: 0.000670s 케이스).
+        if (outputDurationSec < MIN_AUDIO_SEGMENT_SEC) {
+            log.warn(
+                "Audio segment {} duration too small ({}s) — using silent {}s padding",
+                idx, outputDurationSec, MIN_AUDIO_SEGMENT_SEC,
+            )
+            return runSilentAudioFallback(outFile, outputDurationSec, idx)
+        }
+
+        val afParts = mutableListOf<String>()
+        if (speed != 1.0f) afParts.add(atempoChain(speed))
+        if (volume != 1.0f) afParts.add("volume=${volume}")
+        val af = afParts.joinToString(",")
+
+        // anullsrc 두 번째 입력은 video 트랙에 audio 가 없는 경우 fallback —
+        // -map 0:a? 만으로 처리하면 audio 없는 입력에서 ffmpeg 실패. amerge 대신
+        // -filter_complex 로 [0:a]||anullsrc 분기 처리는 복잡 → audio 가 없는
+        // 영상은 사실상 trimVideoSegment 와 같은 문제이므로 anullsrc -shortest
+        // 처리. 실제로 trim한 segment 가 audio 없으면 silent 결과가 나옴.
+        val cmd = mutableListOf(
+            "ffmpeg", "-y",
+            "-ss", secondsToFfmpegArg(trimStart),
+            "-i", vidFile.absolutePath,
+            "-f", "lavfi", "-t", secondsToFfmpegArg(outputDurationSec),
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-t", secondsToFfmpegArg(outputDurationSec),
+            "-vn",
+        )
+        if (af.isNotEmpty()) {
+            cmd.addAll(listOf("-filter_complex", "[0:a]${af}[a]", "-map", "[a]"))
+        } else {
+            cmd.addAll(listOf("-map", "0:a?"))
+        }
+        cmd.addAll(listOf(
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            outFile.absolutePath,
+        ))
+
+        val exit = runFfmpegBlocking(cmd)
+        // audio 없는 영상이면 위 ffmpeg 가 실패. silentAudioSegment 같은 로직으로
+        // anullsrc 만으로 재시도해 silent fallback 보장.
+        if (exit != 0 || !outFile.exists()) {
+            log.warn(
+                "Audio segment $idx primary extract failed (exit $exit), falling back to silent",
+            )
+            outFile.delete()
+            return runSilentAudioFallback(outFile, outputDurationSec, idx)
+        }
+        return outFile
+    }
+
+    /**
+     * Silent (anullsrc) m4a 를 [outFile] 에 작성. duration 은 [MIN_AUDIO_SEGMENT_SEC]
+     * 이상으로 강제해 0/sub-ms 입력에서도 ffmpeg 가 안전히 동작.
+     *
+     * 호출자: [extractAudioSegment] 의 1) too-short guard, 2) primary extract 실패
+     * fallback. 둘 다 같은 incoming `outFile` 에 결과를 채우고 동일한 정상 path 로
+     * 빠져나가야 하므로 한 함수로 통합.
+     */
+    private fun runSilentAudioFallback(outFile: File, requestedDurationSec: Double, idx: Int): File {
+        val safeDurationSec = requestedDurationSec.coerceAtLeast(MIN_AUDIO_SEGMENT_SEC)
+        val fallback = listOf(
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-t", secondsToFfmpegArg(safeDurationSec),
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-c:a", "aac", "-b:a", "192k",
+            outFile.absolutePath,
+        )
+        val exit = runFfmpegBlocking(fallback)
+        if (exit != 0 || !outFile.exists()) {
+            throw RuntimeException("Audio segment $idx extract failed (exit $exit)")
+        }
+        return outFile
+    }
+
+    private fun silentAudioSegment(
+        seg: Segment,
+        tempDir: File,
+        idx: Int,
+    ): File {
+        val outFile = File(tempDir, "seg_sil_$idx.m4a")
+        // 너무 짧은 IMAGE segment 도 ffmpeg AAC 인코더가 거부하지 않도록 floor 적용.
+        val durationSec = (seg.durationMs / 1000.0).coerceAtLeast(MIN_AUDIO_SEGMENT_SEC)
+        val cmd = listOf(
+            "ffmpeg", "-y",
+            "-f", "lavfi", "-t", secondsToFfmpegArg(durationSec),
+            "-i", "anullsrc=r=44100:cl=stereo",
+            "-c:a", "aac", "-b:a", "128k",
+            outFile.absolutePath,
+        )
+        val exit = runFfmpegBlocking(cmd)
+        if (exit != 0 || !outFile.exists()) {
+            throw RuntimeException("Silent audio segment $idx generation failed (exit $exit)")
+        }
+        return outFile
+    }
+
+    private fun buildAudioConcatCommand(
+        segmentFiles: List<File>,
+        bgmAudioFiles: Map<String, File>,
+        bgmClips: List<BgmClip>,
+        totalDurationMs: Long,
+        outputFile: File,
+    ): List<String> {
+        val cmd = mutableListOf("ffmpeg", "-y")
+        // 모든 segment audio 를 -i 로 추가 → concat filter.
+        for (f in segmentFiles) {
+            cmd.addAll(listOf("-i", f.absolutePath))
+        }
+        var inputIdx = segmentFiles.size
+        val bgmInputIndices = mutableListOf<Int>()
+        for (clip in bgmClips) {
+            val f = bgmAudioFiles[clip.audioFileKey]
+                ?: throw IllegalArgumentException(
+                    "BGM audio file not found: ${clip.audioFileKey}"
+                )
+            cmd.addAll(listOf("-i", f.absolutePath))
+            bgmInputIndices.add(inputIdx++)
+        }
+
+        val filters = mutableListOf<String>()
+        // 1) concat segment audios — concat filter (v=0,a=1) 로 PTS 재계산.
+        val concatRefs = segmentFiles.indices.joinToString("") { "[${it}:a]" }
+        filters.add("${concatRefs}concat=n=${segmentFiles.size}:v=0:a=1[base]")
+
+        val finalLabel: String = if (bgmClips.isEmpty()) {
+            // base 만 있으면 그대로 출력.
+            "[base]"
+        } else {
+            // 각 bgm clip 에 adelay+volume 적용 후 base 와 amix.
+            val mixInputs = mutableListOf("[base]")
+            for ((i, clip) in bgmClips.withIndex()) {
+                filters.add(audioClipFilter(bgmInputIndices[i], clip.startMs, clip.volume, "bgm$i"))
+                mixInputs.add("[bgm$i]")
+            }
+            filters.add(
+                "${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:" +
+                    "duration=first:dropout_transition=0[aout]"
+            )
+            "[aout]"
+        }
+
+        cmd.addAll(listOf("-filter_complex", filters.joinToString(";")))
+        cmd.addAll(listOf(
+            "-map", finalLabel,
+            "-c:a", "aac", "-b:a", "192k", "-ar", "44100", "-ac", "2",
+            "-movflags", "+faststart",
+            "-t", secondsToFfmpegArg(totalDurationMs / 1000.0),
+            "-progress", "pipe:1",
+            outputFile.absolutePath,
+        ))
+        return cmd
     }
 
     // ── Multi-segment pipeline (Task 3b) ─────────────────────────────────────
@@ -270,6 +684,8 @@ class RenderService(
                 if (exitCode == 0 && job.outputFile.exists()) {
                     job.status = "COMPLETED"
                     job.progress = 100
+                    // Phase 1: see submitRender — start the TTL window at completion.
+                    job.lastAccessedAt = System.currentTimeMillis()
                     log.info("Multi-segment render completed: jobId={}", job.jobId)
                 } else {
                     job.status = "FAILED"
@@ -313,7 +729,7 @@ class RenderService(
             "-vf", vf,
             "-c:v", "libx264", "-tune", "stillimage", "-pix_fmt", "yuv420p", "-r", "30",
             "-c:a", "aac", "-b:a", "128k",
-            "-t", durationSec.toString(),
+            "-t", secondsToFfmpegArg(durationSec),
             outFile.absolutePath,
         )
         val exit = runFfmpegBlocking(cmd)
@@ -358,10 +774,10 @@ class RenderService(
         // concat demuxer.
         val cmd = mutableListOf(
             "ffmpeg", "-y",
-            "-ss", trimStart.toString(),
+            "-ss", secondsToFfmpegArg(trimStart),
             "-i", vidFile.absolutePath,
             "-f", "lavfi", "-i", "anullsrc=r=44100:cl=stereo",
-            "-t", outputDurationSec.toString(),
+            "-t", secondsToFfmpegArg(outputDurationSec),
             "-vf", vf,
         )
         if (af.isNotEmpty()) {
@@ -552,6 +968,9 @@ class RenderService(
         val baseAudioRef: String = if (muteWindows.isEmpty()) {
             initialBaseRef
         } else {
+            // Invariant: rangeStartMs/rangeEndMs are Long (ms) → / 1000.0 always yields
+            // multiples of 0.001 → never enters scientific notation (< 1e-3) range.
+            // If the type ever changes to Double or sub-ms, route through secondsToFfmpegArg.
             val expr = muteWindows.joinToString("+") {
                 "between(t,${it.rangeStartMs / 1000.0},${it.rangeEndMs / 1000.0})"
             }
@@ -583,6 +1002,9 @@ class RenderService(
             // duration=first 로 video 길이까지 패딩됨.
             for ((dIdx, directive) in separationDirectives.withIndex()) {
                 val rangeMs = (directive.rangeEndMs - directive.rangeStartMs).coerceAtLeast(0L)
+                // Invariant: rangeMs is Long (ms) → / 1000.0 always yields multiples of
+                // 0.001 → never enters scientific notation. If sub-ms ever needed, route
+                // through secondsToFfmpegArg.
                 val rangeSec = rangeMs / 1000.0
                 for ((sIdx, stem) in directive.stems.withIndex()) {
                     val inputIndex = stemInputIndices[dIdx][sIdx]
@@ -642,7 +1064,7 @@ class RenderService(
             "-c:a", "aac",
             "-b:a", "192k",
             "-movflags", "+faststart",
-            "-t", (videoDurationMs / 1000.0).toString(),
+            "-t", secondsToFfmpegArg(videoDurationMs / 1000.0),
             "-progress", "pipe:1",
             outputFile.absolutePath,
         ))
@@ -697,13 +1119,25 @@ class RenderService(
         val now = System.currentTimeMillis()
         jobs.entries
             .filter { (_, job) ->
+                // Phase 1: lastAccessedAt 기반 — touchJob() 으로 referencing pipeline 이
+                // 살아있다고 신호하면 GC 가 미뤄진다. 미참조 job 만 자연스럽게 만료.
                 (job.status == "COMPLETED" || job.status == "FAILED") &&
-                    (now - job.createdAt) > jobTtlMs
+                    (now - job.lastAccessedAt) > jobTtlMs
             }
             .forEach { (id, job) ->
-                job.outputFile.delete()
-                jobs.remove(id)
-                log.info("Cleaned up expired render job: {}", id)
+                // Phase 1 follow-up: take the same per-job lock as
+                // acquireRenderOutputCopy so a downstream consumer can never
+                // be handed an outputFile that we're about to delete. Re-check
+                // lastAccessedAt inside the lock — if a copy raced ahead and
+                // bumped the timestamp, abort the GC for this round.
+                val deleted = synchronized(job) {
+                    if ((now - job.lastAccessedAt) > jobTtlMs) {
+                        job.outputFile.delete()
+                        jobs.remove(id)
+                        true
+                    } else false
+                }
+                if (deleted) log.info("Cleaned up expired render job: {}", id)
             }
     }
 }

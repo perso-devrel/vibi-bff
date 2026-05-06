@@ -325,6 +325,7 @@ fun Route.renderRoutes(
                 audioOverrideFile = audioOverrideFile,
                 separationDirectives = resolvedDirectives,
                 inputFilesToCleanup = inputFiles,
+                outputKind = config.outputKind,
             )
 
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
@@ -355,12 +356,24 @@ fun Route.renderRoutes(
                 throw NotFoundException("Render not ready: status=${job.status}")
             }
 
+            // outputFile 의 실제 확장자에 따라 Content-Disposition 의 filename
+            // 과 Content-Type 결정. audio 모드 (.m4a) / video 모드 (.mp4) 모두 커버.
+            // respondFile 호출 직후엔 이미 응답이 시작되므로 모든 헤더는 그 전에.
+            val fileName = "$jobId.${job.outputFile.extension.ifBlank { "mp4" }}"
+            val contentType = when (job.outputFile.extension.lowercase()) {
+                "m4a", "mp4a" -> ContentType("audio", "mp4")
+                "mp3" -> ContentType("audio", "mpeg")
+                "wav" -> ContentType("audio", "wav")
+                "mp4" -> ContentType("video", "mp4")
+                else -> ContentType.Application.OctetStream
+            }
             call.response.header(
                 HttpHeaders.ContentDisposition,
                 ContentDisposition.Attachment.withParameter(
-                    ContentDisposition.Parameters.FileName, "$jobId.mp4"
+                    ContentDisposition.Parameters.FileName, fileName
                 ).toString()
             )
+            call.response.header(HttpHeaders.ContentType, contentType.toString())
             call.respondFile(job.outputFile)
         }
     }

@@ -13,12 +13,18 @@ class FileStorageService(private val config: StorageConfig) {
     private val uploadsDir get() = File(baseDir, "uploads")
     val renderDir get() = File(baseDir, "render")
     val separationDir get() = File(baseDir, "separation")
+    /** Phase 1 follow-up: holds caller-owned copies of /api/v2/render outputs
+     * referenced via spec.editedRenderJobId. Downstream pipelines may
+     * delete/rename files in here without touching the original render
+     * output. See [MediaSourceResolver] / [RenderService.acquireRenderOutputCopy]. */
+    val editedSourceDir get() = File(baseDir, "edited-source")
 
     init {
         uploadsDir.mkdirs()
         renderDir.mkdirs()
         separationDir.mkdirs()
         File(separationDir, "mix").mkdirs()
+        editedSourceDir.mkdirs()
         log.info("Storage initialized at {}", baseDir.absolutePath)
     }
 

@@ -6,6 +6,7 @@ import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
 import com.dubcast.bff.service.GeminiClient
 import com.dubcast.bff.service.FileStorageService
+import com.dubcast.bff.service.MediaSourceResolver
 import com.dubcast.bff.service.PersoClient
 import com.dubcast.bff.service.RenderInputCacheService
 import com.dubcast.bff.service.RenderService
@@ -148,6 +149,12 @@ fun Application.module() {
         maxPollMinutes = appConfig.perso.maxPollMinutes,
     )
 
+    // Phase 1: subtitles / autodub / separation 의 source 결정자.
+    // multipart `file` 또는 spec.editedRenderJobId 둘 중 하나로 source 해석.
+    // editedRenderJobId 경유 시 RenderService 가 owner — resolver 가 별도 디렉터리에
+    // 복사한 owned-copy 를 반환해 downstream 의 delete/rename 으로부터 원본 보호.
+    val mediaSourceResolver = MediaSourceResolver(renderService, fileStorage.editedSourceDir)
+
     install(CallLogging) {
         level = Level.INFO
         // Never log signed-URL tokens in plain text — they're short-lived but
@@ -170,6 +177,7 @@ fun Application.module() {
         fileStorage, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
         autoSubtitleService, autoDubService, geminiClient, httpClient, renderInputCache,
+        mediaSourceResolver,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(

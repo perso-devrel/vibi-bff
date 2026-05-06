@@ -3,12 +3,50 @@ package com.dubcast.bff
 import com.dubcast.bff.service.DirectiveStem
 import com.dubcast.bff.service.DirectiveWithStemFiles
 import com.dubcast.bff.service.RenderService
+import com.dubcast.bff.service.secondsToFfmpegArg
 import java.io.File
 import kotlin.test.*
 
 class RenderServiceUtilsTest {
 
     private val service = RenderService(File(System.getProperty("java.io.tmpdir"), "renderservice-utils-test"))
+
+    // ── secondsToFfmpegArg ─────────────────────────────────────────────────────
+
+    @Test
+    fun `secondsToFfmpegArg formats sub-millisecond as fixed decimal not scientific`() {
+        // Regression guard: 0.000670 used to render as "6.7E-4" via Double.toString,
+        // which ffmpeg rejected with "Invalid duration for option t" (exit 234).
+        val arg = secondsToFfmpegArg(0.000670)
+        assertEquals("0.000670", arg)
+        assertFalse(arg.contains("E", ignoreCase = true), "must not contain scientific notation: $arg")
+    }
+
+    @Test
+    fun `secondsToFfmpegArg rounds to microsecond precision`() {
+        // ffmpeg AV_TIME_BASE is 1e6 — anything beyond 6 decimals is noise.
+        assertEquals("1.500000", secondsToFfmpegArg(1.5))
+        assertEquals("0.000000", secondsToFfmpegArg(0.0))
+        assertEquals("3.000000", secondsToFfmpegArg(3.0))
+    }
+
+    @Test
+    fun `secondsToFfmpegArg uses US locale for decimal separator`() {
+        // Locale-sensitive String.format would output "1,500000" on de-DE / fr-FR
+        // and ffmpeg rejects that. Locale.US fixes it regardless of JVM default.
+        val arg = secondsToFfmpegArg(1.5)
+        assertTrue(arg.contains("."), "expected dot decimal: $arg")
+        assertFalse(arg.contains(","), "must not use comma decimal: $arg")
+    }
+
+    @Test
+    fun `secondsToFfmpegArg handles very small and very large values`() {
+        // Tiny — would otherwise be "6.702596628521888E-4" from Double.toString.
+        val tiny = secondsToFfmpegArg(6.702596628521888E-4)
+        assertEquals("0.000670", tiny)
+        // Large — well within long-form range.
+        assertEquals("3600.000000", secondsToFfmpegArg(3600.0))
+    }
 
     // ── ffmpegColor ────────────────────────────────────────────────────────────
 

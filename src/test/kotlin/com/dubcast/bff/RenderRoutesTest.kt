@@ -283,6 +283,7 @@ class RenderRoutesTest {
             renderService.submitRender(
                 any(), any(), any(), any(), any(), any(),
                 any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
+                any(),
             )
         } returns "render-cached-2"
 
@@ -358,5 +359,110 @@ class RenderRoutesTest {
             capturedAudios.captured.keys.none { it.startsWith("audio_override") },
             "audio_override must NOT leak into audioFiles map",
         )
+    }
+
+    // ── outputKind ────────────────────────────────────────────────────────────
+
+    /**
+     * 기본값 검증 — outputKind 필드 없는 config 는 기존 클라이언트와 동일하게 video 로 처리.
+     */
+    @Test
+    fun `POST render defaults outputKind to video when omitted`() = testApp {
+        val capturedKind = slot<String>()
+        every {
+            renderService.submitRender(
+                legacyVideoFile = any(),
+                videoFiles = any(),
+                segmentImageFiles = any(),
+                audioFiles = any(),
+                imageFiles = any(),
+                subtitlesFile = any(),
+                dubClips = any(),
+                imageClips = any(),
+                videoDurationMs = any(),
+                segments = any(),
+                bgmAudioFiles = any(),
+                bgmClips = any(),
+                frame = any(),
+                audioOverrideFile = any(),
+                separationDirectives = any(),
+                inputFilesToCleanup = any(),
+                outputKind = capture(capturedKind),
+            )
+        } returns "render-defaultkind-1"
+
+        val response = client.post("/api/v2/render") {
+            setBody(MultiPartFormDataContent(formData {
+                append("video", ByteArray(64), Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
+                })
+                append("config", """{"dubClips":[],"videoDurationMs":3000}""")
+            }))
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("video", capturedKind.captured)
+    }
+
+    /**
+     * outputKind="audio" 가 RenderService 까지 그대로 전달되어야 자막/분리 source 용
+     * audio-only 렌더가 트리거됨.
+     */
+    @Test
+    fun `POST render passes outputKind audio through to service`() = testApp {
+        val capturedKind = slot<String>()
+        every {
+            renderService.submitRender(
+                legacyVideoFile = any(),
+                videoFiles = any(),
+                segmentImageFiles = any(),
+                audioFiles = any(),
+                imageFiles = any(),
+                subtitlesFile = any(),
+                dubClips = any(),
+                imageClips = any(),
+                videoDurationMs = any(),
+                segments = any(),
+                bgmAudioFiles = any(),
+                bgmClips = any(),
+                frame = any(),
+                audioOverrideFile = any(),
+                separationDirectives = any(),
+                inputFilesToCleanup = any(),
+                outputKind = capture(capturedKind),
+            )
+        } returns "render-audiokind-1"
+
+        val cfg = """{"dubClips":[],"videoDurationMs":3000,"outputKind":"audio"}"""
+        val response = client.post("/api/v2/render") {
+            setBody(MultiPartFormDataContent(formData {
+                append("video", ByteArray(64), Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
+                })
+                append("config", cfg)
+            }))
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+        assertEquals("audio", capturedKind.captured)
+    }
+
+    /**
+     * 잘못된 outputKind 값은 init validator 에서 IllegalArgumentException →
+     * StatusPages 에 의해 400.
+     */
+    @Test
+    fun `POST render rejects invalid outputKind`() = testApp {
+        val cfg = """{"dubClips":[],"videoDurationMs":3000,"outputKind":"weird"}"""
+        val response = client.post("/api/v2/render") {
+            setBody(MultiPartFormDataContent(formData {
+                append("video", ByteArray(64), Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
+                })
+                append("config", cfg)
+            }))
+        }
+        assertEquals(HttpStatusCode.BadRequest, response.status)
     }
 }
