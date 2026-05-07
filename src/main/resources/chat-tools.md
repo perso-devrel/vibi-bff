@@ -28,7 +28,7 @@ projectContext 는 매 turn 마다 모바일이 timeline 스냅샷을 보내는 
 | **"이 구간", "this range", "방금 선택한 구간", "선택 구간"** | **`isRangeSelecting=true` 일 때 `pendingRangeStartMs` / `pendingRangeEndMs`** — **반드시** 이 값을 `startMs`/`endMs` 로 사용 |
 | "5초~10초", "from 5s to 10s" | `startMs=5000`, `endMs=10000` 으로 변환 |
 | "처음부터", "from start" | `startMs=0` |
-| "끝까지", "to end" | `endMs = videoDurationMs` (segments 합) |
+| "끝까지", "to end" | `endMs = projectContext.videoDurationMs` |
 
 **중요**: `isRangeSelecting=true` 인데 사용자가 "이 구간..." 이라고 말했으면 `pendingRangeStartMs`/`EndMs` 를 그대로 args 로 넣는다. 사용자가 이미 UI 로 잡았으니 그 값이 truth.
 
@@ -49,36 +49,38 @@ projectContext 에 없는 id/timestamp 는 절대 fabricate 금지. 없으면 ki
 각 tool 은 모바일 dispatcher 가 정확한 name 으로만 매칭. 등록 안 된 name 은 거부됨.
 
 ### delete_segment_range
-범위 삭제. UI 모드와 독립적 — range 모드 진입 없이도 동작.
-- `segmentId` (string, required): 대상 segment id.
-- `startMs` (integer, required): 삭제 시작 (inclusive).
-- `endMs` (integer, required): 삭제 끝 (exclusive).
+글로벌 timeline `[startMs, endMs)` 와 겹치는 모든 VIDEO segment 의 해당 부분을 삭제.
+범위가 여러 segment 에 걸치면 dispatcher 가 자동으로 per-segment 로 잘라 처리.
+UI 모드와 독립적 — range 모드 진입 없이도 동작.
+- `segmentId` (string, required): 의도 명확화용. 실제 dispatch 는 글로벌 범위로 동작하므로 첫 video segment id 로 채워도 무방.
+- `startMs` (integer, required): 삭제 시작 (inclusive, 글로벌 timeline ms).
+- `endMs` (integer, required): 삭제 끝 (exclusive, 글로벌 timeline ms).
 
 예: "5초부터 10초까지 잘라내" → `{segmentId: <첫 video segment>, startMs: 5000, endMs: 10000}`
 예: "방금 선택한 구간 삭제" (isRangeSelecting=true) → `{segmentId: selectedSegmentId, startMs: pendingRangeStartMs, endMs: pendingRangeEndMs}`
 
 ### duplicate_segment_range
-범위 복제 후 원본 뒤에 삽입.
-- `segmentId` (string, required)
-- `startMs` (integer, required)
-- `endMs` (integer, required)
+글로벌 범위 복제 후 원본 뒤에 삽입. 다중 segment 에 걸쳐도 자동 처리.
+- `segmentId` (string, required): 의도 명확화용.
+- `startMs` (integer, required): 글로벌 timeline ms.
+- `endMs` (integer, required): 글로벌 timeline ms.
 
 ### update_segment_volume
-범위 볼륨 변경. startMs/endMs 생략 시 segment 전체.
-- `segmentId` (string, required)
+글로벌 범위 볼륨 변경. startMs/endMs 생략 시 전체 timeline (`0..videoDurationMs`).
+- `segmentId` (string, required): 의도 명확화용.
 - `volumeScale` (number, required): 0..2. 1.0 = 원본.
-- `startMs` (integer, optional)
-- `endMs` (integer, optional)
+- `startMs` (integer, optional): 글로벌 timeline ms.
+- `endMs` (integer, optional): 글로벌 timeline ms.
 
 예: "이 영상 볼륨 절반으로" → `{segmentId, volumeScale: 0.5}`
 예: "5~10초 음량 두 배" → `{segmentId, startMs: 5000, endMs: 10000, volumeScale: 2.0}`
 
 ### update_segment_speed
-범위 속도 변경. startMs/endMs 생략 시 segment 전체.
-- `segmentId` (string, required)
+글로벌 범위 속도 변경. startMs/endMs 생략 시 전체 timeline.
+- `segmentId` (string, required): 의도 명확화용.
 - `speedScale` (number, required): 0.25..4. 1.0 = 원본.
-- `startMs` (integer, optional)
-- `endMs` (integer, optional)
+- `startMs` (integer, optional): 글로벌 timeline ms.
+- `endMs` (integer, optional): 글로벌 timeline ms.
 
 ### separate_audio_range
 음원 분리. video segment 의 trim 범위 또는 BGM 클립 단위.

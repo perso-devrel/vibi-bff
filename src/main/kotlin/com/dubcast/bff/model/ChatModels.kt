@@ -35,6 +35,9 @@ data class ProjectContext(
     val isRangeSelecting: Boolean = false,
     val pendingRangeStartMs: Long? = null,
     val pendingRangeEndMs: Long? = null,
+    /** 전체 timeline 길이 (모든 segment 합). "끝까지" 같은 발화 해석용 — Gemini 가 segments 합산할
+     *  필요 없게 직접 노출. */
+    val videoDurationMs: Long = 0L,
 )
 
 @Serializable

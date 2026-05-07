@@ -154,12 +154,15 @@ object ChatToolDefs {
 
     /**
      * systemInstruction — `chat-tools.md` 단일 spec 을 그대로 주입. 정책/도구 의미는 모두 문서에서.
+     * eager `val` 로 평가 — `object` 첫 참조(라우팅 와이어링) 시점에 resource 누락이면 즉시 실패해
+     * 기동 단계에서 가시화. lazy 로 두면 첫 chat 호출에서야 InternalServerError 로 swallow 됨.
+     *
      * 새 tool 추가 시: (1) functionDeclarations 에 entry 추가, (2) chat-tools.md 의 Tools 섹션에 항목 추가,
      * (3) 모바일 ChatToolDispatcher when 분기.
      */
-    val SYSTEM_INSTRUCTION: String by lazy {
+    val SYSTEM_INSTRUCTION: String = run {
         val stream = ChatToolDefs::class.java.classLoader.getResourceAsStream("chat-tools.md")
-            ?: error("chat-tools.md missing from BFF resources")
+            ?: error("chat-tools.md missing from BFF resources (src/main/resources/chat-tools.md)")
         val doc = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
         """
             You are a video-editing assistant integrated into a mobile timeline editor. You can only call the registered functions; you cannot invent actions or write free-form code. Follow the spec below verbatim.
