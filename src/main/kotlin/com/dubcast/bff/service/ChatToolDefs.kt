@@ -42,19 +42,23 @@ object ChatToolDefs {
         ),
         fn(
             name = "update_segment_volume",
-            description = "Set the playback volume for a video segment (range applies to whole segment in v1).",
+            description = "Set volume for a sub-range of a video segment, or the whole segment if startMs/endMs omitted.",
             properties = mapOf(
                 "segmentId" to schema("string", "Target segment id."),
                 "volumeScale" to schema("number", "0..2 multiplier. 1.0 = original."),
+                "startMs" to schema("integer", "Optional range start ms."),
+                "endMs" to schema("integer", "Optional range end ms."),
             ),
             required = listOf("segmentId", "volumeScale"),
         ),
         fn(
             name = "update_segment_speed",
-            description = "Set the playback speed for a video segment.",
+            description = "Set playback speed for a sub-range of a video segment, or the whole segment if startMs/endMs omitted.",
             properties = mapOf(
                 "segmentId" to schema("string", "Target segment id."),
                 "speedScale" to schema("number", "0.25..4 multiplier. 1.0 = original."),
+                "startMs" to schema("integer", "Optional range start ms."),
+                "endMs" to schema("integer", "Optional range end ms."),
             ),
             required = listOf("segmentId", "speedScale"),
         ),
@@ -148,29 +152,22 @@ object ChatToolDefs {
         ),
     )
 
-    /** v1 systemInstruction — 도구 외 동작 금지, 신뢰도 분기, 비용 힌트, 다국어 응답 규칙. */
-    val SYSTEM_INSTRUCTION = """
-        You are a video-editing assistant integrated into a mobile timeline editor. You can only call the registered functions below; you cannot invent actions or write free-form code. Respect these rules strictly:
+    /**
+     * systemInstruction — `chat-tools.md` 단일 spec 을 그대로 주입. 정책/도구 의미는 모두 문서에서.
+     * 새 tool 추가 시: (1) functionDeclarations 에 entry 추가, (2) chat-tools.md 의 Tools 섹션에 항목 추가,
+     * (3) 모바일 ChatToolDispatcher when 분기.
+     */
+    val SYSTEM_INSTRUCTION: String by lazy {
+        val stream = ChatToolDefs::class.java.classLoader.getResourceAsStream("chat-tools.md")
+            ?: error("chat-tools.md missing from BFF resources")
+        val doc = stream.bufferedReader(Charsets.UTF_8).use { it.readText() }
+        """
+            You are a video-editing assistant integrated into a mobile timeline editor. You can only call the registered functions; you cannot invent actions or write free-form code. Follow the spec below verbatim.
 
-        1. RESPOND IN THE USER'S LANGUAGE. Detect the language from the latest user turn and answer in that language (rationale, clarifications, search results). The locale field is only a fallback. Never auto-translate the user's text values (e.g., subtitle text arguments) — pass them verbatim.
-
-        2. DECIDE OUTPUT KIND:
-           - kind="text": for read-only questions ("how many subtitles", "find clips that say X") or clarifications when references in the user message cannot be resolved against projectContext (do not fabricate ids/timestamps).
-           - kind="proposal": whenever the user expresses an editing intent. Even single-action intents go through proposal — the mobile UI requires user confirmation before any change.
-
-        3. CONFIDENCE-DRIVEN PROPOSALS:
-           - High confidence (tool + args clearly identifiable from projectContext + user message): single-step proposal.
-           - Low confidence (vague phrases like "make this more energetic"): infer the most plausible multi-step plan (≤5 steps) and explain your interpretation in `rationale` with phrasing like "이렇게 해석했어요. 다른 방향이라면 알려주세요" / "I interpreted this as ... let me know if you wanted something else".
-           - Impossible (referenced ids/timestamps not in projectContext): kind=text clarification question.
-
-        4. PROPOSAL.STEPS limit: 5 max. If the user's intent suggests more, pick the most impactful 5 and add a note in rationale to ask for further refinements.
-
-        5. COST HINTS: if proposal includes generate_subtitles, generate_dub, generate_subtitles_for_bgm, generate_dub_for_bgm, or separate_audio_range, append a cost hint to rationale (e.g., "(예상 소요 약 N분)" / "(estimated ~N min)").
-
-        6. CONTEXT ANCHORS: use projectContext.currentPlayheadMs to resolve "여기"/"here", and projectContext.selectedSegmentId / selectedClipId for "이 클립"/"this clip".
-
-        7. NEVER include tool calls inline with kind=text. Choose one kind per response.
-    """.trimIndent()
+            --- CAPABILITY SPEC (chat-tools.md) ---
+            $doc
+        """.trimIndent()
+    }
 
     private fun fn(
         name: String,

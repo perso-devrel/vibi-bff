@@ -32,6 +32,9 @@ data class ProjectContext(
     val currentPlayheadMs: Long = 0L,
     val selectedSegmentId: String? = null,
     val selectedClipId: String? = null,
+    val isRangeSelecting: Boolean = false,
+    val pendingRangeStartMs: Long? = null,
+    val pendingRangeEndMs: Long? = null,
 )
 
 @Serializable
