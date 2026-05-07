@@ -8,6 +8,7 @@ data class AppConfig(
     val perso: PersoConfig,
     val gemini: GeminiConfig,
     val separation: SeparationConfig,
+    val auth: AuthConfig,
 )
 
 data class StorageConfig(
@@ -48,6 +49,32 @@ data class GeminiConfig(
     }
 }
 
+/**
+ * Google OAuth + 자체 JWT 발급 설정.
+ *
+ * - [googleClientIds] — `tokeninfo` 응답의 `aud` 가 이 중 하나와 일치해야 통과.
+ *   콤마 분리 문자열로 env 주입 (iOS / Android / Web client id 모두 허용).
+ * - [jwtSecret] — HMAC-SHA256 서명 키. 32+ chars (`openssl rand -hex 32`).
+ * - [jwtExpirySeconds] — 발급된 access token 의 만료까지 초.
+ */
+data class AuthConfig(
+    val googleClientIds: List<String>,
+    val jwtSecret: String,
+    val jwtExpirySeconds: Long,
+) {
+    init {
+        require(googleClientIds.isNotEmpty()) { "GOOGLE_OAUTH_CLIENT_IDS must not be empty (comma-separated)" }
+        require(googleClientIds.all { it.isNotBlank() }) { "GOOGLE_OAUTH_CLIENT_IDS contains blank entry" }
+        require(jwtSecret.length >= 32) {
+            "AUTH_JWT_SECRET must be at least 32 chars (got ${jwtSecret.length}). " +
+                "Generate with: openssl rand -hex 32"
+        }
+        require(jwtExpirySeconds in 60..(90L * 24 * 3600)) {
+            "AUTH_JWT_EXPIRY_SECONDS must be in 60..7776000 (got $jwtExpirySeconds)"
+        }
+    }
+}
+
 data class SeparationConfig(
     val abandonTtlMs: Long,
     val mixTtlMs: Long,
@@ -73,6 +100,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val perso = dubcast.config("perso")
     val gemini = dubcast.config("gemini")
     val separation = dubcast.config("separation")
+    val auth = dubcast.config("auth")
 
     return AppConfig(
         storage = StorageConfig(
@@ -98,6 +126,14 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
             signingSecret = separation.property("signingSecret").getString(),
             urlTtlSec = separation.property("urlTtlSec").getString().toLong(),
             mixUrlTtlSec = separation.property("mixUrlTtlSec").getString().toLong(),
+        ),
+        auth = AuthConfig(
+            googleClientIds = auth.property("googleClientIds").getString()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() },
+            jwtSecret = auth.property("jwtSecret").getString(),
+            jwtExpirySeconds = auth.property("jwtExpirySeconds").getString().toLong(),
         ),
     )
 }

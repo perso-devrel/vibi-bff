@@ -51,6 +51,9 @@ dependencies {
     // Google Cloud auth (Vertex AI access tokens via service account JSON)
     implementation("com.google.auth:google-auth-library-oauth2-http:1.27.0")
 
+    // JWT (자체 access token 발급/검증). HS256 으로 충분 — RS256 비대칭은 v1 범위 외.
+    implementation("com.auth0:java-jwt:4.4.0")
+
     // Testing
     testImplementation("io.ktor:ktor-server-test-host:$ktor_version")
     testImplementation("io.ktor:ktor-client-content-negotiation:$ktor_version")

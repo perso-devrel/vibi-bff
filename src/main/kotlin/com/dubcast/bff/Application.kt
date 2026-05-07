@@ -2,6 +2,7 @@ package com.dubcast.bff
 
 import com.dubcast.bff.config.loadConfig
 import com.dubcast.bff.plugins.*
+import com.dubcast.bff.service.AuthService
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
 import com.dubcast.bff.service.GeminiClient
@@ -59,6 +60,9 @@ fun Application.module() {
     require(appConfig.perso.apiKey.isNotBlank()) {
         "PERSO_API_KEY environment variable must be set"
     }
+    // AuthConfig 자체 init { } 가 GOOGLE_OAUTH_CLIENT_IDS / AUTH_JWT_SECRET 길이를
+    // 검증하므로 여기 추가 require 불필요. 단 boot 시 명확히 fail-fast 되는지 확인 OK.
+
     // Vertex AI / Gemini credentials are validated lazily on the first
     // translation call, so the server can boot without them in dev when
     // subtitle translation isn't being exercised.
@@ -134,6 +138,7 @@ fun Application.module() {
         mixTtlMs = appConfig.separation.mixTtlMs,
     )
 
+    val authService = AuthService(appConfig.auth, httpClient)
     val geminiClient = GeminiClient(appConfig.gemini, httpClient)
     val autoSubtitleService = AutoSubtitleService(
         persoClient = persoClient,
@@ -177,7 +182,7 @@ fun Application.module() {
         fileStorage, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
         autoSubtitleService, autoDubService, geminiClient, httpClient, renderInputCache,
-        mediaSourceResolver,
+        mediaSourceResolver, authService,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(

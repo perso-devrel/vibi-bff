@@ -1,12 +1,14 @@
 package com.dubcast.bff.plugins
 
 import com.dubcast.bff.config.AppConfig
+import com.dubcast.bff.routes.authRoutes
 import com.dubcast.bff.routes.autoDubRoutes
 import com.dubcast.bff.routes.chatRoutes
 import com.dubcast.bff.routes.languageRoutes
 import com.dubcast.bff.routes.renderRoutes
 import com.dubcast.bff.routes.separationRoutes
 import com.dubcast.bff.routes.subtitleRoutes
+import com.dubcast.bff.service.AuthService
 import com.dubcast.bff.service.GeminiClient
 import com.dubcast.bff.service.AutoDubService
 import com.dubcast.bff.service.AutoSubtitleService
@@ -42,11 +44,13 @@ fun Application.configureRouting(
     httpClient: HttpClient,
     renderInputCache: RenderInputCacheService,
     mediaSourceResolver: MediaSourceResolver,
+    authService: AuthService,
 ) {
     routing {
         swaggerUI(path = "swagger", swaggerFile = "openapi/dubcast-bff.yaml")
 
         route("/api/v2") {
+            authRoutes(authService)
             languageRoutes(persoClient)
             renderRoutes(
                 renderService, fileStorage, stemMixService,
