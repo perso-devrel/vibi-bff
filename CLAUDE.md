@@ -101,6 +101,19 @@ call.receiveMultipart(formFieldLimit = MAX_*_FILE_SIZE)
 
 **적용 사이트** (참고): `SubtitleRoutes`, `AutoDubRoutes`, `SeparationRoutes`, `RenderRoutes`. 새 multipart route 추가 시 동일 패턴.
 
+### Gemini 2.5 Flash 가 functionDeclarations 무시하고 tool_code 텍스트로 fallback
+
+**증상**: `/api/v2/chat` 응답이 structured `functionCall` part 없이 `tool_code` 마크다운 + `print(default_api.<name>(args))` Python 스타일 텍스트로 옴. `parseChatResult` 가 TextResponse 분류 → 사용자에게 `kind: proposal / steps: tool_code / print(default_api.generate_subtitles(targetLanguageCodes=["en"]))` 같은 raw 텍스트가 그대로 노출 또는 ChatResponse(kind="text") 로 패스-스루.
+
+**원인**: `gemini-2.5-flash` 가 학습된 code-execution 패턴 (Vertex `default_api` namespace) 으로 fallback. systemInstruction 만으론 100% 차단 불가 — 모델이 자유로 functionCall vs text 선택.
+
+**해결 패턴 (3중 방어)**:
+1. `ChatToolDefs.SYSTEM_INSTRUCTION` 첫 부분에 "structured functionCall response part" 명시 + `tool_code` 마크다운 / `print(default_api.foo(...))` 명시 금지.
+2. `GeminiClient.chat` payload 에 `toolConfig.functionCallingConfig.mode = "AUTO"` 명시 (default 동일하지만 declarative).
+3. `GeminiClient.parseChatResult` 에 fallback regex parser — text 에 `default_api.<name>(kwargs)` 발견 시 `recoverToolCallsFromText` 가 ToolCall 복원. Python literal (str/int/float/bool/list) 만 지원.
+
+**적용 사이트** (참고): `service/ChatToolDefs.kt`, `service/GeminiClient.kt`. 다른 Gemini 모델 (예: 2.5-pro) 로 교체 또는 새 chat-style endpoint 추가 시 동일 패턴 적용.
+
 ## Error handling
 
 `plugins/ErrorHandling.kt`: `NotFoundException` → 404, `IllegalArgumentException` → 400, `PersoApiException` → 402/429/4xx/502 by upstream status. All return `ErrorResponse(error, detail?)`.

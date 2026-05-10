@@ -143,6 +143,15 @@ class GeminiClient(
                     },
                 )
             }
+            // gemini-2.5-flash 가 functionDeclarations 를 받아도 tool_code 마크다운 +
+            // print(default_api.foo(...)) 텍스트로 fallback 하는 케이스 다발 — mode=AUTO 명시
+            // (default 동일, 명시적 declaration 으로 future-proof). 진짜 tool 호출 시점엔
+            // structured functionCall part 반환을 강하게 유도.
+            putJsonObject("toolConfig") {
+                putJsonObject("functionCallingConfig") {
+                    put("mode", "AUTO")
+                }
+            }
         }
 
         log.info("Gemini chat request: model={} turns={} tools={}", config.model, userMessages.size, toolFunctionDeclarations.size)
@@ -182,11 +191,112 @@ class GeminiClient(
                 if (!t.isNullOrBlank()) textBuilder.append(t)
             }
         }
+        // 2) 안전망 — gemini-2.5-flash 가 systemInstruction 무시하고 tool_code 텍스트로 fallback
+        //    한 케이스 복원. text 에서 `print(default_api.<name>(...))` 추출.
+        if (toolCalls.isEmpty() && textBuilder.isNotEmpty()) {
+            val recovered = recoverToolCallsFromText(textBuilder.toString())
+            if (recovered.isNotEmpty()) {
+                log.warn("Gemini emitted tool_code text instead of structured functionCall — recovered {} call(s)", recovered.size)
+                return GeminiChatResult.ToolCalls(recovered, rationaleText = null)
+            }
+        }
         return if (toolCalls.isNotEmpty()) {
             GeminiChatResult.ToolCalls(toolCalls, rationaleText = textBuilder.toString().trim().ifBlank { null })
         } else {
             GeminiChatResult.TextResponse(textBuilder.toString().trim().ifBlank { "(no text)" })
         }
+    }
+
+    /**
+     * 텍스트에서 `print(default_api.<name>(arg1=..., arg2=...))` 또는 `default_api.<name>(...)`
+     * 패턴을 추출해 ToolCall 로 복원. Python literal (str/int/float/bool/list) 만 지원 — dict
+     * 인자는 등장 안 함 (tool 정의가 평탄한 args 만).
+     *
+     * 정규 표현식 한 번에 여러 줄 매칭 — 한 응답에 multi-step 출력하면 모두 회수.
+     */
+    private fun recoverToolCallsFromText(text: String): List<GeminiToolCall> {
+        val callRegex = Regex("""default_api\.([a-zA-Z_][a-zA-Z0-9_]*)\(([^()]*(?:\([^()]*\)[^()]*)*)\)""")
+        return callRegex.findAll(text).mapNotNull { m ->
+            val name = m.groupValues[1]
+            val argsBody = m.groupValues[2].trim()
+            runCatching {
+                val args = parsePythonKwargs(argsBody)
+                GeminiToolCall(name, args)
+            }.onFailure { log.warn("recover skipped name={} body={} err={}", name, argsBody, it.message) }.getOrNull()
+        }.toList()
+    }
+
+    /**
+     * `key1=val1, key2=val2` 형태 Python kwargs → JsonObject. value 는 string / int / float /
+     * bool / list (재귀 1단계까지). 나머지는 string fallback.
+     */
+    private fun parsePythonKwargs(body: String): JsonObject {
+        if (body.isBlank()) return buildJsonObject { }
+        val kwargs = splitTopLevel(body, ',').map { it.trim() }.filter { it.isNotEmpty() }
+        return buildJsonObject {
+            kwargs.forEach { kv ->
+                val eq = kv.indexOf('=')
+                if (eq <= 0) return@forEach
+                val key = kv.substring(0, eq).trim()
+                val rawVal = kv.substring(eq + 1).trim()
+                put(key, parsePythonLiteral(rawVal))
+            }
+        }
+    }
+
+    private fun parsePythonLiteral(raw: String): JsonElement {
+        val s = raw.trim()
+        // string ("..." or '...')
+        if ((s.startsWith("\"") && s.endsWith("\"")) || (s.startsWith("'") && s.endsWith("'"))) {
+            return kotlinx.serialization.json.JsonPrimitive(s.substring(1, s.length - 1))
+        }
+        // list [...]
+        if (s.startsWith("[") && s.endsWith("]")) {
+            val inner = s.substring(1, s.length - 1)
+            return kotlinx.serialization.json.buildJsonArray {
+                splitTopLevel(inner, ',').map { it.trim() }.filter { it.isNotEmpty() }.forEach { add(parsePythonLiteral(it)) }
+            }
+        }
+        // bool
+        when (s) {
+            "True", "true" -> return kotlinx.serialization.json.JsonPrimitive(true)
+            "False", "false" -> return kotlinx.serialization.json.JsonPrimitive(false)
+            "None", "null" -> return kotlinx.serialization.json.JsonNull
+        }
+        // number
+        s.toLongOrNull()?.let { return kotlinx.serialization.json.JsonPrimitive(it) }
+        s.toDoubleOrNull()?.let { return kotlinx.serialization.json.JsonPrimitive(it) }
+        // unquoted identifier — string fallback
+        return kotlinx.serialization.json.JsonPrimitive(s)
+    }
+
+    private fun splitTopLevel(s: String, sep: Char): List<String> {
+        val out = mutableListOf<String>()
+        val buf = StringBuilder()
+        var depthBracket = 0
+        var depthParen = 0
+        var inStr: Char? = null
+        var escape = false
+        for (c in s) {
+            if (escape) { buf.append(c); escape = false; continue }
+            if (c == '\\') { buf.append(c); escape = true; continue }
+            if (inStr != null) {
+                buf.append(c)
+                if (c == inStr) inStr = null
+                continue
+            }
+            when (c) {
+                '"', '\'' -> { inStr = c; buf.append(c) }
+                '[' -> { depthBracket++; buf.append(c) }
+                ']' -> { depthBracket--; buf.append(c) }
+                '(' -> { depthParen++; buf.append(c) }
+                ')' -> { depthParen--; buf.append(c) }
+                sep -> if (depthBracket == 0 && depthParen == 0) { out += buf.toString(); buf.setLength(0) } else buf.append(c)
+                else -> buf.append(c)
+            }
+        }
+        if (buf.isNotEmpty()) out += buf.toString()
+        return out
     }
 }
 
