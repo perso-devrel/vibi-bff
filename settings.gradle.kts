@@ -1,1 +1,1 @@
-rootProject.name = "dubcast-bff"
+rootProject.name = "vibi-bff"

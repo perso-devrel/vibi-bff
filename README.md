@@ -8,12 +8,7 @@ router; and runs a local ffmpeg-based video render pipeline (dub audio mixing,
 sticker overlays, multi-segment concat, subtitle burn-in).
 
 > Detailed architecture notes live in [`CLAUDE.md`](./CLAUDE.md). The OpenAPI
-> spec is at `src/main/resources/openapi/dubcast-bff.yaml` (filename is legacy)
 > and is served at `/swagger` when the app is running.
->
-> The folder is now `vibi-bff/`, but Kotlin packages (`com.dubcast.bff.*`),
-> the build-output path (`C:/tmp/dubcast-bff-build`), and the OpenAPI filename
-> still use the legacy `dubcast` name. Package migration is tracked separately.
 
 ## Prerequisites
 
@@ -65,14 +60,14 @@ Environment variables (also loadable from system env):
 ./gradlew test
 
 # Run a single test class
-./gradlew test --tests "com.dubcast.bff.SeparationRoutesTest"
+./gradlew test --tests "com.vibi.bff.SeparationRoutesTest"
 
 # Run the server (port 8080 by default)
 ./gradlew run
 ```
 
 Windows users can use `.\gradlew ...` equivalently. Build output is directed
-to `C:/tmp/dubcast-bff-build` (configured in `build.gradle.kts`).
+to `C:/tmp/vibi-bff-build` (configured in `build.gradle.kts`).
 
 Once running:
 - Swagger UI: <http://localhost:8080/swagger>
@@ -276,7 +271,7 @@ return `409 Conflict`. Download any stems you want to keep **before** calling
 ## Project Layout
 
 ```
-src/main/kotlin/com/dubcast/bff/
+src/main/kotlin/com/vibi/bff/
 ├── Application.kt              # Ktor entry point + DI wiring
 ├── config/AppConfig.kt         # HOCON + env var loading (Perso, Gemini, Separation, Storage)
 ├── plugins/

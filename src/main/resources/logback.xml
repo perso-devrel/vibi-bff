@@ -5,7 +5,7 @@
         </encoder>
     </appender>
 
-    <logger name="com.dubcast" level="DEBUG"/>
+    <logger name="com.vibi" level="DEBUG"/>
     <logger name="io.ktor" level="INFO"/>
 
     <root level="INFO">

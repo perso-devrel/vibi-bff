@@ -10,11 +10,11 @@ plugins {
     // 만으로 ./gradlew run 충분. 빌드 그래프 단순화 + configuration cache 호환성 향상.
 }
 
-group = "com.dubcast"
+group = "com.vibi"
 version = "0.1.0"
 
 application {
-    mainClass.set("com.dubcast.bff.ApplicationKt")
+    mainClass.set("com.vibi.bff.ApplicationKt")
 }
 
 repositories {
@@ -66,9 +66,9 @@ dependencies {
 }
 
 // Windows 의 260자 경로 제한 회피용으로 짧은 절대경로를 쓰되, 다른 OS 는 기본값 사용.
-// 환경변수 DUBCAST_BFF_BUILD_DIR 로 명시 override 가능.
-val buildDirOverride = System.getenv("DUBCAST_BFF_BUILD_DIR")
-    ?: if (System.getProperty("os.name").lowercase().contains("win")) "C:/tmp/dubcast-bff-build" else null
+// 환경변수 VIBI_BFF_BUILD_DIR 로 명시 override 가능.
+val buildDirOverride = System.getenv("VIBI_BFF_BUILD_DIR")
+    ?: if (System.getProperty("os.name").lowercase().contains("win")) "C:/tmp/vibi-bff-build" else null
 if (buildDirOverride != null) {
     layout.buildDirectory = file(buildDirOverride)
 }

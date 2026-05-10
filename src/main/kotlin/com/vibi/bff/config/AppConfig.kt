@@ -1,0 +1,172 @@
+package com.vibi.bff.config
+
+import io.ktor.server.config.*
+
+data class AppConfig(
+    val storage: StorageConfig,
+    val baseUrl: String,
+    val perso: PersoConfig,
+    val gemini: GeminiConfig,
+    val separation: SeparationConfig,
+    val auth: AuthConfig,
+)
+
+data class StorageConfig(
+    val basePath: String,
+)
+
+data class PersoConfig(
+    val apiKey: String,
+    val baseUrl: String,
+    /**
+     * Perso 의 storage host (Azure Blob 기반 public CDN). `/perso-storage/...` path 응답을
+     * 다운로드할 때는 [baseUrl] (api host) 가 아니라 이쪽으로 가야 한다 — 다른 host 라
+     * 인증 헤더 없이 public read.
+     */
+    val storageBaseUrl: String,
+    val spaceSeq: Int,
+    val pollIntervalMs: Long,
+    val maxPollMinutes: Int,
+    /**
+     * SSRF 방지용 download host 화이트리스트. Perso 응답으로 받은 absolute URL 의 host 가
+     * 이 셋 안에 있을 때만 [com.vibi.bff.service.PersoClient.streamDownloadAuthorized]
+     * 가 다운로드 진행. baseUrl/storageBaseUrl 의 host 는 자동 포함되고, 그 외에 흔한
+     * Azure SAS host (`portal-media.perso.ai`) 등을 콤마 분리로 추가.
+     */
+    val downloadAllowedHosts: Set<String>,
+) {
+    init {
+        require(apiKey.isNotBlank()) { "PERSO_API_KEY must not be blank" }
+        require(storageBaseUrl.isNotBlank()) { "PERSO_STORAGE_BASE_URL must not be blank" }
+        require(spaceSeq > 0) { "PERSO_SPACE_SEQ must be > 0 (got $spaceSeq)" }
+        require(pollIntervalMs >= 1000) { "PERSO_POLL_INTERVAL_MS must be >= 1000 (got $pollIntervalMs)" }
+        require(maxPollMinutes in 1..120) { "PERSO_MAX_POLL_MINUTES must be in 1..120 (got $maxPollMinutes)" }
+    }
+
+    /**
+     * baseUrl + storageBaseUrl + 명시적 [downloadAllowedHosts] 의 union — 다운로드 호출
+     * 직전마다 host 검증 시 사용. host 만 비교 (port/scheme 별도).
+     */
+    val allDownloadAllowedHosts: Set<String> by lazy {
+        val parsed = mutableSetOf<String>()
+        runCatching { java.net.URI.create(baseUrl).host?.let { parsed += it.lowercase() } }
+        runCatching { java.net.URI.create(storageBaseUrl).host?.let { parsed += it.lowercase() } }
+        downloadAllowedHosts.forEach { parsed += it.lowercase() }
+        parsed.toSet()
+    }
+}
+
+/**
+ * Vertex AI configuration. We authenticate via a GCP service account JSON
+ * (path lives in [credentialsPath], typically the same file Google's tooling
+ * already expects under `GOOGLE_APPLICATION_CREDENTIALS`). Validation is
+ * deferred to [com.vibi.bff.service.GeminiClient]'s first call so the
+ * server can boot even when subtitle translation is disabled in dev.
+ */
+data class GeminiConfig(
+    val projectId: String,
+    val location: String,
+    val credentialsPath: String,
+    val model: String,
+) {
+    init {
+        require(model.isNotBlank()) { "GEMINI_MODEL must not be blank" }
+        require(location.isNotBlank()) { "GCP_LOCATION must not be blank" }
+    }
+}
+
+/**
+ * Google OAuth + 자체 JWT 발급 설정.
+ *
+ * - [googleClientIds] — `tokeninfo` 응답의 `aud` 가 이 중 하나와 일치해야 통과.
+ *   콤마 분리 문자열로 env 주입 (iOS / Android / Web client id 모두 허용).
+ * - [jwtSecret] — HMAC-SHA256 서명 키. 32+ chars (`openssl rand -hex 32`).
+ * - [jwtExpirySeconds] — 발급된 access token 의 만료까지 초.
+ */
+data class AuthConfig(
+    val googleClientIds: List<String>,
+    val jwtSecret: String,
+    val jwtExpirySeconds: Long,
+) {
+    init {
+        require(googleClientIds.isNotEmpty()) { "GOOGLE_OAUTH_CLIENT_IDS must not be empty (comma-separated)" }
+        require(googleClientIds.all { it.isNotBlank() }) { "GOOGLE_OAUTH_CLIENT_IDS contains blank entry" }
+        require(jwtSecret.length >= 32) {
+            "AUTH_JWT_SECRET must be at least 32 chars (got ${jwtSecret.length}). " +
+                "Generate with: openssl rand -hex 32"
+        }
+        require(jwtExpirySeconds in 60..(90L * 24 * 3600)) {
+            "AUTH_JWT_EXPIRY_SECONDS must be in 60..7776000 (got $jwtExpirySeconds)"
+        }
+    }
+}
+
+data class SeparationConfig(
+    val abandonTtlMs: Long,
+    val mixTtlMs: Long,
+    val signingSecret: String,
+    val urlTtlSec: Long,
+    val mixUrlTtlSec: Long,
+) {
+    init {
+        require(signingSecret.length >= 32) {
+            "SEPARATION_SIGNING_SECRET must be at least 32 chars (got ${signingSecret.length}). " +
+                "Generate with: openssl rand -hex 32"
+        }
+        require(abandonTtlMs >= 60_000) { "SEPARATION_ABANDON_TTL_MS must be >= 60000 (got $abandonTtlMs)" }
+        require(mixTtlMs >= 60_000) { "SEPARATION_MIX_TTL_MS must be >= 60000 (got $mixTtlMs)" }
+        require(urlTtlSec in 60..86_400) { "SEPARATION_URL_TTL_SEC must be in 60..86400 (got $urlTtlSec)" }
+        require(mixUrlTtlSec in 60..86_400) { "SEPARATION_MIX_URL_TTL_SEC must be in 60..86400 (got $mixUrlTtlSec)" }
+    }
+}
+
+fun loadConfig(config: ApplicationConfig): AppConfig {
+    val vibi = config.config("vibi")
+    val storage = vibi.config("storage")
+    val perso = vibi.config("perso")
+    val gemini = vibi.config("gemini")
+    val separation = vibi.config("separation")
+    val auth = vibi.config("auth")
+
+    return AppConfig(
+        storage = StorageConfig(
+            basePath = storage.property("basePath").getString(),
+        ),
+        baseUrl = vibi.property("baseUrl").getString(),
+        perso = PersoConfig(
+            apiKey = perso.property("apiKey").getString(),
+            baseUrl = perso.property("baseUrl").getString(),
+            storageBaseUrl = perso.property("storageBaseUrl").getString(),
+            spaceSeq = perso.property("spaceSeq").getString().toInt(),
+            pollIntervalMs = perso.property("pollIntervalMs").getString().toLong(),
+            maxPollMinutes = perso.property("maxPollMinutes").getString().toInt(),
+            downloadAllowedHosts = perso.propertyOrNull("downloadAllowedHosts")?.getString()
+                ?.split(',')
+                ?.map { it.trim().lowercase() }
+                ?.filter { it.isNotEmpty() }
+                ?.toSet()
+                ?: setOf("portal-media.perso.ai"),
+        ),
+        gemini = GeminiConfig(
+            projectId = gemini.property("projectId").getString(),
+            location = gemini.property("location").getString(),
+            credentialsPath = gemini.property("credentialsPath").getString(),
+            model = gemini.property("model").getString(),
+        ),
+        separation = SeparationConfig(
+            abandonTtlMs = separation.property("abandonTtlMs").getString().toLong(),
+            mixTtlMs = separation.property("mixTtlMs").getString().toLong(),
+            signingSecret = separation.property("signingSecret").getString(),
+            urlTtlSec = separation.property("urlTtlSec").getString().toLong(),
+            mixUrlTtlSec = separation.property("mixUrlTtlSec").getString().toLong(),
+        ),
+        auth = AuthConfig(
+            googleClientIds = auth.property("googleClientIds").getString()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() },
+            jwtSecret = auth.property("jwtSecret").getString(),
+            jwtExpirySeconds = auth.property("jwtExpirySeconds").getString().toLong(),
+        ),
+    )
+}
