@@ -54,6 +54,9 @@ dependencies {
     // JWT (자체 access token 발급/검증). HS256 으로 충분 — RS256 비대칭은 v1 범위 외.
     implementation("com.auth0:java-jwt:4.4.0")
 
+    // Apache Commons Compress — Perso audio-separation 의 OriginalVoiceSpeakers .tar archive 풀이용.
+    implementation("org.apache.commons:commons-compress:1.26.2")
+
     // Testing
     testImplementation("io.ktor:ktor-server-test-host:$ktor_version")
     testImplementation("io.ktor:ktor-client-content-negotiation:$ktor_version")

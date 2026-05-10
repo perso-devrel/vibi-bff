@@ -187,6 +187,12 @@ fun Route.separationRoutes(
 }
 
 /**
+ * 클라(iOS AVAsset / Android MediaMetadataRetriever)와 BFF(ffprobe) 사이의
+ * 영상 길이 측정 ms 단위 오차 허용치. 100ms 이내면 자동 clamp.
+ */
+private const val TRIM_DURATION_TOLERANCE_MS = 100L
+
+/**
  * If [spec] carries a trim range, probe the file, validate against its
  * actual duration, then stream-copy cut the window with ffmpeg. The
  * trimmed file replaces the source (the source is deleted to free disk
@@ -205,8 +211,8 @@ internal suspend fun maybeTrim(
     spec: SeparationSpec,
 ): File = withContext(Dispatchers.IO) {
     val start = spec.trimStartMs
-    val end = spec.trimEndMs
-    if (start == null || end == null) return@withContext file
+    val rawEnd = spec.trimEndMs
+    if (start == null || rawEnd == null) return@withContext file
 
     val durationMs = MediaTrimmer.probeDurationMs(file)
         ?: run {
@@ -217,14 +223,19 @@ internal suspend fun maybeTrim(
                 "Could not probe source duration",
             )
         }
-    if (end > durationMs) {
+    // iOS AVAsset / Android MediaMetadataRetriever vs ffprobe 사이 ms 단위 측정 오차 (보통 1~수십ms).
+    // "전체 구간" 자동 선택 시 clientEnd > durationMs 가 흔함 — TRIM_DURATION_TOLERANCE_MS 이내면
+    // 자동 clamp, 초과면 client bug 신호로 보고 reject.
+    val end = if (rawEnd > durationMs && rawEnd - durationMs <= TRIM_DURATION_TOLERANCE_MS) {
+        durationMs
+    } else if (rawEnd > durationMs) {
         file.delete()
         throw ApiErrorException(
             HttpStatusCode.BadRequest,
             "trim_end_exceeds_duration",
-            "trimEndMs=$end but file duration=$durationMs",
+            "trimEndMs=$rawEnd but file duration=$durationMs",
         )
-    }
+    } else rawEnd
 
     val ext = file.extension.ifEmpty { "bin" }
     val trimmed = File(file.parentFile, "${file.nameWithoutExtension}.trimmed.$ext")

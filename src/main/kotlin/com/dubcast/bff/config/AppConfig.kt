@@ -18,12 +18,19 @@ data class StorageConfig(
 data class PersoConfig(
     val apiKey: String,
     val baseUrl: String,
+    /**
+     * Perso 의 storage host (Azure Blob 기반 public CDN). `/perso-storage/...` path 응답을
+     * 다운로드할 때는 [baseUrl] (api host) 가 아니라 이쪽으로 가야 한다 — 다른 host 라
+     * 인증 헤더 없이 public read.
+     */
+    val storageBaseUrl: String,
     val spaceSeq: Int,
     val pollIntervalMs: Long,
     val maxPollMinutes: Int,
 ) {
     init {
         require(apiKey.isNotBlank()) { "PERSO_API_KEY must not be blank" }
+        require(storageBaseUrl.isNotBlank()) { "PERSO_STORAGE_BASE_URL must not be blank" }
         require(spaceSeq > 0) { "PERSO_SPACE_SEQ must be > 0 (got $spaceSeq)" }
         require(pollIntervalMs >= 1000) { "PERSO_POLL_INTERVAL_MS must be >= 1000 (got $pollIntervalMs)" }
         require(maxPollMinutes in 1..120) { "PERSO_MAX_POLL_MINUTES must be in 1..120 (got $maxPollMinutes)" }
@@ -110,6 +117,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
         perso = PersoConfig(
             apiKey = perso.property("apiKey").getString(),
             baseUrl = perso.property("baseUrl").getString(),
+            storageBaseUrl = perso.property("storageBaseUrl").getString(),
             spaceSeq = perso.property("spaceSeq").getString().toInt(),
             pollIntervalMs = perso.property("pollIntervalMs").getString().toLong(),
             maxPollMinutes = perso.property("maxPollMinutes").getString().toInt(),

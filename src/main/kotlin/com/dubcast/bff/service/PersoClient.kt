@@ -171,25 +171,29 @@ class PersoClient(
         return first
     }
 
-    suspend fun getAudioSeparationScript(projectSeq: Long, cursorId: Long? = null): PersoScriptResponse {
-        val response = httpClient.get(url(
-            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/audio-separation/script"
-        )) {
-            authHeader()
-            if (cursorId != null) parameter("cursorId", cursorId)
-        }
-        checkResponse(response)
-        return response.body()
-    }
-
-    // 인증이 필요한 Perso 내부 endpoint (예: 상대 경로 audioUrl `/perso-storage/...`) 다운로드.
-    // SAS pre-signed URL 은 `streamDownload` 사용 (헤더 X). 둘을 분리해서 잘못된 헤더가 SAS 서명 깨뜨리는
-    // 케이스 방지.
+    /**
+     * Perso 응답에서 받은 다운로드 URL/path 를 로컬 파일로 스트림.
+     *
+     * Path 가 `/perso-storage/...` 형식이면 진짜 storage host (Azure Blob 기반 public CDN, 인증 X)
+     * 로 보내야 한다 — `api.perso.ai` 에 똑같은 path 로 GET 하면 origin 이 file 모르고 404. 인증
+     * 헤더는 storage CDN 에서 무시되거나 Azure SAS 서명 깨뜨릴 수 있어 안 붙임.
+     *
+     * 외부 SAS 서명 URL (host 포함 absolute URL) 도 같은 함수로 처리 — 인증 헤더 X.
+     * `api.perso.ai` 의 다른 endpoint (드물게) 호출 시에만 인증 헤더가 필요한데 그건 별도 메서드 사용.
+     */
     suspend fun streamDownloadAuthorized(downloadUrl: String, targetFile: File) {
-        val absUrl = if (downloadUrl.startsWith("http")) downloadUrl else url(downloadUrl)
+        val absUrl = when {
+            downloadUrl.startsWith("http") -> downloadUrl
+            downloadUrl.startsWith("/perso-storage/") -> "${config.storageBaseUrl}$downloadUrl"
+            else -> url(downloadUrl)
+        }
+        // storage host / absolute pre-signed URL 은 인증 헤더 X — 그 외 (api host 직접 호출) 만 헤더.
+        val needsAuth = !downloadUrl.startsWith("http") && !downloadUrl.startsWith("/perso-storage/")
         val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
         try {
-            httpClient.prepareGet(absUrl) { authHeader() }.execute { response ->
+            httpClient.prepareGet(absUrl) {
+                if (needsAuth) authHeader()
+            }.execute { response ->
                 checkResponse(response)
                 val channel = response.bodyAsChannel()
                 tempFile.outputStream().use { output ->
@@ -246,6 +250,32 @@ class PersoClient(
         )) { authHeader() }
         checkResponse(response)
         return response.body<PersoEnvelope<PersoProgressResult>>().result
+    }
+
+    /**
+     * Audio-separation 프로젝트 전용 download links — translation 의 [getDownloadLinks] 와 응답
+     * 모델 다름. target 별 valid 한 응답 필드:
+     *   - target=originalVoiceSpeakers → audioFile.voiceAudioDownloadLink (.tar)
+     *   - target=originalSubBackground → audioFile.originalSubBackgroundDownloadLink (.wav)
+     */
+    suspend fun getSeparationDownloadLinks(projectSeq: Long, target: String): PersoSeparationDownloadLinks {
+        val response = httpClient.get(url(
+            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download"
+        )) {
+            authHeader()
+            parameter("target", target)
+        }
+        checkResponse(response)
+        return response.body<PersoEnvelope<PersoSeparationDownloadLinks>>().result
+    }
+
+    /** project meta + downloadPathInfo (storage path 직접 노출). */
+    suspend fun getProjectInfo(projectSeq: Long): PersoProjectInfo {
+        val response = httpClient.get(url(
+            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}"
+        )) { authHeader() }
+        checkResponse(response)
+        return response.body<PersoEnvelope<PersoProjectInfo>>().result
     }
 
     // ── Download info / links ────────────────────────────────────────────────

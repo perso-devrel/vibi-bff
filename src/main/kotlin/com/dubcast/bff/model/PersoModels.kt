@@ -144,6 +144,26 @@ data class PersoDownloadInfo(
     val hasOriginalSpeakerAudioCollection: Boolean = false,
     val hasSpeakerSegmentExcel: Boolean = false,
     val hasSpeakerSegmentWithTranslationExcel: Boolean = false,
+    /** audio-separation 결과의 background (.wav) 가용 여부. `target=originalSubBackground` 응답과 align. */
+    val hasOriginalSubBackground: Boolean = false,
+)
+
+// --- Project info — `/projects/{projectSeq}/spaces/{spaceSeq}` ---
+@Serializable
+data class PersoProjectInfo(
+    val seq: Long? = null,
+    val downloadInfo: PersoDownloadInfo? = null,
+    val downloadPathInfo: PersoDownloadPathInfo? = null,
+)
+
+@Serializable
+data class PersoDownloadPathInfo(
+    /** 모든 화자 mix (BGM 제거). file 명 OriginalVoiceOnly. */
+    val originalVoicePath: String? = null,
+    /** 진짜 BGM only — file 명 OriginalBaseBackground. 화자 수 무관하게 분리됨. */
+    val originalBackgroundPath: String? = null,
+    /** Sub-background — file 명 OriginalSubBackground. 화자 수에 따라 의미 다른 케이스 발견. */
+    val originalSubBackgroundPath: String? = null,
 )
 
 // --- Download links ---
@@ -160,19 +180,31 @@ data class PersoVideoFileLinks(
     val videoDownloadLink: String? = null,
 )
 
+/** Translation 프로젝트 (`/download?target=dubbingVideo|translatedAudio` 등) 의 audio file 링크. */
 @Serializable
 data class PersoAudioFileLinks(
     val originalVoiceAudioDownloadLink: String? = null,
-    val voiceAudioDownloadLink: String? = null,
     val backgroundAudioDownloadLink: String? = null,
     val voiceWithBackgroundAudioDownloadLink: String? = null,
     val translatedAudioDownloadLink: String? = null,
-    /** target=translatedVoice 응답의 더빙 오디오 링크 — 정식 필드. */
+    /** target=translatedVoice 응답의 더빙 오디오 링크. */
     val translatedVoiceDownloadLink: String? = null,
-    // Speaker collection (typically ZIP); field name is best-effort —
-    // Perso returns it for target=originalVoiceSpeakers. Keep loose parsing
-    // via ignoreUnknownKeys = true in the client Json config.
-    val originalVoiceSpeakersDownloadLink: String? = null,
+    /** translation 컨텍스트 legacy fallback — AutoDubService 가 dubbed audio 추론 시 마지막 후보. */
+    val voiceAudioDownloadLink: String? = null,
+)
+
+/** Audio-separation 프로젝트의 `/download?target=...` 응답 — translation 응답과 필드 의미 다름. */
+@Serializable
+data class PersoSeparationDownloadLinks(
+    val audioFile: PersoSeparationAudioFile? = null,
+)
+
+@Serializable
+data class PersoSeparationAudioFile(
+    /** target=originalVoiceSpeakers 응답의 .tar archive — 화자별 audio collection. */
+    val voiceAudioDownloadLink: String? = null,
+    /** target=originalSubBackground 응답의 .wav background. */
+    val originalSubBackgroundDownloadLink: String? = null,
 )
 
 @Serializable

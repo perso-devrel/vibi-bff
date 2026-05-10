@@ -41,12 +41,32 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 
 **증상 (구)**: STT 받으려고 `submitTranslate` 에 source==target 보냈더니 `hasOriginalSubtitle=false`. 음성분리도 `submitTranslate` + `targetLanguageCodes` echo 트릭으로 우회.
 
-**해결**: Perso 가 STT 와 음성분리에 **전용 endpoint** 제공 (`new_api.md` 참조).
+**해결**: Perso 가 STT 와 음성분리에 **전용 endpoint** 제공.
 
 - STT: `POST /video-translator/api/v1/projects/spaces/{spaceSeq}/stt` body=`{mediaSeq, isVideoProject, title?}` → `GET .../stt/script` (paginated `nextCursorId`) → sentences[`offsetMs`,`durationMs`,`originalText`] 로 SRT 빌드.
-- 음성분리: `POST /video-translator/api/v1/projects/spaces/{spaceSeq}/audio-separation` → `GET .../audio-separation/script` (paginated) → sentences 각각 `audioUrl` 로 화자별 utterance 다운로드 → ffmpeg `adelay+amix` 로 timeline-aligned 화자 stem 합성.
+- 음성분리: `POST /video-translator/api/v1/projects/spaces/{spaceSeq}/audio-separation` → `GET .../download?target=originalVoiceSpeakers` 로 .tar 화자 collection, `GET .../download?target=originalSubBackground` 로 .wav background. `GET .../audio-separation/script` 의 utterance audioUrl 은 빈 값으로 와서 사용 폐기.
 
-**주의**: 새 audio-separation API 는 background stem 미제공. 화자 stem (`speaker_0..N`) + `voice_all` 만 만들어짐.
+### Perso audio-separation `/download` 응답의 host 는 `portal-media.perso.ai`
+
+**증상**: `/perso-storage/...` path 를 `https://api.perso.ai{path}` 로 GET 하면 404 + `Cache-Control: public, max-age=14400` (Cloudflare 가 응답 4시간 캐시) → fresh path 받아도 동일 path-host 조합은 4시간 락.
+
+**원인**: `/download?target=...` 응답의 path 는 별도 storage host 의 것 (Azure Blob 기반 public CDN: `portal-media.perso.ai`). origin (api host) 은 그 path 모름. 인증 헤더 무관.
+
+**해결 패턴**: `PersoConfig.storageBaseUrl = https://portal-media.perso.ai` 환경 변수 분리. `PersoClient.streamDownloadAuthorized` 가 path 가 `/perso-storage/...` 시작이면 storage host + 인증 헤더 X 로 분기. `getDownloadLinks` 의 path 매번 새로 받아도 cache key 는 동일 — 매 retry 마다 fresh path 받아 새 cache key 로 storage 직접 조회.
+
+### Perso `originalSubBackground` 의미 화자 수에 따라 다름 — `originalBackgroundPath` 우선
+
+**증상**: 화자 1명 영상 분리 시 `target=originalSubBackground` 결과가 화자 + BGM mix 그대로. 화자 2명+ 영상에선 BGM only 처럼 보임.
+
+**원인**: Perso 의 `OriginalSubBackground` 의 'Sub' 가 화자 수에 따라 후처리 다름. 진짜 BGM only 는 file 명 `OriginalBaseBackground` (project info endpoint 의 `downloadPathInfo.originalBackgroundPath`).
+
+**해결 패턴**: `SeparationService.downloadBackgroundStem` 이 `getProjectInfo(projectSeq).downloadPathInfo.originalBackgroundPath` 우선 시도, 누락 시 `originalSubBackground` fallback.
+
+### Perso audio-separation 응답 모델은 translation 과 분리
+
+**증상**: `PersoAudioFileLinks.voiceAudioDownloadLink` 가 audio-separation 응답에선 .tar archive (화자 collection), translation 응답에선 다른 의미 (legacy fallback).
+
+**해결 패턴**: 컨텍스트 분리. `PersoClient.getSeparationDownloadLinks(projectSeq, target)` → `PersoSeparationDownloadLinks` (audio-separation 한정). `getDownloadLinks` 는 translation 한정.
 
 ### Perso API path prefix — `/video-translator` 통일 (단, 일부 endpoint 만 `/file`)
 

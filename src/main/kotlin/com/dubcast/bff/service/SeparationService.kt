@@ -2,13 +2,13 @@ package com.dubcast.bff.service
 
 import com.dubcast.bff.FAILED_JOB_TTL_MS
 import com.dubcast.bff.config.SeparationConfig
-import com.dubcast.bff.model.PersoScriptSentence
 import com.dubcast.bff.model.SeparationSpec
 import com.dubcast.bff.plugins.PersoApiException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.util.UUID
@@ -162,57 +162,45 @@ class SeparationService(
             job.progressReason = reason
         }
 
-        // 1) audio-separation script paginated 수집.
+        // Perso audio-separation 결과 다운로드 — utterance/script 합성 대신 download 엔드포인트 사용.
+        //   target=originalVoiceSpeakers → audioFile.voiceAudioDownloadLink (.tar) — 화자별 audio collection
+        //   target=originalSubBackground → audioFile.originalSubBackgroundDownloadLink (.wav) — BGM
+        // voice_all 전용 target 은 없음 — 화자 stem 들 ffmpeg amix 로 합성.
+        //
+        // progressReason=Completed 직후엔 download-info 의 flag 가 즉시 true 라 해도 storage upload 가
+        // 아직 끝나지 않은 케이스가 있어 첫 다운로드 시 404 발생. download-info 폴링으로 readiness 확정.
         job.status = "DOWNLOADING"
-        job.progressReason = "Fetching script"
-        val sentences = collectSeparationScript(projectSeq)
-        if (sentences.isEmpty()) {
-            throw PersoApiException(500, "Perso audio-separation returned 0 sentences for project $projectSeq")
+        job.progressReason = "Waiting for storage upload"
+        waitForDownloadInfoReady(projectSeq)
+
+        job.progressReason = "Fetching speaker stems"
+        val speakerFiles = downloadAndExtractSpeakerCollection(projectSeq, job.outputDir)
+        if (speakerFiles.isEmpty()) {
+            throw PersoApiException(500, "No speaker files extracted from Perso for project $projectSeq")
         }
 
-        // 2) 화자별로 sentences group 후 timeline-aligned mp3 stem 생성.
-        // Perso 의 audio-separation 은 utterance 단위 audioUrl 만 제공 — 화자별 stem 은 클라이언트 합성.
-        val totalDurationMs = sentences.maxOf { it.offsetMs + it.durationMs }
-        // audioUrl 누락 진단: null vs blank 비율, 화자별 분포, sample 1건 노출.
-        val nullCount = sentences.count { it.audioUrl == null }
-        val blankCount = sentences.count { it.audioUrl != null && it.audioUrl!!.isBlank() }
-        val validCount = sentences.size - nullCount - blankCount
-        val perSpeaker = sentences.groupBy { it.speakerOrderIndex }
-            .mapValues { (_, v) -> v.count { !it.audioUrl.isNullOrBlank() } to v.size }
-        log.info("Separation script audioUrl status: projectSeq={} total={} valid={} null={} blank={} perSpeaker(valid/total)={}",
-            projectSeq, sentences.size, validCount, nullCount, blankCount, perSpeaker)
-        if (validCount == 0) {
-            val sample = sentences.first()
-            log.warn("All audioUrl missing — sample sentence: seq={} speakerOrderIndex={} offsetMs={} durationMs={} audioUrl={} originalText={}",
-                sample.seq, sample.speakerOrderIndex, sample.offsetMs, sample.durationMs, sample.audioUrl, sample.originalText)
-        }
-        val bySpeaker = sentences
-            .filter { !it.audioUrl.isNullOrBlank() }
-            .groupBy { it.speakerOrderIndex }
-            .toSortedMap()
+        job.progressReason = "Fetching background"
+        val backgroundFile = downloadBackgroundStem(projectSeq, job.outputDir)
 
         val local = mutableListOf<LocalStem>()
-        bySpeaker.entries.forEachIndexed { idx, (speakerIdx, sList) ->
+        speakerFiles.forEachIndexed { idx, file ->
             val stemId = "speaker_$idx"
-            val label = "화자 ${idx + 1}"
-            val stemFile = File(job.outputDir, "$stemId.mp3")
-            buildSpeakerStem(sList, totalDurationMs, job.outputDir, stemFile)
-            local.add(LocalStem(stemId, label, stemFile))
-            log.info("Built speaker stem: speakerOrderIndex={} stemId={} segments={}",
-                speakerIdx, stemId, sList.size)
+            val finalFile = File(job.outputDir, "$stemId.${file.extension.ifEmpty { "audio" }}")
+            file.renameTo(finalFile)
+            local.add(LocalStem(stemId, "화자 ${idx + 1}", finalFile))
+            log.info("Speaker stem ready: stemId={} file={} size={}B", stemId, finalFile.name, finalFile.length())
         }
 
-        // 3) voice_all = 모든 화자 mix. 화자별 stem 이 이미 timeline-aligned 이므로 그것들만 amix 하면
-        // raw utterance 재다운로드/재합성 안 해도 됨. 화자가 1명이면 voice_all == speaker_0 이라
-        // 중복이라 skip.
+        // voice_all = 모든 화자 mix. 화자가 1명이면 speaker_0 와 동일하므로 skip.
         if (local.size >= 2) {
             val voiceAllFile = File(job.outputDir, "voice_all.mp3")
             ffmpegMixFiles(local.map { it.file }, voiceAllFile)
             local.add(0, LocalStem("voice_all", "모든 화자", voiceAllFile))
         }
 
-        if (local.isEmpty()) {
-            throw PersoApiException(500, "No speaker stems extracted from Perso for project $projectSeq")
+        backgroundFile?.let {
+            local.add(LocalStem("background", "배경음", it))
+            log.info("Background stem ready: file={} size={}B", it.name, it.length())
         }
 
         job.stems = local
@@ -222,110 +210,162 @@ class SeparationService(
         log.info("Separation READY: jobId={} stems={}", job.jobId, local.map { it.stemId })
     }
 
-    // ── audio-separation script paginated 수집 ─────────────────────────────
-    private suspend fun collectSeparationScript(projectSeq: Long): List<PersoScriptSentence> {
-        val all = mutableListOf<PersoScriptSentence>()
-        var cursor: Long? = null
-        var pages = 0
-        while (true) {
-            val page = persoClient.getAudioSeparationScript(projectSeq, cursor)
-            all += page.sentences
-            pages += 1
-            if (!page.hasNext || page.nextCursorId == null || pages >= 200) break
-            cursor = page.nextCursorId
+    // ── Speaker collection (.tar) 다운로드 + 풀이 ──────────────────────────────
+    private suspend fun downloadAndExtractSpeakerCollection(
+        projectSeq: Long,
+        outputDir: File,
+    ): List<File> {
+        val tarFile = File(outputDir, "speakers.tar")
+        downloadFreshLinkWithRetry(
+            label = "speakers tar (project $projectSeq)",
+            target = tarFile,
+        ) {
+            persoClient.getSeparationDownloadLinks(projectSeq, "originalVoiceSpeakers")
+                .audioFile?.voiceAudioDownloadLink
+                ?: throw PersoApiException(500,
+                    "Perso originalVoiceSpeakers link absent for project $projectSeq")
         }
-        log.info("Collected separation sentences: projectSeq={} count={} pages={}", projectSeq, all.size, pages)
-        return all.sortedBy { it.offsetMs }
-    }
+        log.info("Downloaded speakers tar: projectSeq={} size={}B", projectSeq, tarFile.length())
 
-    // ── 화자 stem 빌드: 각 utterance audioUrl 다운로드 → ffmpeg adelay+amix 로 timeline-aligned 합성 ──
-    private suspend fun buildSpeakerStem(
-        utterances: List<PersoScriptSentence>,
-        totalDurationMs: Long,
-        workDir: File,
-        outputFile: File,
-    ) {
-        if (utterances.isEmpty()) {
-            // 빈 stem — 무음 트랙으로 대체.
-            ffmpegSilence(totalDurationMs, outputFile)
-            return
-        }
-
-        val downloaded = mutableListOf<Pair<File, Long>>() // file → offsetMs
-        var skipped = 0
+        val extractDir = File(outputDir, "speakers_raw").apply { mkdirs() }
+        val extracted = mutableListOf<File>()
         try {
-            utterances.forEachIndexed { idx, s ->
-                val url = s.audioUrl ?: return@forEachIndexed
-                val tmp = File(workDir, "u_${outputFile.nameWithoutExtension}_$idx.mp3")
-                try {
-                    persoClient.streamDownloadAuthorized(url, tmp)
-                    downloaded.add(tmp to s.offsetMs)
-                } catch (e: Exception) {
-                    skipped++
-                    log.warn("utterance download failed (skip): idx={} offsetMs={} url={} err={}",
-                        idx, s.offsetMs, url, e.message)
-                    tmp.delete()
+            TarArchiveInputStream(tarFile.inputStream().buffered()).use { tin ->
+                var entry = tin.nextEntry
+                while (entry != null) {
+                    if (!entry.isDirectory) {
+                        // directory traversal 방지 — entry name 의 basename 만 사용.
+                        val safeName = File(entry.name).name.ifEmpty { "entry_${extracted.size}" }
+                        val out = File(extractDir, safeName)
+                        out.outputStream().use { os -> tin.copyTo(os) }
+                        extracted.add(out)
+                        log.info("Extracted speaker entry: name={} size={}B", entry.name, out.length())
+                    }
+                    entry = tin.nextEntry
                 }
             }
-            if (downloaded.isEmpty() && skipped > 0) {
-                throw RuntimeException("All ${utterances.size} utterance downloads failed for ${outputFile.name}")
-            }
-            if (skipped > 0) log.warn("buildSpeakerStem {}: {} utterances skipped, {} kept", outputFile.name, skipped, downloaded.size)
-            ffmpegMixWithOffsets(downloaded, totalDurationMs, outputFile)
         } finally {
-            downloaded.forEach { (f, _) -> f.delete() }
+            tarFile.delete()
         }
+        // 알파벳 순 정렬 — Perso 가 보통 화자 인덱스 포함 파일명 사용 (speaker_1.wav 등).
+        // entry 이름 무관하게 정렬된 순서로 speaker_0..N 매핑.
+        return extracted.sortedBy { it.name }
     }
 
-    private fun ffmpegSilence(durationMs: Long, output: File) {
-        val durSec = durationMs.coerceAtLeast(1L) / 1000.0
-        val process = ProcessBuilder(
-            "ffmpeg", "-y",
-            "-f", "lavfi",
-            "-i", "anullsrc=channel_layout=stereo:sample_rate=44100",
-            // secondsToFfmpegArg: Double.toString 의 scientific notation 회피
-            // (RenderService 에서 동일 이슈로 exit 234 재현됨).
-            "-t", secondsToFfmpegArg(durSec),
-            "-q:a", "4",
-            output.absolutePath,
-        ).redirectErrorStream(true).start()
-        drainAndAwait(process, "ffmpeg silence")
-    }
-
-    private fun ffmpegMixWithOffsets(
-        inputs: List<Pair<File, Long>>,
-        totalDurationMs: Long,
-        output: File,
-    ) {
-        if (inputs.isEmpty()) {
-            ffmpegSilence(totalDurationMs, output); return
+    // ── Background (.wav) 다운로드 ──────────────────────────────────────────
+    // 우선 project info endpoint 의 originalBackgroundPath (file 명 OriginalBaseBackground) 시도 —
+    // 진짜 BGM only 라 화자 수 무관하게 분리. 누락 시 originalSubBackground 로 fallback.
+    private suspend fun downloadBackgroundStem(projectSeq: Long, outputDir: File): File? {
+        return try {
+            val wavFile = File(outputDir, "background.wav")
+            // 1. project info 의 originalBackgroundPath 시도.
+            val info = runCatching { persoClient.getProjectInfo(projectSeq) }.getOrNull()
+            val baseBgPath = info?.downloadPathInfo?.originalBackgroundPath
+            if (baseBgPath != null) {
+                downloadFreshLinkWithRetry(
+                    label = "background base wav (project $projectSeq)",
+                    target = wavFile,
+                ) { baseBgPath }
+                log.info("Downloaded background (Base) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
+                return wavFile
+            }
+            // 2. fallback — getSeparationDownloadLinks 의 originalSubBackground.
+            log.warn("originalBackgroundPath absent; falling back to originalSubBackground (project {})", projectSeq)
+            downloadFreshLinkWithRetry(
+                label = "background sub wav (project $projectSeq)",
+                target = wavFile,
+            ) {
+                persoClient.getSeparationDownloadLinks(projectSeq, "originalSubBackground")
+                    .audioFile?.originalSubBackgroundDownloadLink
+                    ?: throw PersoApiException(404, "Perso originalSubBackground link absent")
+            }
+            log.info("Downloaded background (Sub) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
+            wavFile
+        } catch (e: Exception) {
+            log.warn("Failed to download background stem (project {}): {}", projectSeq, e.message)
+            null
         }
-        val durSec = totalDurationMs.coerceAtLeast(1L) / 1000.0
-        val cmd = mutableListOf("ffmpeg", "-y")
-        // input 0: silence base (총 길이 보장)
-        cmd += listOf("-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=44100")
-        // input 1..N: 각 utterance
-        inputs.forEach { (file, _) -> cmd += listOf("-i", file.absolutePath) }
-        // filter_complex: 각 input 에 adelay=offset, 마지막에 amix
-        val filterParts = mutableListOf<String>()
-        val mixLabels = mutableListOf("[0:a]")
-        inputs.forEachIndexed { i, (_, offsetMs) ->
-            val srcIdx = i + 1
-            val label = "[a$srcIdx]"
-            filterParts.add("[$srcIdx:a]adelay=${offsetMs}|${offsetMs}$label")
-            mixLabels.add(label)
-        }
-        val mixCount = mixLabels.size
-        filterParts.add("${mixLabels.joinToString("")}amix=inputs=$mixCount:duration=first:dropout_transition=0[out]")
-        cmd += listOf("-filter_complex", filterParts.joinToString(";"))
-        cmd += listOf("-map", "[out]", "-t", secondsToFfmpegArg(durSec), "-q:a", "4", output.absolutePath)
-
-        val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
-        drainAndAwait(process, "ffmpeg mix (${inputs.size} inputs)")
     }
 
     /**
-     * 이미 timeline-aligned 된 mp3 파일들 amix. utterances 재다운로드/재합성 회피용.
+     * download-info 의 가용성 플래그가 모두 true 가 될 때까지 폴링 — Perso 가 storage upload 를
+     * 끝낸 readiness 신호로 사용. speakers (`hasOriginalSpeakerAudioCollection`) 가 핵심,
+     * background (`hasOriginalSubBackground`) 는 best-effort 라 timeout 까지만 기다리고 누락 허용.
+     */
+    private suspend fun waitForDownloadInfoReady(
+        projectSeq: Long,
+        intervalMs: Long = 3_000,
+        timeoutMs: Long = 60_000,
+    ) {
+        val deadline = System.currentTimeMillis() + timeoutMs
+        var attempt = 0
+        while (true) {
+            val info = persoClient.getDownloadInfo(projectSeq)
+            attempt += 1
+            if (info.hasOriginalSpeakerAudioCollection && info.hasOriginalSubBackground) {
+                log.info("download-info ready (speakers + background): projectSeq={} attempts={}", projectSeq, attempt)
+                return
+            }
+            if (System.currentTimeMillis() >= deadline) {
+                // speakers 가 ready 면 진행 — background 만 누락이면 best-effort 로 통과.
+                if (info.hasOriginalSpeakerAudioCollection) {
+                    log.warn("download-info partial ready: projectSeq={} speakers=true background={} (timeout — proceed)",
+                        projectSeq, info.hasOriginalSubBackground)
+                    return
+                }
+                throw PersoApiException(500,
+                    "Perso storage not ready after ${timeoutMs}ms: speakers=${info.hasOriginalSpeakerAudioCollection}")
+            }
+            log.info("download-info not ready: projectSeq={} speakers={} background={} attempt={} — sleeping {}ms",
+                projectSeq, info.hasOriginalSpeakerAudioCollection, info.hasOriginalSubBackground, attempt, intervalMs)
+            kotlinx.coroutines.delay(intervalMs)
+        }
+    }
+
+    /**
+     * Perso storage 다운로드 backoff retry — **매 시도마다 getDownloadLinks 를 다시 호출**해 fresh
+     * path 를 받는다. 단순 retry 가 안 되는 이유:
+     *   1) Perso 응답 path 의 timestamp 가 호출 시점에 임베드 (`..._OriginalVoiceSpeakers_<ts>.tar`).
+     *      매 호출마다 unique path → cache key 도 다름.
+     *   2) 첫 GET 의 404 응답이 `Cache-Control: public, max-age=14400` 로 Cloudflare 에 4시간 캐시.
+     *      같은 path 로 retry 하면 4시간 동안 같은 404 가 cache 에서 옴 (storage 에 file 이 올라와도).
+     * 따라서 매 시도마다 새 path 를 받아야 새 cache key 로 origin 까지 재요청 — storage 가 ready 면
+     * 이번엔 200 으로 풀림.
+     */
+    private suspend fun downloadFreshLinkWithRetry(
+        label: String,
+        target: File,
+        attempts: Int = 12,
+        backoffMs: Long = 5_000,
+        getUrl: suspend () -> String,
+    ) {
+        var lastErr: Exception? = null
+        repeat(attempts) { attempt ->
+            try {
+                val url = getUrl()
+                persoClient.streamDownloadAuthorized(url, target)
+                if (attempt > 0) log.info("{} succeeded on attempt {}/{}", label, attempt + 1, attempts)
+                return
+            } catch (e: PersoApiException) {
+                // 4xx 중 404 만 재시도 (storage upload 지연). 다른 4xx 는 즉시 throw — 재시도해도 안 풀림.
+                if (e.statusCode != 404 && e.statusCode in 400..499) throw e
+                lastErr = e
+                log.warn("{} {} (attempt {}/{}) — fetching fresh link in {}ms",
+                    label, e.statusCode, attempt + 1, attempts, backoffMs)
+                kotlinx.coroutines.delay(backoffMs)
+            } catch (e: Exception) {
+                // getUrl 실패도 동일 backoff (link 응답이 한시적으로 비어있을 수 있음)
+                lastErr = e
+                log.warn("{} link fetch threw (attempt {}/{}) — retrying in {}ms: {}",
+                    label, attempt + 1, attempts, backoffMs, e.message)
+                kotlinx.coroutines.delay(backoffMs)
+            }
+        }
+        throw lastErr ?: RuntimeException("$label failed after $attempts attempts")
+    }
+
+    /**
+     * 이미 timeline-aligned 된 audio 파일들 amix. (Perso 의 화자 stem 들은 timeline-aligned)
      * 단일 입력이면 ffmpeg 호출 대신 파일 복사 (불필요한 재인코딩 회피).
      */
     private fun ffmpegMixFiles(inputs: List<File>, output: File) {

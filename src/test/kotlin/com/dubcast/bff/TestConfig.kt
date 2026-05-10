@@ -15,6 +15,7 @@ fun testAppConfig(
     perso = PersoConfig(
         apiKey = "pk_test_xxxxxxxxxxxxxxxxxxxx",
         baseUrl = "https://api.perso.ai",
+        storageBaseUrl = "https://portal-media.perso.ai",
         spaceSeq = 1,
         pollIntervalMs = 5000,
         maxPollMinutes = 30,
