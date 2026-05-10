@@ -212,12 +212,13 @@ class GeminiClient(
             }
         }
         // 2) 안전망 — gemini-2.5-flash 가 systemInstruction 무시하고 tool_code 텍스트로 fallback
-        //    한 케이스 복원. text 에서 `print(default_api.<name>(...))` 추출.
+        //    한 케이스 복원. Python `print(default_api.<name>(...))` 또는 YAML `- tool:
+        //    default_api.<name>` + 들여쓴 `args:` 블록 둘 다 시도.
         if (toolCalls.isEmpty() && textBuilder.isNotEmpty()) {
-            val recovered = recoverToolCallsFromText(textBuilder.toString())
+            val (recovered, recoveredRationale) = recoverToolCallsFromText(textBuilder.toString())
             if (recovered.isNotEmpty()) {
-                log.warn("Gemini emitted tool_code text instead of structured functionCall — recovered {} call(s)", recovered.size)
-                return GeminiChatResult.ToolCalls(recovered, rationaleText = null)
+                log.warn("Gemini emitted pseudo-tool-code text instead of structured functionCall — recovered {} call(s)", recovered.size)
+                return GeminiChatResult.ToolCalls(recovered, rationaleText = recoveredRationale)
             }
         }
         return if (toolCalls.isNotEmpty()) {
@@ -228,15 +229,21 @@ class GeminiClient(
     }
 
     /**
-     * 텍스트에서 `print(default_api.<name>(arg1=..., arg2=...))` 또는 `default_api.<name>(...)`
-     * 패턴을 추출해 ToolCall 로 복원. Python literal (str/int/float/bool/list) 만 지원 — dict
-     * 인자는 등장 안 함 (tool 정의가 평탄한 args 만).
+     * 텍스트에서 ToolCall 을 복원. 두 패턴을 순차로 시도:
+     *
+     * 1. Python: `print(default_api.<name>(arg1=..., arg2=...))` 또는 `default_api.<name>(...)`
+     *    — Python literal (str/int/float/bool/list) 지원.
+     * 2. YAML pseudo: `- tool: default_api.<name>` 헤더 + 들여쓴 `args:` 매핑 블록. rationale
+     *    필드 (`rationale: <text>`) 도 함께 추출해 [GeminiChatResult.ToolCalls.rationaleText]
+     *    로 전달.
      *
      * 정규 표현식 한 번에 여러 줄 매칭 — 한 응답에 multi-step 출력하면 모두 회수.
+     *
+     * @return ([calls], [rationale]) — calls 가 비어있으면 caller 가 plain text 로 처리.
      */
-    private fun recoverToolCallsFromText(text: String): List<GeminiToolCall> {
-        val callRegex = Regex("""default_api\.([a-zA-Z_][a-zA-Z0-9_]*)\(([^()]*(?:\([^()]*\)[^()]*)*)\)""")
-        return callRegex.findAll(text).mapNotNull { m ->
+    private fun recoverToolCallsFromText(text: String): Pair<List<GeminiToolCall>, String?> {
+        val pythonRegex = Regex("""default_api\.([a-zA-Z_][a-zA-Z0-9_]*)\(([^()]*(?:\([^()]*\)[^()]*)*)\)""")
+        val pythonCalls = pythonRegex.findAll(text).mapNotNull { m ->
             val name = m.groupValues[1]
             val argsBody = m.groupValues[2].trim()
             runCatching {
@@ -244,6 +251,94 @@ class GeminiClient(
                 GeminiToolCall(name, args)
             }.onFailure { log.warn("recover skipped name={} body={} err={}", name, argsBody, it.message) }.getOrNull()
         }.toList()
+        if (pythonCalls.isNotEmpty()) return pythonCalls to null
+
+        return recoverYamlToolCalls(text)
+    }
+
+    /**
+     * YAML pseudo-tool-code 복원. 모델이 systemInstruction 무시하고 다음 형태로 응답한 경우:
+     * ```
+     * kind: proposal
+     * rationale: <설명 텍스트>
+     * steps:
+     * - tool: default_api.separate_audio_range
+     *   args:
+     *     startMs: 1000
+     *     endMs: 4000
+     * ```
+     * `default_api.` prefix 는 옵션 — 없어도 매치. value 는 YAML scalar (string/int/double/
+     * bool/null/list) 로 파싱.
+     */
+    private fun recoverYamlToolCalls(text: String): Pair<List<GeminiToolCall>, String?> {
+        val toolHeader = Regex("""^\s*-?\s*tool\s*:\s*(?:default_api\.)?([a-zA-Z_][a-zA-Z0-9_]*)\s*$""")
+        val argsHeader = Regex("""^\s*args\s*:\s*$""")
+        val kvLine = Regex("""^(\s*)([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$""")
+        val rationaleLine = Regex("""^\s*rationale\s*:\s*(.+)$""")
+
+        val lines = text.lines()
+        var rationale: String? = null
+        lines.firstOrNull { rationaleLine.containsMatchIn(it) }
+            ?.let { rationaleLine.find(it)?.groupValues?.get(1)?.trim() }
+            ?.takeIf { it.isNotEmpty() }
+            ?.let { rationale = it.removeSurrounding("\"").removeSurrounding("'") }
+
+        val results = mutableListOf<GeminiToolCall>()
+        var i = 0
+        while (i < lines.size) {
+            val header = toolHeader.find(lines[i])
+            if (header == null) { i++; continue }
+            val name = header.groupValues[1]
+            i++
+            // `args:` 블록까지 진행 — 없을 수 있음
+            while (i < lines.size && !argsHeader.containsMatchIn(lines[i]) && !toolHeader.containsMatchIn(lines[i])) i++
+            val argsObj = mutableMapOf<String, JsonElement>()
+            if (i < lines.size && argsHeader.containsMatchIn(lines[i])) {
+                i++
+                var argsIndent: Int? = null
+                while (i < lines.size) {
+                    val l = lines[i]
+                    if (l.isBlank()) { i++; continue }
+                    if (toolHeader.containsMatchIn(l)) break
+                    val kv = kvLine.matchEntire(l)
+                    if (kv == null) { i++; continue }
+                    val indent = kv.groupValues[1].length
+                    if (argsIndent == null) argsIndent = indent
+                    if (indent < (argsIndent ?: indent)) break
+                    val key = kv.groupValues[2]
+                    val rawVal = kv.groupValues[3].trim()
+                    // 예약어 (rationale/kind/steps) 가 들여쓰기 사고로 args 안에 잡히지 않도록
+                    if (key in setOf("rationale", "kind", "steps", "tool")) break
+                    argsObj[key] = parseYamlScalar(rawVal)
+                    i++
+                }
+            }
+            results += GeminiToolCall(name, JsonObject(argsObj))
+        }
+        return results to rationale
+    }
+
+    private fun parseYamlScalar(raw: String): JsonElement {
+        val s = raw.trim()
+        if (s.isEmpty()) return kotlinx.serialization.json.JsonPrimitive("")
+        if ((s.startsWith("\"") && s.endsWith("\"")) || (s.startsWith("'") && s.endsWith("'"))) {
+            return kotlinx.serialization.json.JsonPrimitive(s.substring(1, s.length - 1))
+        }
+        if (s.startsWith("[") && s.endsWith("]")) {
+            val inner = s.substring(1, s.length - 1)
+            return buildJsonArray {
+                splitTopLevel(inner, ',').map { it.trim() }.filter { it.isNotEmpty() }
+                    .forEach { add(parseYamlScalar(it)) }
+            }
+        }
+        when (s.lowercase()) {
+            "true" -> return kotlinx.serialization.json.JsonPrimitive(true)
+            "false" -> return kotlinx.serialization.json.JsonPrimitive(false)
+            "null", "~" -> return kotlinx.serialization.json.JsonNull
+        }
+        s.toLongOrNull()?.let { return kotlinx.serialization.json.JsonPrimitive(it) }
+        s.toDoubleOrNull()?.let { return kotlinx.serialization.json.JsonPrimitive(it) }
+        return kotlinx.serialization.json.JsonPrimitive(s)
     }
 
     /**

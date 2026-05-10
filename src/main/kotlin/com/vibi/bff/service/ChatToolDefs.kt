@@ -194,7 +194,8 @@ object ChatToolDefs {
             - To invoke a tool, return a structured `functionCall` response part (Vertex AI function-calling response format) with the tool's `name` and `args`. The hosting app reads `candidates[0].content.parts[].functionCall` directly.
             - NEVER write a `tool_code` markdown fence.
             - NEVER write Python-style invocations such as `print(default_api.generate_subtitles(...))` or `default_api.foo(...)`.
-            - NEVER write the literal strings `kind:`, `rationale:`, `steps:` — those are the hosting app's wire format, not yours. The app constructs them from your structured functionCall output.
+            - NEVER write YAML / pseudo-YAML such as `- tool: default_api.<name>` followed by `args:` indented mapping.
+            - NEVER write the literal strings `kind:`, `rationale:`, `steps:`, `tool:`, `args:` — those are the hosting app's wire format, not yours. The app constructs them from your structured functionCall output.
             - If you have nothing to call, return plain text only (no code blocks, no fake JSON, no fake YAML).
 
             --- CAPABILITY SPEC (chat-tools.md) ---
