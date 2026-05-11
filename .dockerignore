@@ -1,0 +1,14 @@
+.gradle/
+build/
+storage/
+credentials/
+.env
+.env.*
+*.local
+.git/
+.idea/
+.vscode/
+*.iml
+out/
+bin/
+.DS_Store

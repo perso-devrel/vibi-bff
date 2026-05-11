@@ -28,8 +28,11 @@ import java.io.FileInputStream
  * Vertex AI Gemini — SRT 자막 텍스트의 다국어 번역만 담당.
  * Perso 가 STT (originalSubtitle) 를 만들고, 다른 언어 자막이 필요할 때 본 클라이언트로 번역.
  *
- * 인증: GCP service account JSON ([config.credentialsPath]) 의 OAuth2 token. 첫 호출 시 1회 로드
- * 후 자체 캐시. 만료되면 자동 refresh.
+ * 인증 우선순위 (첫 호출 시 1회 로드 후 캐시, 만료되면 자동 refresh):
+ * 1. [config.credentialsPath] 가 비어있지 않으면 그 파일을 service account JSON 으로 사용 (로컬 dev).
+ * 2. 비어있으면 Application Default Credentials — Cloud Run / GCE 에 attached service
+ *    account 가 metadata server 로 자동 주입, 또는 로컬에선 GOOGLE_APPLICATION_CREDENTIALS
+ *    env / `gcloud auth application-default login` 캐시 사용.
  */
 class GeminiClient(
     private val config: GeminiConfig,
@@ -41,8 +44,9 @@ class GeminiClient(
     /**
      * GoogleCredentials.refreshIfExpired 는 OAuth2 token endpoint blocking I/O
      * (HttpURLConnection sync). Netty event loop 에서 직접 호출하면 thread 가 막힘 →
-     * Dispatchers.IO 로 격리. credential load (FileInputStream) 도 동일 dispatcher 안에서.
-     * @Synchronized 는 race 시 GoogleCredentials 인스턴스 중복 생성을 막는 용도라 유지.
+     * Dispatchers.IO 로 격리. credential load (FileInputStream / metadata server) 도
+     * 동일 dispatcher 안에서. @Synchronized 는 race 시 GoogleCredentials 인스턴스 중복
+     * 생성을 막는 용도라 유지.
      */
     private suspend fun accessToken(): String = withContext(Dispatchers.IO) {
         loadOrRefreshCredentials().accessToken.tokenValue
@@ -51,9 +55,14 @@ class GeminiClient(
     @Synchronized
     private fun loadOrRefreshCredentials(): GoogleCredentials {
         val creds = credentials ?: run {
-            val loaded = FileInputStream(config.credentialsPath).use {
-                GoogleCredentials.fromStream(it)
-            }.createScoped(listOf("https://www.googleapis.com/auth/cloud-platform"))
+            val source = if (config.credentialsPath.isNotBlank()) {
+                log.info("Gemini credentials: loading from file path={}", config.credentialsPath)
+                FileInputStream(config.credentialsPath).use { GoogleCredentials.fromStream(it) }
+            } else {
+                log.info("Gemini credentials: using Application Default Credentials (metadata server / gcloud)")
+                GoogleCredentials.getApplicationDefault()
+            }
+            val loaded = source.createScoped(listOf("https://www.googleapis.com/auth/cloud-platform"))
             credentials = loaded
             loaded
         }

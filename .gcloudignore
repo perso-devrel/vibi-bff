@@ -1,0 +1,15 @@
+# Cloud Build / gcloud run deploy --source 가 업로드에서 제외할 경로
+.gradle/
+build/
+storage/
+credentials/
+.env
+.env.*
+*.local
+.git/
+.idea/
+.vscode/
+*.iml
+out/
+bin/
+.DS_Store

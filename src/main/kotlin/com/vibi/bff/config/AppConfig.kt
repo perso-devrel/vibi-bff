@@ -57,11 +57,16 @@ data class PersoConfig(
 }
 
 /**
- * Vertex AI configuration. We authenticate via a GCP service account JSON
- * (path lives in [credentialsPath], typically the same file Google's tooling
- * already expects under `GOOGLE_APPLICATION_CREDENTIALS`). Validation is
- * deferred to [com.vibi.bff.service.GeminiClient]'s first call so the
- * server can boot even when subtitle translation is disabled in dev.
+ * Vertex AI configuration.
+ *
+ * Auth 우선순위 ([com.vibi.bff.service.GeminiClient.loadOrRefreshCredentials] 참고):
+ * 1. [credentialsPath] 가 비어있지 않으면 그 파일을 service account JSON 으로 사용 (로컬 dev).
+ * 2. 비어있으면 Application Default Credentials — Cloud Run / GCE 의 attached service
+ *    account, 또는 로컬의 `gcloud auth application-default login` 캐시 / env
+ *    `GOOGLE_APPLICATION_CREDENTIALS` 자동 탐색.
+ *
+ * Validation 은 [GeminiClient] 의 첫 호출 시점까지 지연돼, 자막 번역 비활성 dev 환경에서도
+ * 서버 부팅이 가능.
  */
 data class GeminiConfig(
     val projectId: String,
