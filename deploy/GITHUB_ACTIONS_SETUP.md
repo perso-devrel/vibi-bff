@@ -27,8 +27,8 @@
 export PROJECT_ID=<your-project-id>
 export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
 export SA_EMAIL="vibi-bff-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-export REPO_OWNER="je0ng3"          # GitHub <owner>
-export REPO="je0ng3/vibi-bff"       # GitHub <owner>/<repo>
+export REPO_OWNER="perso-devrel"           # GitHub <owner> (이 repo 는 perso-devrel 조직)
+export REPO="perso-devrel/vibi-bff"        # GitHub <owner>/<repo>
 
 gcloud config set project "$PROJECT_ID"
 gcloud services enable iamcredentials.googleapis.com sts.googleapis.com
@@ -135,7 +135,7 @@ gcloud iam workload-identity-pools providers describe github-provider \
   --format='value(attributeCondition)'
 ```
 
-`assertion.repository_owner=='je0ng3'` 같은 식. owner 가 바뀌었으면 update:
+`assertion.repository_owner=='perso-devrel'` 같은 식. owner 가 바뀌었으면 update:
 
 ```bash
 gcloud iam workload-identity-pools providers update-oidc github-provider \
