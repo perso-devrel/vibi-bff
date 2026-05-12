@@ -61,16 +61,26 @@ jobs:
             --set-secrets "PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest" \
             --quiet
 
-      - name: Self-reference BFF_BASE_URL
+      # BFF_BASE_URL 출처:
+      #   1. vars.BFF_BASE_URL 가 있으면 그 값 (커스텀 도메인 운영 시 — 예: https://api.vibi.fm)
+      #   2. 없으면 Cloud Run 자동 발급 URL self-reference (커스텀 도메인 미설정 fallback)
+      # 매 deploy 마다 vars 가 단일 소스 — 사용자는 한 곳만 갱신.
+      - name: Wire BFF_BASE_URL
         run: |
-          URL=$(gcloud run services describe "$SERVICE_NAME" \
-            --region "$REGION" \
-            --project "${{ secrets.GCP_PROJECT_ID }}" \
-            --format='value(status.url)')
+          VAR_URL="${{ vars.BFF_BASE_URL }}"
+          if [ -n "$VAR_URL" ]; then
+            URL="$VAR_URL"
+            echo "Using vars.BFF_BASE_URL: $URL"
+          else
+            URL=$(gcloud run services describe "$SERVICE_NAME" \
+              --region "$REGION" \
+              --project "${{ secrets.GCP_PROJECT_ID }}" \
+              --format='value(status.url)')
+            echo "Falling back to Cloud Run default URL: $URL"
+          fi
           gcloud run services update "$SERVICE_NAME" \
             --region "$REGION" \
             --project "${{ secrets.GCP_PROJECT_ID }}" \
             --update-env-vars "BFF_BASE_URL=$URL" \
             --quiet
-          echo "Deployed: $URL"
           echo "::notice title=Deployed::$URL"

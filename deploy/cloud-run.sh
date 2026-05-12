@@ -26,6 +26,9 @@ set -a; source "$ENV_FILE"; set +a
 : "${PERSO_SPACE_SEQ:?PERSO_SPACE_SEQ missing in .env}"
 : "${GOOGLE_OAUTH_CLIENT_IDS:?GOOGLE_OAUTH_CLIENT_IDS missing in .env}"
 : "${CORS_ALLOWED_ORIGINS:=}"  # optional — 없으면 빈 값
+# Vertex AI 가 활성화된 프로젝트가 Cloud Run 배포 프로젝트와 다를 수 있어 (cross-project) 별도 변수.
+# .env 의 GEMINI_PROJECT_ID 가 있으면 그 값, 없으면 PROJECT_ID fallback.
+: "${GEMINI_PROJECT_ID:=$PROJECT_ID}"
 
 echo "▶ Using project: $PROJECT_ID  region: $REGION"
 gcloud config set project "$PROJECT_ID" >/dev/null
@@ -78,7 +81,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --min-instances 0 --max-instances 2 \
   --session-affinity \
   --allow-unauthenticated \
-  --set-env-vars="GEMINI_PROJECT_ID=${PROJECT_ID},GEMINI_LOCATION=${REGION},PERSO_BASE_URL=https://api.perso.ai,PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai,STORAGE_PATH=/tmp/storage,GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS},CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}" \
+  --set-env-vars="GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID},GEMINI_LOCATION=${REGION},PERSO_BASE_URL=https://api.perso.ai,PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai,STORAGE_PATH=/tmp/storage,GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS},CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}" \
   --set-secrets="PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest"
 
 URL=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)')
