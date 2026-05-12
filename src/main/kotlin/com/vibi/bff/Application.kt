@@ -80,18 +80,21 @@ fun Application.module() {
             // HTTP-level logging off; services log their own sanitized lines.
             level = LogLevel.NONE
         }
+        // 큰 영상 (수십~수백 MB) Perso 업로드는 socket-level 으로 1+분 걸릴 수 있어 longer.
+        // Cloud Run cold-start / 느린 backbone 디버깅 시 env 로 임시 늘릴 수 있게 외부화.
+        val httpConnectTimeoutMs = System.getenv("HTTP_CONNECT_TIMEOUT_MS")?.toLongOrNull() ?: 120_000L
+        val httpRequestTimeoutMs = System.getenv("HTTP_REQUEST_TIMEOUT_MS")?.toLongOrNull() ?: 600_000L
+        val httpSocketTimeoutMs = System.getenv("HTTP_SOCKET_TIMEOUT_MS")?.toLongOrNull() ?: 600_000L
         install(HttpTimeout) {
-            // 큰 영상 (수십~수백 MB) Perso 업로드는 socket-level 으로 1+분 걸릴 수 있어 longer.
-            connectTimeoutMillis = 120_000  // 2분 — TLS handshake + SAS upload init 여유
-            requestTimeoutMillis = 600_000  // 10분 — 큰 영상 stream upload 여유
-            socketTimeoutMillis = 600_000   // 10분 — read/write idle 허용
+            connectTimeoutMillis = httpConnectTimeoutMs
+            requestTimeoutMillis = httpRequestTimeoutMs
+            socketTimeoutMillis = httpSocketTimeoutMs
         }
-        // CIO engine 의 endpoint connect attempts — timeout 만 늘리지 말고 재시도도 enable.
         engine {
-            requestTimeout = 600_000
+            requestTimeout = httpRequestTimeoutMs
             endpoint {
                 connectAttempts = 3
-                connectTimeout = 120_000
+                connectTimeout = httpConnectTimeoutMs
             }
         }
     }
