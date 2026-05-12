@@ -1,0 +1,56 @@
+name: Deploy to Cloud Run
+
+# main 푸시 시 자동 배포 + 수동 트리거 (Actions UI 의 Run workflow 버튼).
+# 최초 1회 부트스트랩 (SA 생성, API 활성화, Secret Manager 등록) 은 deploy/cloud-run.sh 로 끝내둘 것 —
+# 이 워크플로우는 이미 존재하는 Cloud Run 서비스에 새 리비전만 올린다.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+env:
+  SERVICE_NAME: vibi-bff
+  REGION: us-central1
+
+# Cloud Run 동시 배포 충돌 방지 — main 에 빠르게 연속 푸시되면 마지막 것만 살린다.
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # WIF OIDC 토큰 발급에 필수
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE_NAME" \
+            --source . \
+            --region "$REGION" \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --quiet
+
+      - name: Show service URL
+        run: |
+          URL=$(gcloud run services describe "$SERVICE_NAME" \
+            --region "$REGION" \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --format='value(status.url)')
+          echo "Deployed: $URL"
+          echo "::notice title=Deployed::$URL"

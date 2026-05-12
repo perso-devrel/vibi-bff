@@ -38,7 +38,7 @@ gcloud services enable \
   cloudbuild.googleapis.com \
   aiplatform.googleapis.com
 
-echo "▶ Ensuring service account $SA_EMAIL…"
+echo "▶ Ensuring service account ${SA_EMAIL}…"
 gcloud iam service-accounts describe "$SA_EMAIL" >/dev/null 2>&1 \
   || gcloud iam service-accounts create "$SA_NAME" \
        --display-name="vibi-bff Cloud Run runtime"

@@ -1,10 +1,6 @@
-# syntax=docker/dockerfile:1.7
-#
 # vibi-bff — Ktor 3 / JDK 21 / ffmpeg.
-# Cloud Run + 로컬 docker 양쪽 최적화:
-#   - 레이어 캐시: gradle 설정 → 의존성 해결 → 소스 → 빌드 순으로 분리
-#   - BuildKit cache mount: /root/.gradle/caches 를 빌드 간 영구 보존
-#   - 컨테이너 메모리 인식: -XX:MaxRAMPercentage 로 Cloud Run --memory 한도 활용
+# 레이어 캐시: gradle 설정 → 의존성 해결 → 소스 → 빌드 순으로 분리.
+# 컨테이너 메모리 인식: -XX:MaxRAMPercentage 로 Cloud Run --memory 한도 활용.
 
 # ============================================================
 # Build stage — JDK 21 + Gradle
@@ -18,18 +14,13 @@ COPY gradle gradle
 RUN chmod +x gradlew
 
 # 2) 의존성 사전 해결. src 변경에 무관하게 이 레이어는 캐시 hit.
-#    cache mount 는 BuildKit 한정 — Cloud Build / 모던 docker 모두 지원.
-RUN --mount=type=cache,target=/root/.gradle/caches,sharing=locked \
-    ./gradlew --no-daemon -q dependencies --configuration runtimeClasspath > /dev/null
+RUN ./gradlew --no-daemon -q dependencies --configuration runtimeClasspath > /dev/null
 
 # 3) 소스 복사 — 자주 변경됨
 COPY src src
 
-# 4) 빌드. 위 cache mount 재사용 → 의존성 다운로드 0, 컴파일러 캐시 보존.
-#    application plugin 의 installDist → /app/build/install/vibi-bff/{bin,lib}
-RUN --mount=type=cache,target=/root/.gradle/caches,sharing=locked \
-    --mount=type=cache,target=/app/.gradle,sharing=locked \
-    ./gradlew --no-daemon installDist
+# 4) 빌드. application plugin 의 installDist → /app/build/install/vibi-bff/{bin,lib}
+RUN ./gradlew --no-daemon installDist
 
 # ============================================================
 # Runtime stage — JRE 21 + ffmpeg
