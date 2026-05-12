@@ -76,7 +76,7 @@ data class GeminiConfig(
 ) {
     init {
         require(model.isNotBlank()) { "GEMINI_MODEL must not be blank" }
-        require(location.isNotBlank()) { "GCP_LOCATION must not be blank" }
+        require(location.isNotBlank()) { "GEMINI_LOCATION must not be blank" }
     }
 }
 
