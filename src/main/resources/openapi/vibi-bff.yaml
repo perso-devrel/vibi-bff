@@ -3,34 +3,413 @@ info:
   title: vibi BFF API
   description: |
     vibi Backend-For-Frontend API.
-    Perso AI (음성분리 + STT + 자동 더빙) 와 Vertex AI Gemini (자막 번역, 채팅 function calling) 를 프록시합니다.
-  version: 0.3.0
+
+    - Perso AI 프록시 — 음성분리 / STT / 자동 더빙
+    - Vertex AI Gemini 프록시 — 자막 번역 / 채팅 function calling
+    - 로컬 ffmpeg 파이프라인 — 자막 burn-in, 더빙 mix, 음원 분리 stem mix, segment concat
+    - Google OAuth 검증 + HS256 access token 발급
+
+    모든 운영 endpoint 는 `/api/v2` 아래에 마운트된다. 1MB 이상 binary 응답
+    (SRT / 더빙 오디오 / 음원 stem / 렌더 산출물) 은 BFF 자체 HMAC 토큰 (`token`
+    query param) 으로 보호되며, signed URL 은 `*StatusResponse` 가 `READY` /
+    `COMPLETED` 상태에 도달했을 때만 동봉된다.
+  version: 0.4.0
 
 servers:
   - url: http://localhost:8080
     description: Local development
 
 tags:
+  - name: Auth
+    description: Google OAuth ID token 검증 → BFF access token (HS256 JWT) 발급
+  - name: Languages
+    description: Perso 가 지원하는 타깃 언어 목록 프록시
+  - name: Render
+    description: ffmpeg 기반 렌더 파이프라인 (segments / dub / bgm / sticker / 음원분리 directive)
+  - name: Separation
+    description: Perso 음성분리 → stem 다운로드 + 사용자 mix 합성
   - name: Subtitles
-    description: 자동 자막 (Perso STT + Gemini 번역)
+    description: 자동 자막 (Perso STT + Gemini 다국어 번역) + SRT 재생성
   - name: AutoDub
-    description: 자동 더빙 (Perso translate)
+    description: 자동 더빙 (Perso translate) — 더빙 오디오 + 더빙 영상 산출
+  - name: Chat
+    description: Vertex Gemini function-calling 기반 편집 어시스턴트
+  - name: Testdata
+    description: 개발/QA 용 mock 음원분리 데이터 — production 비활성 권장
 
 paths:
-  /api/v2/subtitles:
+  # ---------------------------------------------------------------- Auth
+  /auth/google:
     post:
-      tags: [Subtitles]
-      summary: 자동 자막 생성 잡 제출
+      tags: [Auth]
+      summary: Google ID Token → BFF access token 교환
       description: |
-        업로드된 영상/오디오를 Perso 에 보내 원본 SRT 를 추출한다. spec.targetLanguageCode 가
-        sourceLanguageCode 와 다르면 Gemini 번역 SRT 도 생성한다.
+        모바일이 native SDK 로 받은 Google ID Token 을 검증한 뒤 HS256 access token (JWT) 을 발급.
+        사용자 record 는 영속화하지 않고 JWT claim 에 sub/email/name/picture 가 들어간다.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/GoogleAuthRequest' }
+      responses:
+        '200':
+          description: 발급 성공
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '401':
+          description: ID Token 검증 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ---------------------------------------------------------------- Languages
+  /api/v2/languages:
+    get:
+      tags: [Languages]
+      summary: Perso 지원 타깃 언어 목록
+      responses:
+        '200':
+          description: 언어 목록
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/LanguageListResponse' }
+        '502':
+          description: Perso 통신 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ---------------------------------------------------------------- Render
+  /api/v2/render/inputs:
+    post:
+      tags: [Render]
+      summary: 공유 입력 캐시 등록 (1회 업로드 → N variant 재사용)
+      description: |
+        같은 source video 로 여러 variant 렌더를 돌릴 때, 영상/segment 오디오를 한 번만
+        업로드하고 응답의 `inputId` 를 `/api/v2/render` 의 `inputId` form 필드로 넘겨
+        재사용한다. `inputId` 는 video 바이트의 sha256 prefix 이므로 동일 파일 재업로드 시
+        동일 슬롯에 매핑되고 `lastAccessAt` 만 갱신된다. TTL 은 `RENDER_INPUT_CACHE_TTL_HOURS`
+        (기본 24h) 이후 만료.
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [file, spec]
+              required: [video]
+              properties:
+                video:
+                  type: string
+                  format: binary
+                  description: 원본 영상 (필수)
+                audio_*:
+                  type: string
+                  format: binary
+                  description: |
+                    segment 별 오디오. form field 이름이 `audio` 또는 `audio_<key>` 로 시작하는
+                    모든 파트를 함께 캐싱. `/render` 호출 시 같은 key 로 inline 업로드한 파트가
+                    있으면 inline 이 우선.
+      responses:
+        '200':
+          description: 캐시 등록 성공
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenderInputCacheResponse' }
+        '400':
+          description: video part 누락 / 중복
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/render:
+    post:
+      tags: [Render]
+      summary: 렌더 잡 제출 (ffmpeg)
+      description: |
+        multipart 파트 명명 규칙:
+
+        - `video` — legacy 단일 영상 (segments 미사용)
+        - `video_<key>` — segments[].sourceFileKey 가 가리키는 영상
+        - `segment_image_<key>` — segments[].sourceFileKey 가 가리키는 정지 이미지 (segment type=IMAGE)
+        - `audio_<key>` — dubClips[].audioFileKey 가 가리키는 더빙 오디오
+        - `audio_override` — config.audioOverrideKey 가 가리키는 원본 audio 트랙 대체본
+        - `bgm_<key>` — bgmClips[].audioFileKey 가 가리키는 BGM
+        - `image_<key>` — imageClips[].imageFileKey 가 가리키는 sticker 이미지
+        - `subtitles` — burn-in 용 SRT/ASS
+        - `config` — RenderConfig JSON 문자열
+        - `inputId` — `/render/inputs` 응답의 inputId. video / audio_* 파트는 캐시 우선,
+          inline 파트가 있으면 inline 이 동일 key 에 한해 override.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [config]
+              properties:
+                config:
+                  type: string
+                  description: RenderConfig JSON (RenderConfig schema 참조)
+                inputId:
+                  type: string
+                  description: 선택. `/render/inputs` 응답의 inputId.
+                video:
+                  type: string
+                  format: binary
+                subtitles:
+                  type: string
+                  format: binary
+                audio_override:
+                  type: string
+                  format: binary
+      responses:
+        '200':
+          description: 잡 접수
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenderResponse' }
+        '400':
+          description: |
+            - config 미지정
+            - dub/bgm/image clip 의 fileKey 가 가리키는 multipart 파트 누락
+            - inputId 만료 / not found
+            - separationDirectives 의 stem audioUrl 이 BFF 자체 HMAC URL 패턴 아님
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/render/{jobId}/status:
+    get:
+      tags: [Render]
+      summary: 렌더 잡 상태
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 상태
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/RenderStatusResponse' }
+        '404':
+          description: 잡 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/render/{jobId}/download:
+    get:
+      tags: [Render]
+      summary: 렌더 산출물 다운로드
+      description: |
+        status=COMPLETED 일 때만 200. outputFile 확장자에 따라 mp4 / m4a / mp3 / wav
+        Content-Type 으로 응답. attachment 다운로드 헤더 동봉.
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: 렌더 파일
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+            audio/mp4:
+              schema: { type: string, format: binary }
+            audio/mpeg:
+              schema: { type: string, format: binary }
+            audio/wav:
+              schema: { type: string, format: binary }
+        '404':
+          description: 잡 없음 / 미완료 / 파일 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ---------------------------------------------------------------- Separation
+  /api/v2/separate:
+    post:
+      tags: [Separation]
+      summary: 음성분리 잡 제출
+      description: |
+        source 는 두 가지 중 하나:
+        - multipart `file` — 새 영상/오디오 업로드
+        - `spec.editedRenderJobId` — 완료된 `/render` 출력 재사용 (파일 파트 없이 spec 만)
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [spec]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: editedRenderJobId 가 spec 에 없을 때 필수
+                spec:
+                  type: string
+                  description: SeparationSpec JSON
+      responses:
+        '202':
+          description: 잡 접수
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SeparationResponse' }
+        '400':
+          description: spec 누락 / trim 범위 invalid / source 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/separate/{jobId}:
+    get:
+      tags: [Separation]
+      summary: 음성분리 잡 상태 + stem signed URL
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: status=READY 일 때 stems 에 signed URL 동봉
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SeparationStatusResponse' }
+        '404':
+          description: 잡 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/separate/{jobId}/stem/{stemId}:
+    get:
+      tags: [Separation]
+      summary: 음성분리 stem 다운로드 (HMAC 토큰 필수)
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+        - in: path
+          name: stemId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: stem 오디오
+          content:
+            audio/wav:
+              schema: { type: string, format: binary }
+        '403':
+          description: 토큰 검증 실패
+        '404':
+          description: 잡/stem/파일 없음
+
+  /api/v2/separate/{jobId}/mix:
+    post:
+      tags: [Separation]
+      summary: 사용자 선택 stem 들을 단일 mp3 로 mix
+      description: |
+        성공 시 원본 separation stems 는 dispose (디스크에서 제거). 호출 후엔 동일
+        separation jobId 의 stem 다운로드 불가. 실패 시엔 reservation 해제 후 stems 유지.
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/StemMixRequest' }
+      responses:
+        '202':
+          description: mix 잡 접수
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StemMixResponse' }
+        '400':
+          description: stems 비어 있음 / unknown stemId
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '409':
+          description: separation 미완료 또는 이미 다른 mix 가 점유 중
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/separate/mix/{mixJobId}:
+    get:
+      tags: [Separation]
+      summary: mix 잡 상태
+      parameters:
+        - in: path
+          name: mixJobId
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: status=COMPLETED 일 때 downloadUrl 동봉
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/StemMixStatusResponse' }
+        '404':
+          description: mix 잡 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/separate/mix/{mixJobId}/download:
+    get:
+      tags: [Separation]
+      summary: mix 결과 mp3 다운로드 (HMAC 토큰 필수)
+      parameters:
+        - in: path
+          name: mixJobId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: mix mp3
+          content:
+            audio/mpeg:
+              schema: { type: string, format: binary }
+        '403':
+          description: 토큰 검증 실패
+        '404':
+          description: mix 미완료 / 파일 없음
+
+  # ---------------------------------------------------------------- Subtitles
+  /api/v2/subtitles:
+    post:
+      tags: [Subtitles]
+      summary: 자동 자막 잡 제출 (Perso STT + Gemini 번역)
+      description: |
+        spec.targetLanguageCodes 가 비어 있으면 STT 만 (`originalSrt`). 비어 있지 않으면
+        각 언어별 Gemini 번역 SRT 도 함께 생성한다. source 는 multipart `file` 또는
+        `spec.editedRenderJobId` 둘 중 하나.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [spec]
               properties:
                 file:
                   type: string
@@ -43,13 +422,44 @@ paths:
           description: 잡 접수
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/SubtitleJobResponse'
+              schema: { $ref: '#/components/schemas/SubtitleJobResponse' }
+
+  /api/v2/subtitles/regenerate:
+    post:
+      tags: [Subtitles]
+      summary: 사용자 수정 SRT 로 다른 언어 자막 재생성 (Gemini only)
+      description: |
+        Perso STT 건너뛰고 업로드한 SRT 를 source 로 Gemini 번역만 수행. mediaType
+        같은 video/audio 플래그가 의미 없어 별도 DTO (`SubtitleRegenerateSpec`) 사용.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [file, spec]
+              properties:
+                file:
+                  type: string
+                  format: binary
+                  description: 사용자 수정한 SRT 텍스트
+                spec:
+                  type: string
+                  description: SubtitleRegenerateSpec JSON
+      responses:
+        '202':
+          description: 잡 접수
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/SubtitleJobResponse' }
 
   /api/v2/subtitles/{jobId}:
     get:
       tags: [Subtitles]
       summary: 자막 잡 상태
+      description: |
+        status=READY 일 때 `originalSrtUrl` + 언어별 `translatedSrtUrlsByLang` 가 채워진다.
+        `translatedSrtUrl` 은 구 클라이언트 호환용 — 첫 번역만 노출.
       parameters:
         - in: path
           name: jobId
@@ -60,8 +470,12 @@ paths:
           description: 상태
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/SubtitleStatusResponse'
+              schema: { $ref: '#/components/schemas/SubtitleStatusResponse' }
+        '404':
+          description: 잡 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /api/v2/subtitles/{jobId}/srt:
     get:
@@ -75,9 +489,8 @@ paths:
         - in: query
           name: lang
           required: true
-          schema:
-            type: string
-            enum: [original, translated]
+          description: '"original" 또는 ISO 언어 코드 (예: "en", "ja")'
+          schema: { type: string }
         - in: query
           name: token
           required: true
@@ -93,17 +506,21 @@ paths:
         '404':
           description: 잡/SRT 없음
 
+  # ---------------------------------------------------------------- AutoDub
   /api/v2/autodub:
     post:
       tags: [AutoDub]
       summary: 자동 더빙 잡 제출
+      description: |
+        source 는 multipart `file` 또는 `spec.editedRenderJobId` 둘 중 하나.
+        targetLanguageCode 는 sourceLanguageCode 와 달라야 함.
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [file, spec]
+              required: [spec]
               properties:
                 file:
                   type: string
@@ -116,13 +533,16 @@ paths:
           description: 잡 접수
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/AutoDubJobResponse'
+              schema: { $ref: '#/components/schemas/AutoDubJobResponse' }
 
   /api/v2/autodub/{jobId}:
     get:
       tags: [AutoDub]
       summary: 더빙 잡 상태
+      description: |
+        status=READY 일 때 `dubbedAudioUrl` (mp3) + `dubbedVideoUrl` (mp4) 가 동봉.
+        VIDEO 분기에서 audio 트랙 추출이 실패하면 `audioExtractFailed=true` 로 표시되고
+        `dubbedAudioUrl` 만 null, status 는 READY 유지.
       parameters:
         - in: path
           name: jobId
@@ -133,13 +553,17 @@ paths:
           description: 상태
           content:
             application/json:
-              schema:
-                $ref: '#/components/schemas/AutoDubStatusResponse'
+              schema: { $ref: '#/components/schemas/AutoDubStatusResponse' }
+        '404':
+          description: 잡 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
 
   /api/v2/autodub/{jobId}/audio:
     get:
       tags: [AutoDub]
-      summary: 더빙 오디오 스트림 (HMAC 토큰 필수)
+      summary: 더빙 오디오 mp3 스트림 (HMAC 토큰 필수)
       parameters:
         - in: path
           name: jobId
@@ -158,22 +582,458 @@ paths:
         '403':
           description: 토큰 검증 실패
         '404':
-          description: 잡 없음
+          description: 더빙 오디오 미준비 / 파일 없음
+
+  /api/v2/autodub/{jobId}/video:
+    get:
+      tags: [AutoDub]
+      summary: 더빙 영상 mp4 스트림 (HMAC 토큰 필수)
+      parameters:
+        - in: path
+          name: jobId
+          required: true
+          schema: { type: string }
+        - in: query
+          name: token
+          required: true
+          schema: { type: string }
+      responses:
+        '200':
+          description: mp4 스트림
+          content:
+            video/mp4:
+              schema: { type: string, format: binary }
+        '403':
+          description: 토큰 검증 실패
+        '404':
+          description: 더빙 영상 미준비 / 파일 없음
+
+  # ---------------------------------------------------------------- Chat
+  /api/v2/chat:
+    post:
+      tags: [Chat]
+      summary: Gemini function-calling 기반 편집 어시스턴트
+      description: |
+        모바일이 timeline 요약 (`ProjectContext`) + 대화 turns 를 보내면 Gemini 의
+        functionDeclarations 호출 결과를 `ChatResponse(kind=text|proposal)` 로 정규화.
+        proposal.steps 는 등록된 EDIT_TOOLS 의 functionDeclaration name 만 포함하며
+        최대 5개.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/ChatRequest' }
+      responses:
+        '200':
+          description: 응답
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ChatResponse' }
+        '400':
+          description: messages 비어 있음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '500':
+          description: Gemini 통신 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ---------------------------------------------------------------- Testdata (mock)
+  /api/v2/testdata/separation/list:
+    get:
+      tags: [Testdata]
+      summary: 개발용 mock 음성분리 폴더 목록
+      description: |
+        `testdata/<startSec>-<endSec>/` 디렉터리 구조를 스캔해 폴더별 stem 이름 (확장자 제외)
+        목록 반환. production 배포에는 testdata 디렉터리가 없어 404.
+      responses:
+        '200':
+          description: 폴더 목록
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: '#/components/schemas/TestdataSeparationFolder' }
+        '404':
+          description: testdata 디렉터리 없음
+
+  /api/v2/testdata/separation/{folder}/{stem}:
+    get:
+      tags: [Testdata]
+      summary: 개발용 mock stem 오디오
+      parameters:
+        - in: path
+          name: folder
+          required: true
+          description: '`<startSec>-<endSec>` 패턴 (예: `0-30`)'
+          schema: { type: string }
+        - in: path
+          name: stem
+          required: true
+          description: 확장자 제외 stem 파일 basename
+          schema: { type: string }
+      responses:
+        '200':
+          description: stem 오디오 (wav/mp3/m4a/aac/ogg/flac 중 첫 매치)
+          content:
+            audio/wav:
+              schema: { type: string, format: binary }
+            audio/mpeg:
+              schema: { type: string, format: binary }
+            audio/aac:
+              schema: { type: string, format: binary }
+            audio/ogg:
+              schema: { type: string, format: binary }
+            audio/flac:
+              schema: { type: string, format: binary }
+        '404':
+          description: 폴더/stem 파일 없음 / folder 패턴 invalid
 
 components:
   schemas:
+    # -------------------------- Common
     ErrorResponse:
       type: object
       required: [error]
       properties:
         error:
           type: string
-          description: 에러 메시지
+          description: 에러 메시지 또는 에러 코드 (클라이언트가 switch 해야 하는 경우 코드성)
         detail:
           type: string
           nullable: true
-          description: 상세 에러 정보
 
+    # -------------------------- Auth
+    GoogleAuthRequest:
+      type: object
+      required: [idToken]
+      properties:
+        idToken:
+          type: string
+          description: 모바일 native Google SDK 가 반환한 ID Token
+
+    AuthUser:
+      type: object
+      required: [sub, email, name]
+      properties:
+        sub: { type: string }
+        email: { type: string }
+        name: { type: string }
+        picture:
+          type: string
+          nullable: true
+
+    AuthResponse:
+      type: object
+      required: [accessToken, expiresAt, user]
+      properties:
+        accessToken:
+          type: string
+          description: HS256 JWT
+        expiresAt:
+          type: integer
+          format: int64
+          description: epoch millis
+        user: { $ref: '#/components/schemas/AuthUser' }
+
+    # -------------------------- Languages
+    LanguageOption:
+      type: object
+      required: [code, name]
+      properties:
+        code: { type: string }
+        name: { type: string }
+        nativeName:
+          type: string
+          nullable: true
+        supportsDubbing:
+          type: boolean
+          default: true
+        supportsSubtitles:
+          type: boolean
+          default: true
+
+    LanguageListResponse:
+      type: object
+      required: [languages]
+      properties:
+        languages:
+          type: array
+          items: { $ref: '#/components/schemas/LanguageOption' }
+
+    # -------------------------- Render
+    DubClip:
+      type: object
+      required: [audioFileKey, startMs, durationMs]
+      properties:
+        audioFileKey: { type: string, description: 'multipart `audio_<key>` 파트 매칭' }
+        startMs: { type: integer, format: int64 }
+        durationMs: { type: integer, format: int64 }
+        volume: { type: number, format: float, default: 1.0 }
+
+    BgmClip:
+      type: object
+      required: [audioFileKey, startMs]
+      properties:
+        audioFileKey: { type: string, description: 'multipart `bgm_<key>` 파트 매칭' }
+        startMs: { type: integer, format: int64 }
+        volume: { type: number, format: float, default: 1.0 }
+
+    ImageClip:
+      type: object
+      required: [imageFileKey, startMs, endMs, xPct, yPct, widthPct, heightPct]
+      properties:
+        imageFileKey: { type: string, description: 'multipart `image_<key>` 파트 매칭' }
+        startMs: { type: integer, format: int64 }
+        endMs: { type: integer, format: int64 }
+        xPct: { type: number, format: float }
+        yPct: { type: number, format: float }
+        widthPct: { type: number, format: float }
+        heightPct: { type: number, format: float }
+
+    Segment:
+      type: object
+      required: [sourceFileKey, type, order, durationMs]
+      properties:
+        sourceFileKey:
+          type: string
+          description: 'video segment 는 `video_<key>`, image segment 는 `segment_image_<key>` 매칭'
+        type:
+          type: string
+          enum: [VIDEO, IMAGE]
+        order: { type: integer }
+        durationMs: { type: integer, format: int64 }
+        trimStartMs: { type: integer, format: int64, nullable: true }
+        trimEndMs: { type: integer, format: int64, nullable: true }
+        width: { type: integer, nullable: true }
+        height: { type: integer, nullable: true }
+        imageXPct: { type: number, format: float, nullable: true }
+        imageYPct: { type: number, format: float, nullable: true }
+        imageWidthPct: { type: number, format: float, nullable: true }
+        imageHeightPct: { type: number, format: float, nullable: true }
+        volumeScale: { type: number, format: float, default: 1.0 }
+        speedScale: { type: number, format: float, default: 1.0 }
+
+    FrameConfig:
+      type: object
+      required: [width, height]
+      properties:
+        width: { type: integer }
+        height: { type: integer }
+        backgroundColorHex: { type: string, default: '#000000' }
+
+    SeparationStemSelectionDto:
+      type: object
+      required: [stemId, audioUrl]
+      properties:
+        stemId: { type: string }
+        audioUrl:
+          type: string
+          description: |
+            BFF 자체 HMAC URL 만 허용 — `/api/v2/separate/{jobId}/stem/{stemId}?token=...` 패턴.
+            외부 URL 은 SSRF 위험으로 reject.
+        volume: { type: number, format: float, default: 1.0 }
+
+    SeparationDirectiveDto:
+      type: object
+      required: [id, rangeStartMs, rangeEndMs, numberOfSpeakers, muteOriginalSegmentAudio]
+      properties:
+        id: { type: string }
+        rangeStartMs: { type: integer, format: int64 }
+        rangeEndMs: { type: integer, format: int64 }
+        numberOfSpeakers: { type: integer }
+        muteOriginalSegmentAudio: { type: boolean }
+        selections:
+          type: array
+          items: { $ref: '#/components/schemas/SeparationStemSelectionDto' }
+
+    RenderConfig:
+      type: object
+      required: [dubClips]
+      properties:
+        dubClips:
+          type: array
+          items: { $ref: '#/components/schemas/DubClip' }
+        videoDurationMs:
+          type: integer
+          format: int64
+          nullable: true
+          description: legacy (segments 미사용 시)
+        segments:
+          type: array
+          nullable: true
+          items: { $ref: '#/components/schemas/Segment' }
+        imageClips:
+          type: array
+          items: { $ref: '#/components/schemas/ImageClip' }
+        frame: { $ref: '#/components/schemas/FrameConfig' }
+        bgmClips:
+          type: array
+          items: { $ref: '#/components/schemas/BgmClip' }
+        audioOverrideKey:
+          type: string
+          nullable: true
+          description: multipart `audio_override` 파트 key
+        separationDirectives:
+          type: array
+          items: { $ref: '#/components/schemas/SeparationDirectiveDto' }
+        outputLanguageCode:
+          type: string
+          default: original
+        outputKind:
+          type: string
+          enum: [video, audio]
+          default: video
+          description: |
+            audio 모드는 segment audio 트랙들을 trim/concat + bgmClips mix → 단일 .m4a.
+            dubClips / audioOverride / separation / sticker / subtitle burn-in / imageClips
+            는 audio 모드에서 무시.
+
+    RenderResponse:
+      type: object
+      required: [jobId]
+      properties:
+        jobId: { type: string }
+
+    RenderStatusResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status:
+          type: string
+          enum: [QUEUED, PROCESSING, COMPLETED, FAILED]
+        progress: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+        progressReason:
+          type: string
+          nullable: true
+          description: '"queued" (ffmpeg permit 대기 중) 또는 null'
+
+    RenderInputCacheResponse:
+      type: object
+      required: [inputId, expiresAt, videoSizeBytes, audioCount]
+      properties:
+        inputId:
+          type: string
+          description: sha256(video bytes) prefix (hex)
+        expiresAt:
+          type: integer
+          format: int64
+          description: epoch millis (lastAccessAt + TTL)
+        videoSizeBytes:
+          type: integer
+          format: int64
+        audioCount: { type: integer }
+
+    # -------------------------- Separation
+    SeparationSpec:
+      type: object
+      required: [mediaType, numberOfSpeakers]
+      properties:
+        mediaType:
+          type: string
+          enum: [VIDEO, AUDIO]
+        numberOfSpeakers:
+          type: integer
+          minimum: 1
+          maximum: 10
+        sourceLanguageCode:
+          type: string
+          default: auto
+        trimStartMs:
+          type: integer
+          format: int64
+          nullable: true
+          description: trimStartMs / trimEndMs 는 함께 지정해야 함 (≥500ms 구간)
+        trimEndMs:
+          type: integer
+          format: int64
+          nullable: true
+        editedRenderJobId:
+          type: string
+          nullable: true
+          description: 완료된 `/render` 출력 재사용. file part 와 동시 지정 시 이 값이 우선.
+
+    SeparationResponse:
+      type: object
+      required: [jobId]
+      properties:
+        jobId: { type: string }
+
+    StemInfo:
+      type: object
+      required: [stemId, label, url]
+      properties:
+        stemId: { type: string }
+        label: { type: string }
+        url:
+          type: string
+          description: signed (HMAC token) BFF URL
+        durationMs:
+          type: integer
+          format: int64
+          nullable: true
+
+    SeparationStatusResponse:
+      type: object
+      required: [jobId, status]
+      properties:
+        jobId: { type: string }
+        status:
+          type: string
+          enum: [PENDING, UPLOADING_UPSTREAM, SUBMITTED, PROCESSING, DOWNLOADING, READY, FAILED, DISPOSED]
+        progress: { type: integer, nullable: true }
+        progressReason: { type: string, nullable: true }
+        error: { type: string, nullable: true }
+        stems:
+          type: array
+          items: { $ref: '#/components/schemas/StemInfo' }
+        mixJobId:
+          type: string
+          nullable: true
+          description: mix 가 이 separation 을 점유했을 때 그 mix jobId
+
+    StemMixSelection:
+      type: object
+      required: [stemId]
+      properties:
+        stemId: { type: string }
+        volume: { type: number, format: float, default: 1.0 }
+
+    StemMixRequest:
+      type: object
+      required: [stems]
+      properties:
+        stems:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/StemMixSelection' }
+
+    StemMixResponse:
+      type: object
+      required: [mixJobId]
+      properties:
+        mixJobId: { type: string }
+
+    StemMixStatusResponse:
+      type: object
+      required: [mixJobId, status]
+      properties:
+        mixJobId: { type: string }
+        status:
+          type: string
+          enum: [PROCESSING, COMPLETED, FAILED]
+        progress: { type: integer, nullable: true }
+        error: { type: string, nullable: true }
+        downloadUrl:
+          type: string
+          nullable: true
+          description: status=COMPLETED 일 때 signed BFF URL
+
+    # -------------------------- Subtitles
     SubtitleSpec:
       type: object
       required: [mediaType, sourceLanguageCode]
@@ -183,15 +1043,28 @@ components:
           enum: [VIDEO, AUDIO]
         sourceLanguageCode:
           type: string
-        targetLanguageCode:
-          type: string
-          nullable: true
-          description: null 또는 source 와 동일하면 번역 생략
+          description: ISO code. Perso STT 가 요구하므로 "auto" 불가
+        targetLanguageCodes:
+          type: array
+          items: { type: string }
+          description: 빈 리스트면 STT 만 (번역 생략). source 와 같은 lang 항목은 무시.
         numberOfSpeakers:
           type: integer
-          default: 1
           minimum: 1
           maximum: 10
+          default: 1
+        editedRenderJobId:
+          type: string
+          nullable: true
+
+    SubtitleRegenerateSpec:
+      type: object
+      required: [sourceLanguageCode]
+      properties:
+        sourceLanguageCode: { type: string }
+        targetLanguageCodes:
+          type: array
+          items: { type: string }
 
     SubtitleJobResponse:
       type: object
@@ -210,9 +1083,19 @@ components:
         progress: { type: integer, nullable: true }
         progressReason: { type: string, nullable: true }
         error: { type: string, nullable: true }
-        originalSrtUrl: { type: string, nullable: true }
-        translatedSrtUrl: { type: string, nullable: true }
+        originalSrtUrl:
+          type: string
+          nullable: true
+        translatedSrtUrlsByLang:
+          type: object
+          additionalProperties: { type: string }
+          description: 언어코드 → signed SRT URL
+        translatedSrtUrl:
+          type: string
+          nullable: true
+          description: legacy 단일 필드 (첫 번역) — 구 클라이언트 호환용
 
+    # -------------------------- AutoDub
     AutoDubSpec:
       type: object
       required: [mediaType, sourceLanguageCode, targetLanguageCode]
@@ -221,13 +1104,18 @@ components:
           type: string
           enum: [VIDEO, AUDIO]
         sourceLanguageCode: { type: string }
-        targetLanguageCode: { type: string }
+        targetLanguageCode:
+          type: string
+          description: sourceLanguageCode 와 달라야 함
         numberOfSpeakers:
           type: integer
-          default: 1
           minimum: 1
           maximum: 10
+          default: 1
         ttsModel:
+          type: string
+          nullable: true
+        editedRenderJobId:
           type: string
           nullable: true
 
@@ -248,5 +1136,176 @@ components:
         progress: { type: integer, nullable: true }
         progressReason: { type: string, nullable: true }
         error: { type: string, nullable: true }
-        dubbedAudioUrl: { type: string, nullable: true }
+        dubbedAudioUrl:
+          type: string
+          nullable: true
+        dubbedVideoUrl:
+          type: string
+          nullable: true
+        audioExtractFailed:
+          type: boolean
+          default: false
+          description: VIDEO 분기에서 audio 트랙 추출 실패 시 true (status 는 READY 유지)
 
+    # -------------------------- Chat
+    ChatMessage:
+      type: object
+      required: [role, content]
+      properties:
+        role:
+          type: string
+          enum: [user, model]
+        content: { type: string }
+
+    ContextSegment:
+      type: object
+      required: [id, startMs, endMs, sourceUri]
+      properties:
+        id: { type: string }
+        startMs: { type: integer, format: int64 }
+        endMs: { type: integer, format: int64 }
+        sourceUri: { type: string }
+        speedScale: { type: number, format: float, default: 1.0 }
+        volumeScale: { type: number, format: float, default: 1.0 }
+
+    ContextSubtitleClip:
+      type: object
+      required: [id, index, startMs, endMs, text, languageCode]
+      properties:
+        id: { type: string }
+        index: { type: integer }
+        startMs: { type: integer, format: int64 }
+        endMs: { type: integer, format: int64 }
+        text: { type: string }
+        languageCode: { type: string }
+
+    ContextDubClip:
+      type: object
+      required: [id, startMs, endMs, voiceId]
+      properties:
+        id: { type: string }
+        startMs: { type: integer, format: int64 }
+        endMs: { type: integer, format: int64 }
+        voiceId: { type: string }
+
+    ContextBgmClip:
+      type: object
+      required: [id, startMs, endMs]
+      properties:
+        id: { type: string }
+        startMs: { type: integer, format: int64 }
+        endMs: { type: integer, format: int64 }
+        volumeScale: { type: number, format: float, default: 1.0 }
+        speedScale: { type: number, format: float, default: 1.0 }
+
+    ContextStem:
+      type: object
+      required: [stemId, label, volume, selected]
+      properties:
+        stemId: { type: string }
+        label: { type: string }
+        volume: { type: number, format: float }
+        selected: { type: boolean }
+
+    ContextSeparationDirective:
+      type: object
+      required: [id, rangeStartMs, rangeEndMs, durationMs, numberOfSpeakers]
+      properties:
+        id: { type: string }
+        rangeStartMs: { type: integer, format: int64 }
+        rangeEndMs: { type: integer, format: int64 }
+        durationMs: { type: integer, format: int64 }
+        numberOfSpeakers: { type: integer }
+
+    ProjectContext:
+      type: object
+      properties:
+        segments:
+          type: array
+          items: { $ref: '#/components/schemas/ContextSegment' }
+        subtitleClips:
+          type: array
+          items: { $ref: '#/components/schemas/ContextSubtitleClip' }
+        dubClips:
+          type: array
+          items: { $ref: '#/components/schemas/ContextDubClip' }
+        bgmClips:
+          type: array
+          items: { $ref: '#/components/schemas/ContextBgmClip' }
+        separationStems:
+          type: array
+          items: { $ref: '#/components/schemas/ContextStem' }
+        separationDirectives:
+          type: array
+          items: { $ref: '#/components/schemas/ContextSeparationDirective' }
+        currentPlayheadMs: { type: integer, format: int64, default: 0 }
+        selectedSegmentId: { type: string, nullable: true }
+        selectedClipId: { type: string, nullable: true }
+        isRangeSelecting: { type: boolean, default: false }
+        pendingRangeStartMs: { type: integer, format: int64, nullable: true }
+        pendingRangeEndMs: { type: integer, format: int64, nullable: true }
+        videoDurationMs: { type: integer, format: int64, default: 0 }
+
+    ChatRequest:
+      type: object
+      required: [messages, projectContext]
+      properties:
+        messages:
+          type: array
+          minItems: 1
+          items: { $ref: '#/components/schemas/ChatMessage' }
+        projectContext: { $ref: '#/components/schemas/ProjectContext' }
+        locale:
+          type: string
+          default: ko
+
+    ToolCall:
+      type: object
+      required: [name, args]
+      properties:
+        name:
+          type: string
+          description: 등록된 EDIT_TOOLS functionDeclaration name
+        args:
+          type: object
+          additionalProperties: true
+
+    Proposal:
+      type: object
+      required: [rationale, steps]
+      properties:
+        rationale: { type: string }
+        steps:
+          type: array
+          maxItems: 5
+          items: { $ref: '#/components/schemas/ToolCall' }
+
+    ChatResponse:
+      type: object
+      required: [kind]
+      properties:
+        kind:
+          type: string
+          enum: [text, proposal]
+        text:
+          type: string
+          nullable: true
+        proposal:
+          allOf: [{ $ref: '#/components/schemas/Proposal' }]
+          nullable: true
+
+    # -------------------------- Testdata
+    TestdataSeparationFolder:
+      type: object
+      required: [folder, startSec, endSec, stems]
+      properties:
+        folder:
+          type: string
+          description: '`<startSec>-<endSec>` 패턴'
+        startSec: { type: integer }
+        endSec: { type: integer }
+        stems:
+          type: array
+          items:
+            type: string
+            description: 확장자 제외 basename
