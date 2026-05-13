@@ -1,12 +1,12 @@
 package com.vibi.bff.routes
 
+import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.MediaSourceResolver
 import io.ktor.http.content.MultiPartData
 import io.ktor.http.content.PartData
 import io.ktor.http.content.forEachPart
 import io.ktor.http.content.streamProvider
-import kotlinx.serialization.json.Json
 import java.io.File
 
 /**
@@ -104,7 +104,10 @@ internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
                 }
                 is PartData.FormItem -> {
                     if (part.name == specFieldName) {
-                        spec = Json.decodeFromString<T>(part.value)
+                        // AppJson 사용 — ignoreUnknownKeys=true. 구 클라이언트가 새 DTO 에 없는
+                        // 필드 (예: SubtitleSpec.mediaType/numberOfSpeakers 를 /regenerate 의
+                        // SubtitleRegenerateSpec 에 보내는 케이스) 를 보내도 400 대신 무시.
+                        spec = AppJson.decodeFromString<T>(part.value)
                     }
                 }
                 else -> {}
