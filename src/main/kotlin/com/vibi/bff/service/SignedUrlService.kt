@@ -23,7 +23,7 @@ class SignedUrlService(
     private val keySpec = SecretKeySpec(secret.toByteArray(Charsets.UTF_8), "HmacSHA256")
 
     fun sign(jobId: String, resourceId: String, ttlSec: Long): String {
-        require(ttlSec in 1..86_400) { "ttlSec out of range: $ttlSec" }
+        require(ttlSec in 1..604_800) { "ttlSec out of range: $ttlSec" }
         val expiresAt = clock() + ttlSec
         val signature = computeSignature(jobId, resourceId, expiresAt)
         return "$expiresAt.$signature"

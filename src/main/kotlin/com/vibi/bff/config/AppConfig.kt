@@ -137,8 +137,8 @@ data class SeparationConfig(
         }
         require(abandonTtlMs >= 60_000) { "SEPARATION_ABANDON_TTL_MS must be >= 60000 (got $abandonTtlMs)" }
         require(mixTtlMs >= 60_000) { "SEPARATION_MIX_TTL_MS must be >= 60000 (got $mixTtlMs)" }
-        require(urlTtlSec in 60..86_400) { "SEPARATION_URL_TTL_SEC must be in 60..86400 (got $urlTtlSec)" }
-        require(mixUrlTtlSec in 60..86_400) { "SEPARATION_MIX_URL_TTL_SEC must be in 60..86400 (got $mixUrlTtlSec)" }
+        require(urlTtlSec in 60..604_800) { "SEPARATION_URL_TTL_SEC must be in 60..604800 (got $urlTtlSec)" }
+        require(mixUrlTtlSec in 60..604_800) { "SEPARATION_MIX_URL_TTL_SEC must be in 60..604800 (got $mixUrlTtlSec)" }
     }
 }
 
