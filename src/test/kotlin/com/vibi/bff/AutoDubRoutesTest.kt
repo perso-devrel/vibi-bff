@@ -50,7 +50,7 @@ class AutoDubRoutesTest {
         }
         routing {
             route("/api/v2") {
-                autoDubRoutes(autoDubService, signer, fileStorage, appConfig, mediaSourceResolver)
+                autoDubRoutes(autoDubService, signer, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore = null)
             }
         }
         block()

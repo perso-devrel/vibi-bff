@@ -9,7 +9,7 @@ import kotlin.test.*
 class FileStorageServiceTest {
 
     private val testDir = File(System.getProperty("java.io.tmpdir"), "vibi-test-storage-unit").apply { mkdirs() }
-    private val config = StorageConfig(basePath = testDir.path)
+    private val config = StorageConfig(basePath = testDir.path, gcsBucket = "", gcsSignedUrlTtlSec = 900)
     private lateinit var service: FileStorageService
 
     @BeforeTest

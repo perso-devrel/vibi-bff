@@ -23,6 +23,37 @@ import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicInteger
 
+/**
+ * 출력 영상 인코딩 프로필. CRF 가 핵심 — x264 의 perceptual quality 단위로,
+ * +6 마다 비트레이트 약 2배 차이 (= 사이즈 절반). audio bitrate 는 작아도 음질 손실 작음.
+ *
+ * preset 은 "medium" 고정 — Cloud Run 은 CPU-second 과금이라 `slow` 는 비용 4~5x. CRF 가 같은
+ * 한 preset 차이의 시각적 quality 효과는 0.5dB 미만이라 비용 trade-off 가 안 맞음. preset 을
+ * 바꿔야 한다면 별도 운영 결정.
+ *
+ * 사이즈 가이드 (1080p/30fps 1분 영상 기준):
+ *   high   ≈ 25~35 MB
+ *   medium ≈ 12~18 MB  (legacy 동작과 동등)
+ *   low    ≈  6~10 MB  (~50% egress 절감)
+ *
+ * Input validation 은 [com.vibi.bff.model.RenderConfig.init] 와 [RenderService.submitRender]
+ * 에서 일어나 [of] 도달 전에 high/medium/low 외 값은 reject 됨.
+ */
+internal data class QualityProfile(
+    val crf: Int,
+    val preset: String,
+    val audioBitrate: String,
+) {
+    companion object {
+        fun of(name: String): QualityProfile = when (name) {
+            "high"   -> QualityProfile(crf = 20, preset = "medium", audioBitrate = "192k")
+            "medium" -> QualityProfile(crf = 23, preset = "fast",   audioBitrate = "192k")
+            "low"    -> QualityProfile(crf = 28, preset = "fast",   audioBitrate = "128k")
+            else     -> error("unreachable: validated upstream, got '$name'")
+        }
+    }
+}
+
 data class RenderJob(
     val jobId: String,
     @Volatile var status: String = "PENDING",
@@ -199,10 +230,13 @@ class RenderService(
          * sticker overlay · subtitle burn-in · imageClips · dubClips ·
          * audioOverride · separation stems 모두 무시된다. */
         outputKind: String = "video",
+        /** 최종 인코딩 품질 프로필 (CRF/preset/audio). high/medium/low. audio 모드는 무시. */
+        quality: String = "medium",
     ): String {
         require(outputKind == "video" || outputKind == "audio") {
             "outputKind must be 'video' or 'audio' (got '$outputKind')"
         }
+        val qualityProfile = QualityProfile.of(quality)
         val jobId = "render-${UUID.randomUUID()}"
         val outputExt = if (outputKind == "audio") "m4a" else "mp4"
         val outputFile = File(renderDir, "$jobId.$outputExt")
@@ -251,7 +285,7 @@ class RenderService(
                         job, segments, videoFiles, segmentImageFiles,
                         audioFiles, imageFiles, subtitlesFile, dubClips, imageClips,
                         frame, bgmAudioFiles, bgmClips, audioOverrideFile,
-                        separationDirectives,
+                        separationDirectives, qualityProfile,
                     )
                 } else {
                     // Legacy path: single video
@@ -267,7 +301,7 @@ class RenderService(
                         videoFile, audioFiles, imageFiles, subtitlesFile,
                         dubClips, imageClips, duration, outputFile, outW, outH,
                         bgmAudioFiles, bgmClips, audioOverrideFile,
-                        separationDirectives,
+                        separationDirectives, qualityProfile,
                     )
                     log.info("Starting legacy ffmpeg render: jobId={}", jobId)
                     process = ProcessBuilder(command).redirectErrorStream(true).start()
@@ -601,6 +635,7 @@ class RenderService(
         bgmClips: List<BgmClip>,
         audioOverrideFile: File?,
         separationDirectives: List<DirectiveWithStemFiles>,
+        qualityProfile: QualityProfile,
     ) {
         require(segments.isNotEmpty()) { "segments must not be empty" }
         val tempDir = File(renderDir, "tmp_${job.jobId}")
@@ -663,7 +698,7 @@ class RenderService(
                 concatFile, audioFiles, imageFiles, subtitlesFile,
                 dubClips, imageClips, totalDurationMs, job.outputFile, outW, outH,
                 bgmAudioFiles, bgmClips, audioOverrideFile,
-                separationDirectives,
+                separationDirectives, qualityProfile,
             )
             log.info("Starting final ffmpeg render: jobId={}", job.jobId)
             val proc = ProcessBuilder(command).redirectErrorStream(true).start()
@@ -886,6 +921,7 @@ class RenderService(
         bgmClips: List<BgmClip> = emptyList(),
         audioOverrideFile: File? = null,
         separationDirectives: List<DirectiveWithStemFiles> = emptyList(),
+        qualityProfile: QualityProfile = QualityProfile.of("medium"),
     ): List<String> {
         val cmd = mutableListOf("ffmpeg", "-y")
         cmd.addAll(listOf("-i", videoFile.absolutePath))
@@ -1057,9 +1093,10 @@ class RenderService(
             "-map", "[vout]",
             "-map", "[aout]",
             "-c:v", "libx264",
-            "-preset", "fast",
+            "-preset", qualityProfile.preset,
+            "-crf", qualityProfile.crf.toString(),
             "-c:a", "aac",
-            "-b:a", "192k",
+            "-b:a", qualityProfile.audioBitrate,
             "-movflags", "+faststart",
             "-t", secondsToFfmpegArg(videoDurationMs / 1000.0),
             "-progress", "pipe:1",

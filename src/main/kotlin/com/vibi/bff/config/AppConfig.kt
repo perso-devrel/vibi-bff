@@ -13,7 +13,24 @@ data class AppConfig(
 
 data class StorageConfig(
     val basePath: String,
-)
+    /**
+     * GCS bucket — 설정 시 download 엔드포인트가 산출물을 업로드 후 V4 signed URL 로
+     * 302 redirect. blank 면 기존 respondFile streaming 으로 fallback (로컬 dev / GCS 미사용 환경).
+     */
+    val gcsBucket: String,
+    /**
+     * V4 signed URL TTL. 60..86400 범위. 모바일이 status 응답 받자마자 다운로드한다는 가정.
+     */
+    val gcsSignedUrlTtlSec: Long,
+) {
+    init {
+        if (gcsBucket.isNotBlank()) {
+            require(gcsSignedUrlTtlSec in 60..86_400) {
+                "GCS_SIGNED_URL_TTL_SEC must be in 60..86400 (got $gcsSignedUrlTtlSec)"
+            }
+        }
+    }
+}
 
 data class PersoConfig(
     val apiKey: String,
@@ -136,6 +153,8 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     return AppConfig(
         storage = StorageConfig(
             basePath = storage.property("basePath").getString(),
+            gcsBucket = storage.propertyOrNull("gcsBucket")?.getString()?.trim().orEmpty(),
+            gcsSignedUrlTtlSec = storage.propertyOrNull("gcsSignedUrlTtlSec")?.getString()?.toLong() ?: 900L,
         ),
         baseUrl = vibi.property("baseUrl").getString(),
         perso = PersoConfig(

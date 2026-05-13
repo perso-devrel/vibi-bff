@@ -22,7 +22,11 @@ fun testAppConfig(
     storagePath: String,
     baseUrl: String = "http://localhost:8080",
 ): AppConfig = AppConfig(
-    storage = StorageConfig(basePath = storagePath),
+    storage = StorageConfig(
+        basePath = storagePath,
+        gcsBucket = "",
+        gcsSignedUrlTtlSec = 900,
+    ),
     baseUrl = baseUrl,
     perso = PersoConfig(
         apiKey = "pk_test_xxxxxxxxxxxxxxxxxxxx",

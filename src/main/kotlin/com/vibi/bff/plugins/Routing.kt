@@ -13,6 +13,7 @@ import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.AutoDubService
 import com.vibi.bff.service.AutoSubtitleService
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.RenderInputCacheService
@@ -45,6 +46,7 @@ fun Application.configureRouting(
     renderInputCache: RenderInputCacheService,
     mediaSourceResolver: MediaSourceResolver,
     authService: AuthService,
+    gcsObjectStore: GcsObjectStore?,
 ) {
     routing {
         swaggerUI(path = "swagger", swaggerFile = "openapi/vibi-bff.yaml")
@@ -55,10 +57,11 @@ fun Application.configureRouting(
             renderRoutes(
                 renderService, fileStorage, stemMixService,
                 separationService, signedUrlService, httpClient, renderInputCache,
+                gcsObjectStore,
             )
-            separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig, mediaSourceResolver)
-            subtitleRoutes(autoSubtitleService, signedUrlService, fileStorage, appConfig, mediaSourceResolver)
-            autoDubRoutes(autoDubService, signedUrlService, fileStorage, appConfig, mediaSourceResolver)
+            separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore)
+            subtitleRoutes(autoSubtitleService, signedUrlService, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore)
+            autoDubRoutes(autoDubService, signedUrlService, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore)
             chatRoutes(geminiClient)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.

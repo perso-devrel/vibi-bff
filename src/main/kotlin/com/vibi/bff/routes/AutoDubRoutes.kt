@@ -8,6 +8,7 @@ import com.vibi.bff.model.AutoDubStatusResponse
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.service.AutoDubService
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.SignedUrlService
 import io.ktor.http.*
@@ -21,6 +22,7 @@ fun Route.autoDubRoutes(
     fileStorage: FileStorageService,
     appConfig: AppConfig,
     mediaSourceResolver: MediaSourceResolver,
+    gcsObjectStore: GcsObjectStore?,
 ) {
     route("/autodub") {
         // POST /api/v2/autodub — submit
@@ -86,13 +88,13 @@ fun Route.autoDubRoutes(
             val file = job.dubbedVideoFile
                 ?: throw NotFoundException("Dubbed video not ready")
             if (!file.exists()) throw NotFoundException("Dubbed video file missing on disk")
-            call.response.header(
-                HttpHeaders.ContentDisposition,
-                ContentDisposition.Attachment.withParameter(
-                    ContentDisposition.Parameters.FileName, "$jobId.mp4"
-                ).toString()
+            call.respondDownload(
+                file = file,
+                objectKey = "autodub/$jobId/video.mp4",
+                contentType = ContentType("video", "mp4"),
+                downloadFilename = "$jobId.mp4",
+                gcs = gcsObjectStore,
             )
-            call.respondFile(file)
         }
 
         // GET /api/v2/autodub/{jobId}/audio?token=...
@@ -113,13 +115,13 @@ fun Route.autoDubRoutes(
             if (!file.exists()) {
                 throw NotFoundException("Dubbed audio file missing on disk")
             }
-            call.response.header(
-                HttpHeaders.ContentDisposition,
-                ContentDisposition.Attachment.withParameter(
-                    ContentDisposition.Parameters.FileName, "$jobId.mp3"
-                ).toString()
+            call.respondDownload(
+                file = file,
+                objectKey = "autodub/$jobId/audio.mp3",
+                contentType = ContentType("audio", "mpeg"),
+                downloadFilename = "$jobId.mp3",
+                gcs = gcsObjectStore,
             )
-            call.respondFile(file)
         }
     }
 }

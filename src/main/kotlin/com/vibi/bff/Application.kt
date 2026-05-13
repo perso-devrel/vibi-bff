@@ -5,6 +5,7 @@ import com.vibi.bff.plugins.*
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.AutoDubService
 import com.vibi.bff.service.AutoSubtitleService
+import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.MediaSourceResolver
@@ -101,6 +102,10 @@ fun Application.module() {
 
     val fileStorage = FileStorageService(appConfig.storage)
 
+    // GCS_BUCKET 설정 시 download 엔드포인트가 V4 signed URL redirect 로 Cloud Run egress
+    // 와 인스턴스 점유 분리. blank 면 null → respondFile streaming fallback (로컬 dev).
+    val gcsObjectStore = GcsObjectStore.fromConfig(appConfig.storage)
+
     // Concurrency cap for ffmpeg fan-out. RENDER_MAX_CONCURRENT can be set
     // explicitly in deployments where the autoreckoned (CPU/2) value is wrong
     // (containerized hosts often misreport availableProcessors).
@@ -191,7 +196,7 @@ fun Application.module() {
         fileStorage, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
         autoSubtitleService, autoDubService, geminiClient, httpClient, renderInputCache,
-        mediaSourceResolver, authService,
+        mediaSourceResolver, authService, gcsObjectStore,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(

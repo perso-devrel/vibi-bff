@@ -9,6 +9,7 @@ import com.vibi.bff.model.SubtitleStatusResponse
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.service.AutoSubtitleService
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.SignedUrlService
 import io.ktor.http.*
@@ -22,6 +23,7 @@ fun Route.subtitleRoutes(
     fileStorage: FileStorageService,
     appConfig: AppConfig,
     mediaSourceResolver: MediaSourceResolver,
+    gcsObjectStore: GcsObjectStore?,
 ) {
     route("/subtitles") {
         // POST /api/v2/subtitles — submit
@@ -111,11 +113,13 @@ fun Route.subtitleRoutes(
                 else job.translatedSrtFiles[lang]
             if (file == null) throw NotFoundException("SRT not available: $lang")
             if (!file.exists()) throw NotFoundException("SRT file missing on disk")
-            call.response.header(
-                HttpHeaders.ContentType,
-                ContentType("application", "x-subrip").toString(),
+            call.respondDownload(
+                file = file,
+                objectKey = "subtitles/$jobId/$lang.srt",
+                contentType = ContentType("application", "x-subrip"),
+                downloadFilename = null,
+                gcs = gcsObjectStore,
             )
-            call.respondFile(file)
         }
     }
 }

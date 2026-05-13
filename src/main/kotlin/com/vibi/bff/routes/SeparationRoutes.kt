@@ -6,6 +6,7 @@ import com.vibi.bff.model.*
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.MediaTrimmer
 import com.vibi.bff.service.SeparationService
@@ -26,6 +27,7 @@ fun Route.separationRoutes(
     fileStorage: FileStorageService,
     appConfig: AppConfig,
     mediaSourceResolver: MediaSourceResolver,
+    gcsObjectStore: GcsObjectStore?,
 ) {
     route("/separate") {
         // POST /api/v2/separate — submit job
@@ -111,7 +113,14 @@ fun Route.separationRoutes(
             if (!stem.file.exists()) {
                 throw NotFoundException("Stem file missing on disk")
             }
-            call.respondFile(stem.file)
+            val ext = stem.file.extension.ifBlank { "wav" }
+            call.respondDownload(
+                file = stem.file,
+                objectKey = "separation/$jobId/${stem.stemId}.$ext",
+                contentType = contentTypeForExtension(ext, ContentType("audio", "wav")),
+                downloadFilename = "${stem.stemId}.$ext",
+                gcs = gcsObjectStore,
+            )
         }
 
         // POST /api/v2/separate/{jobId}/mix — kick off mixing; on success, stems are disposed
@@ -188,13 +197,13 @@ fun Route.separationRoutes(
             if (job.status != "COMPLETED" || !job.outputFile.exists()) {
                 throw NotFoundException("Mix not ready: status=${job.status}")
             }
-            call.response.header(
-                HttpHeaders.ContentDisposition,
-                ContentDisposition.Attachment.withParameter(
-                    ContentDisposition.Parameters.FileName, "$mixJobId.mp3"
-                ).toString()
+            call.respondDownload(
+                file = job.outputFile,
+                objectKey = "separation/mix/$mixJobId.mp3",
+                contentType = ContentType("audio", "mpeg"),
+                downloadFilename = "$mixJobId.mp3",
+                gcs = gcsObjectStore,
             )
-            call.respondFile(job.outputFile)
         }
     }
 }

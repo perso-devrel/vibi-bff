@@ -17,6 +17,7 @@
 | `unauthorized_client — repository not allowed` | provider `attribute-condition` 이 이 repo 를 허용하지 않음 |
 | `Permission 'iam.serviceAccounts.getAccessToken' denied` | SA 에 `roles/iam.workloadIdentityUser` binding 누락 |
 | `gcloud run deploy: Permission denied` | SA 에 Cloud Run / Cloud Build / Artifact Registry 권한 누락 (배포 권한은 runtime 권한과 별개) |
+| 배포 성공 후 다운로드 endpoint 만 500 | `vars.GCS_BUCKET` 오타 / bucket 미존재 / runtime SA 에 `serviceAccountTokenCreator` self-binding 누락 (V4 signed URL 발급 권한) |
 
 ---
 
@@ -85,6 +86,31 @@ repo → **Settings → Secrets and variables → Actions → New repository sec
 | `GCP_SA_EMAIL` | `vibi-bff-sa@<PROJECT_ID>.iam.gserviceaccount.com` | |
 | `GCP_PROJECT_ID` | `<PROJECT_ID>` | project ID (문자열) |
 
+또한 secrets 탭에서 추가:
+
+| Secret | 값 |
+|---|---|
+| `GOOGLE_OAUTH_CLIENT_IDS` | 콤마 분리 Google OAuth client ID (iOS / Android / Web) |
+
+---
+
+## 2.5) GitHub Variables (선택)
+
+같은 화면의 **Variables** 탭. 설정 안 해도 워크플로우는 돌지만, 기능별 활성화 여부에
+영향. cloud-run.sh 첫 부트스트랩으로 만든 GCS bucket 을 사용하려면 `GCS_BUCKET` 필수.
+
+| Variable | 값 예시 | 미설정 시 동작 |
+|---|---|---|
+| `BFF_BASE_URL` | `https://api.vibi.fm` | Cloud Run 자동 발급 URL self-reference |
+| `CORS_ALLOWED_ORIGINS` | 콤마 분리 origin | 빈 값 (CORS 비활성) |
+| `GCS_BUCKET` | `<PROJECT_ID>-vibi-bff-artifacts` (cloud-run.sh default) | **빈 값 → 다운로드 endpoint 가 Cloud Run streaming 으로 fallback**. GCS egress 분리 효과 없음. |
+
+> Signed URL TTL 은 application.conf 의 `gcsSignedUrlTtlSec = "900"` (15분) default 사용.
+> 바꿔야 하면 그때 `GCS_SIGNED_URL_TTL_SEC` var 추가 — 기본값은 var 없이도 적용됨.
+
+`GCS_BUCKET` 값은 **반드시 cloud-run.sh 가 만든 bucket 이름과 일치**해야 함 — 다른 이름이면
+런타임 upload 가 권한 / 존재 에러로 실패. cloud-run.sh 의 `GCS_BUCKET="${GCS_BUCKET:-${PROJECT_ID}-vibi-bff-artifacts}"` 로 만든 default 이름을 그대로 넣으면 안전.
+
 ---
 
 ## 3) 검증
@@ -147,6 +173,24 @@ gcloud iam workload-identity-pools providers update-oidc github-provider \
 
 위 부트스트랩의 `for ROLE in ...` 블록 다시 실행. `roles/iam.serviceAccountUser` 가 빠지면
 Cloud Run 이 runtime SA 를 attach 못 함.
+
+### 다운로드 endpoint 가 500 / signed URL 발급 실패
+
+배포는 성공했는데 `/api/v2/render/{jobId}/download` 등이 500 반환:
+
+1. **`vars.GCS_BUCKET` 값이 실제 bucket 과 다름** — cloud-run.sh 가 만든 이름과 정확히 일치 확인.
+   `gcloud storage buckets list --filter="name:${PROJECT_ID}-vibi-bff-artifacts"`.
+2. **runtime SA 에 `roles/iam.serviceAccountTokenCreator` self-binding 누락** — V4 signed URL
+   발급 시 Cloud Run ADC 가 IAM `signBlob` API 를 호출하는데 권한 없으면 발급 실패. cloud-run.sh
+   를 다시 실행해 binding 복구:
+   ```bash
+   gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
+     --member="serviceAccount:$SA_EMAIL" \
+     --role="roles/iam.serviceAccountTokenCreator"
+   ```
+3. **`iamcredentials.googleapis.com` API 비활성** — `gcloud services enable iamcredentials.googleapis.com`.
+
+`vars.GCS_BUCKET` 를 빈 값으로 두면 위 모두 불필요 — 다운로드가 Cloud Run streaming 으로 fallback.
 
 ### `Cloud Build` 빌드 실패
 

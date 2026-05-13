@@ -57,7 +57,7 @@ class SeparationRoutesTest {
         }
         routing {
             route("/api/v2") {
-                separationRoutes(separationService, stemMixService, signer, fileStorage, appConfig, mediaSourceResolver)
+                separationRoutes(separationService, stemMixService, signer, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore = null)
             }
         }
         block()

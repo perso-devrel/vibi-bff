@@ -11,6 +11,7 @@ import com.vibi.bff.service.AudioPart
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.RenderInputCacheService
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
@@ -39,6 +40,7 @@ fun Route.renderRoutes(
     signedUrlService: SignedUrlService,
     @Suppress("UNUSED_PARAMETER") httpClient: HttpClient,
     inputCacheService: RenderInputCacheService,
+    gcsObjectStore: GcsObjectStore?,
 ) {
     route("/render") {
         // POST /api/v2/render/inputs — shared input cache. Mobile uploads the
@@ -311,6 +313,7 @@ fun Route.renderRoutes(
                 separationDirectives = resolvedDirectives,
                 inputFilesToCleanup = inputFiles,
                 outputKind = config.outputKind,
+                quality = config.quality,
             )
 
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
@@ -341,25 +344,15 @@ fun Route.renderRoutes(
                 throw NotFoundException("Render not ready: status=${job.status}")
             }
 
-            // outputFile 의 실제 확장자에 따라 Content-Disposition 의 filename
-            // 과 Content-Type 결정. audio 모드 (.m4a) / video 모드 (.mp4) 모두 커버.
-            // respondFile 호출 직후엔 이미 응답이 시작되므로 모든 헤더는 그 전에.
-            val fileName = "$jobId.${job.outputFile.extension.ifBlank { "mp4" }}"
-            val contentType = when (job.outputFile.extension.lowercase()) {
-                "m4a", "mp4a" -> ContentType("audio", "mp4")
-                "mp3" -> ContentType("audio", "mpeg")
-                "wav" -> ContentType("audio", "wav")
-                "mp4" -> ContentType("video", "mp4")
-                else -> ContentType.Application.OctetStream
-            }
-            call.response.header(
-                HttpHeaders.ContentDisposition,
-                ContentDisposition.Attachment.withParameter(
-                    ContentDisposition.Parameters.FileName, fileName
-                ).toString()
+            val ext = job.outputFile.extension.ifBlank { "mp4" }
+            val fileName = "$jobId.$ext"
+            call.respondDownload(
+                file = job.outputFile,
+                objectKey = "render/$jobId/$fileName",
+                contentType = contentTypeForExtension(ext, ContentType.Application.OctetStream),
+                downloadFilename = fileName,
+                gcs = gcsObjectStore,
             )
-            call.response.header(HttpHeaders.ContentType, contentType.toString())
-            call.respondFile(job.outputFile)
         }
     }
 }

@@ -57,6 +57,12 @@ dependencies {
     // Apache Commons Compress — Perso audio-separation 의 OriginalVoiceSpeakers .tar archive 풀이용.
     implementation("org.apache.commons:commons-compress:1.26.2")
 
+    // Google Cloud Storage — Cloud Run egress 분리. 큰 산출물 (render mp4, dub mp3/mp4, stem)
+    // 을 GCS 에 업로드 후 V4 signed URL 로 클라이언트가 직접 다운로드. Cloud Run 인스턴스가
+    // 바이트 전송으로 잠기지 않아 max-instances=2 cap 에서 동시 다운로드 처리량 회복.
+    // 미설정 (GCS_BUCKET blank) 일 때는 로컬 디스크 fallback 으로 동작.
+    implementation("com.google.cloud:google-cloud-storage:2.43.0")
+
     // Testing
     testImplementation("io.ktor:ktor-server-test-host:$ktor_version")
     testImplementation("io.ktor:ktor-client-content-negotiation:$ktor_version")

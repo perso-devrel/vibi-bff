@@ -142,10 +142,22 @@ data class RenderConfig(
      * 기존 클라이언트가 필드 없이 보내면 default "video" 로 하위 호환.
      */
     val outputKind: String = "video",
+    /**
+     * 출력 영상 품질 프로필. 파일 사이즈 = egress 비용 직결.
+     *   "high"   — CRF 20, preset slow, audio 192k. 시각적 무손실급, 사이즈 큼.
+     *   "medium" — CRF 23, preset fast, audio 192k. 기본값. 기존 동작과 동일.
+     *   "low"    — CRF 28, preset fast, audio 128k. medium 대비 ~50% 작은 파일.
+     * audio 모드 (outputKind="audio") 에선 quality 무시 — 오디오 비트레이트는
+     * 자막/분리 파이프라인 입력 품질 보장 위해 별도 유지.
+     */
+    val quality: String = "medium",
 ) {
     init {
         require(outputKind == "video" || outputKind == "audio") {
             "outputKind must be 'video' or 'audio' (got '$outputKind')"
+        }
+        require(quality == "high" || quality == "medium" || quality == "low") {
+            "quality must be 'high', 'medium', or 'low' (got '$quality')"
         }
     }
 }

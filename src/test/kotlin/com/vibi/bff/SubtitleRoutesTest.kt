@@ -50,7 +50,7 @@ class SubtitleRoutesTest {
         }
         routing {
             route("/api/v2") {
-                subtitleRoutes(subtitleService, signer, fileStorage, appConfig, mediaSourceResolver)
+                subtitleRoutes(subtitleService, signer, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore = null)
             }
         }
         block()
