@@ -154,6 +154,16 @@ object ChatToolDefs {
             ),
             required = listOf("clipId", "volumeScale"),
         ),
+        fn(
+            name = "update_bgm_range",
+            description = "Align a BGM clip to a specific timeline range. Sets the BGM start to newStartMs and adjusts speedScale so the clip's effective duration matches (newEndMs - newStartMs). Use this for 'BGM 을 분리 구간에 맞춰' style requests. Half-open [newStartMs, newEndMs).",
+            properties = mapOf(
+                "clipId" to schema("string", "Target BGM clip id."),
+                "newStartMs" to schema("integer", "New BGM start ms, INCLUSIVE (global timeline)."),
+                "newEndMs" to schema("integer", "New BGM end ms, EXCLUSIVE (global timeline). Half-open."),
+            ),
+            required = listOf("clipId", "newStartMs", "newEndMs"),
+        ),
         // --- BGM 자막·더빙 (Stage -1 prereq 완료 후 활성) ---
         fn(
             name = "generate_subtitles_for_bgm",

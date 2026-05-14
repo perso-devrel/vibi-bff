@@ -30,6 +30,7 @@ data class ProjectContext(
     val bgmClips: List<ContextBgmClip> = emptyList(),
     val separationStems: List<ContextStem> = emptyList(),
     val separationDirectives: List<ContextSeparationDirective> = emptyList(),
+    val processingSeparations: List<ContextProcessingSeparation> = emptyList(),
     val currentPlayheadMs: Long = 0L,
     val selectedSegmentId: String? = null,
     val selectedClipId: String? = null,
@@ -97,6 +98,18 @@ data class ContextSeparationDirective(
     val rangeEndMs: Long,
     val durationMs: Long,
     val numberOfSpeakers: Int,
+)
+
+/**
+ * 진행 중인 음원분리 잡 — 아직 directive 로 commit 되지 않음. Gemini 가
+ * (1) "지금 분리 중인 거 끝나면" 발화 매칭 (2) WF-4 중복 분리 회피 (3) WF-7 BGM 정렬 candidate
+ * 로 사용. presence-only — range 외 metadata (jobId/progress/duration) 은 노출 안 함
+ * (모델이 참조할 필요 없음, 토큰 비용 절감).
+ */
+@Serializable
+data class ContextProcessingSeparation(
+    val rangeStartMs: Long,
+    val rangeEndMs: Long,
 )
 
 /** Gemini 응답 형태. kind=text 또는 kind=proposal 둘 중 하나. */
