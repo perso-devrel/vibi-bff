@@ -1,6 +1,7 @@
 package com.vibi.bff
 
 import com.vibi.bff.config.loadConfig
+import com.vibi.bff.db.DbBootstrap
 import com.vibi.bff.plugins.*
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.AutoDubService
@@ -15,6 +16,7 @@ import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.StemMixService
+import com.vibi.bff.service.UserRepository
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -66,6 +68,11 @@ fun Application.module() {
     }
     // AuthConfig 자체 init { } 가 GOOGLE_OAUTH_CLIENT_IDS / AUTH_JWT_SECRET 길이를
     // 검증하므로 여기 추가 require 불필요. 단 boot 시 명확히 fail-fast 되는지 확인 OK.
+
+    // DB 부트스트랩 — Flyway 가 V*__*.sql 적용 후 Exposed Database.connect. Postgres
+    // pool 이 살아 있어야 AuthService 의 user upsert 가 동작하므로 HTTP client 보다 먼저.
+    val dataSource = DbBootstrap.init(appConfig.db)
+    val userRepository = UserRepository()
 
     // Vertex AI / Gemini credentials are validated lazily on the first
     // translation call, so the server can boot without them in dev when
@@ -149,7 +156,7 @@ fun Application.module() {
         mixTtlMs = appConfig.separation.mixTtlMs,
     )
 
-    val authService = AuthService(appConfig.auth, httpClient)
+    val authService = AuthService(appConfig.auth, httpClient, userRepository)
     val geminiClient = GeminiClient(appConfig.gemini, httpClient)
     val autoSubtitleService = AutoSubtitleService(
         persoClient = persoClient,
@@ -207,6 +214,7 @@ fun Application.module() {
         autoSubtitleService::shutdown,
         autoDubService::shutdown,
         { cacheCleanupScope.cancel() },
+        dataSource::close,
     )
     monitor.subscribe(ApplicationStopped) {
         shutdownHooks.forEach { it() }

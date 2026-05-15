@@ -2,6 +2,7 @@ package com.vibi.bff
 
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.config.AuthConfig
+import com.vibi.bff.config.DbConfig
 import com.vibi.bff.config.GeminiConfig
 import com.vibi.bff.config.PersoConfig
 import com.vibi.bff.config.SeparationConfig
@@ -52,7 +53,14 @@ fun testAppConfig(
     ),
     auth = AuthConfig(
         googleClientIds = listOf("test-client-id.apps.googleusercontent.com"),
+        appleClientIds = emptyList(),
         jwtSecret = "a".repeat(64),
         jwtExpirySeconds = 3_600,
+    ),
+    db = DbConfig(
+        jdbcUrl = "jdbc:h2:mem:test;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
+        user = "sa",
+        password = "",
+        maxPoolSize = 2,
     ),
 )

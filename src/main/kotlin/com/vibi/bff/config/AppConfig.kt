@@ -9,6 +9,7 @@ data class AppConfig(
     val gemini: GeminiConfig,
     val separation: SeparationConfig,
     val auth: AuthConfig,
+    val db: DbConfig,
 )
 
 data class StorageConfig(
@@ -98,21 +99,26 @@ data class GeminiConfig(
 }
 
 /**
- * Google OAuth + 자체 JWT 발급 설정.
+ * Google OAuth + Apple Sign In + 자체 JWT 발급 설정.
  *
  * - [googleClientIds] — `tokeninfo` 응답의 `aud` 가 이 중 하나와 일치해야 통과.
  *   콤마 분리 문자열로 env 주입 (iOS / Android / Web client id 모두 허용).
+ * - [appleClientIds] — Apple JWKS 검증된 ID Token 의 `aud` 가 이 중 하나와 일치해야 통과.
+ *   보통 iOS bundle id (`com.vibi.ios`). blank list 면 Apple 로그인 비활성 — 라우트
+ *   진입 시 명시적으로 거부.
  * - [jwtSecret] — HMAC-SHA256 서명 키. 32+ chars (`openssl rand -hex 32`).
  * - [jwtExpirySeconds] — 발급된 access token 의 만료까지 초.
  */
 data class AuthConfig(
     val googleClientIds: List<String>,
+    val appleClientIds: List<String>,
     val jwtSecret: String,
     val jwtExpirySeconds: Long,
 ) {
     init {
         require(googleClientIds.isNotEmpty()) { "GOOGLE_OAUTH_CLIENT_IDS must not be empty (comma-separated)" }
         require(googleClientIds.all { it.isNotBlank() }) { "GOOGLE_OAUTH_CLIENT_IDS contains blank entry" }
+        require(appleClientIds.all { it.isNotBlank() }) { "APPLE_OAUTH_CLIENT_IDS contains blank entry" }
         require(jwtSecret.length >= 32) {
             "AUTH_JWT_SECRET must be at least 32 chars (got ${jwtSecret.length}). " +
                 "Generate with: openssl rand -hex 32"
@@ -120,6 +126,28 @@ data class AuthConfig(
         require(jwtExpirySeconds in 60..(90L * 24 * 3600)) {
             "AUTH_JWT_EXPIRY_SECONDS must be in 60..7776000 (got $jwtExpirySeconds)"
         }
+    }
+}
+
+/**
+ * User 영속화 + IAP 도입 대비용 Postgres 설정. Cloud Run / Cloudflare Containers 어디서든
+ * Neon (managed Postgres) JDBC URL 로 동일 동작 — vendor 종속성 없음.
+ *
+ * - [jdbcUrl] — `jdbc:postgresql://<host>/<db>?sslmode=require` 형식. blank 면 부팅 시 fail.
+ * - [maxPoolSize] — Neon free tier 100 connection 한도. 인스턴스당 5 가 default.
+ */
+data class DbConfig(
+    val jdbcUrl: String,
+    val user: String,
+    val password: String,
+    val maxPoolSize: Int,
+) {
+    init {
+        require(jdbcUrl.isNotBlank()) { "DATABASE_URL must not be blank" }
+        require(jdbcUrl.startsWith("jdbc:postgresql://") || jdbcUrl.startsWith("jdbc:h2:")) {
+            "DATABASE_URL must be a Postgres or H2 JDBC URL (got: ${jdbcUrl.take(20)}...)"
+        }
+        require(maxPoolSize in 1..50) { "DB_MAX_POOL must be in 1..50 (got $maxPoolSize)" }
     }
 }
 
@@ -149,6 +177,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val gemini = vibi.config("gemini")
     val separation = vibi.config("separation")
     val auth = vibi.config("auth")
+    val db = vibi.config("db")
 
     return AppConfig(
         storage = StorageConfig(
@@ -189,8 +218,18 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
                 .split(',')
                 .map { it.trim() }
                 .filter { it.isNotEmpty() },
+            appleClientIds = auth.propertyOrNull("appleClientIds")?.getString().orEmpty()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() },
             jwtSecret = auth.property("jwtSecret").getString(),
             jwtExpirySeconds = auth.property("jwtExpirySeconds").getString().toLong(),
+        ),
+        db = DbConfig(
+            jdbcUrl = db.property("jdbcUrl").getString(),
+            user = db.property("user").getString(),
+            password = db.property("password").getString(),
+            maxPoolSize = db.property("maxPoolSize").getString().toInt(),
         ),
     )
 }

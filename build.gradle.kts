@@ -51,8 +51,23 @@ dependencies {
     // Google Cloud auth (Vertex AI access tokens via service account JSON)
     implementation("com.google.auth:google-auth-library-oauth2-http:1.27.0")
 
-    // JWT (자체 access token 발급/검증). HS256 으로 충분 — RS256 비대칭은 v1 범위 외.
+    // JWT (자체 access token 발급/검증). HS256 으로 자체 access token 발급, RS256 으로
+    // Apple ID Token 검증 (Apple JWKS public key).
     implementation("com.auth0:java-jwt:4.4.0")
+    implementation("com.auth0:jwks-rsa:0.22.1")
+
+    // DB — Neon (managed Postgres) + Exposed DSL + HikariCP pool + Flyway migration.
+    // Vendor-neutral: Cloud Run / Cloudflare Containers 양쪽 동등 동작.
+    val exposedVersion = "0.56.0"
+    implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
+    implementation("org.jetbrains.exposed:exposed-jdbc:$exposedVersion")
+    implementation("org.jetbrains.exposed:exposed-java-time:$exposedVersion")
+    implementation("org.postgresql:postgresql:42.7.4")
+    implementation("com.zaxxer:HikariCP:5.1.0")
+    implementation("org.flywaydb:flyway-core:10.18.2")
+    implementation("org.flywaydb:flyway-database-postgresql:10.18.2")
+    // 단위 테스트용 in-memory DB (Exposed 호환). Flyway 도 H2 지원.
+    testImplementation("com.h2database:h2:2.3.232")
 
     // Apache Commons Compress — Perso audio-separation 의 OriginalVoiceSpeakers .tar archive 풀이용.
     implementation("org.apache.commons:commons-compress:1.26.2")

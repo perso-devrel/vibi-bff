@@ -91,6 +91,19 @@ repo → **Settings → Secrets and variables → Actions → New repository sec
 | Secret | 값 |
 |---|---|
 | `GOOGLE_OAUTH_CLIENT_IDS` | 콤마 분리 Google OAuth client ID (iOS / Android / Web) |
+| `APPLE_OAUTH_CLIENT_IDS` | 콤마 분리 Apple Sign In client ID — 보통 iOS bundle id (`com.vibi.ios`). 비워두면 Apple 로그인 비활성. |
+
+### Secret Manager (Postgres / Neon) — `cloud-run.sh` 가 1회 시드
+
+DB credential 은 GitHub Secret 이 아닌 **Secret Manager** 에 저장된다 (Cloud Run runtime SA 만 read).
+첫 부트스트랩 시 `.env` 에 채운 값을 `cloud-run.sh` 가 자동으로 Secret Manager 에 시드한다 —
+이후 회전은 `.env` 갱신 후 `cloud-run.sh` 재실행 또는 `gcloud secrets versions add ...`.
+
+| Secret 이름 | 형식 | 비고 |
+|---|---|---|
+| `DATABASE_URL` | `jdbc:postgresql://<host>/<db>?sslmode=require` | **`jdbc:` 접두사 필수** — Neon UI 가 주는 원본 URL 에는 없음 |
+| `DB_USER` | Neon role 이름 | |
+| `DB_PASSWORD` | Neon role 비밀번호 | |
 
 ---
 

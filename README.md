@@ -49,6 +49,14 @@ Environment variables (also loadable from system env):
 | `SEPARATION_MIX_TTL_MS`      | `600000`                 | Keep mix outputs for this many ms after completion    |
 | `SEPARATION_URL_TTL_SEC`     | `1800`                   | Stem download URL token lifetime                      |
 | `SEPARATION_MIX_URL_TTL_SEC` | `600`                    | Mix download URL token lifetime                       |
+| `GOOGLE_OAUTH_CLIENT_IDS`    | —                        | **Required.** Comma-separated Google OAuth client IDs (iOS / Android / Web). `aud` of ID token must match. |
+| `APPLE_OAUTH_CLIENT_IDS`     | *(blank = disabled)*     | Comma-separated Apple Sign In client IDs (typically iOS bundle id `com.vibi.ios`). Blank → `/auth/apple` returns 503. |
+| `AUTH_JWT_SECRET`            | —                        | **Required.** HMAC-SHA256 key (≥32 chars) for own access token signing. `openssl rand -hex 32`. |
+| `AUTH_JWT_EXPIRY_SECONDS`    | `604800`                 | Issued access token lifetime (60..7776000).            |
+| `DATABASE_URL`               | —                        | **Required.** JDBC URL for Postgres (Neon / Cloud SQL). Format: `jdbc:postgresql://<host>/<db>?sslmode=require`. |
+| `DB_USER`                    | —                        | **Required.** DB role.                                |
+| `DB_PASSWORD`                | —                        | **Required.** DB password.                            |
+| `DB_MAX_POOL`                | `5`                      | HikariCP pool size (1..50). Neon free tier 100 conn cap. |
 
 ## Build & Run
 
@@ -267,6 +275,24 @@ return `409 Conflict`. Download any stems you want to keep **before** calling
   signatures don't leak to log aggregators.
 - Rotate `SEPARATION_SIGNING_SECRET` carefully — changing it invalidates every
   outstanding token at once.
+
+### Sign in with Apple
+
+`/api/v2/auth/apple` accepts `{ idToken, fullName? }` from the iOS client.
+Verification path is JWKS RS256 (`https://appleid.apple.com/auth/keys`) with
+24h-cached public keys; `aud` must match `APPLE_OAUTH_CLIENT_IDS`. On success the
+user is upserted into the `users` table by `(provider='apple', provider_sub)`
+and an internal UUID is issued as the JWT `sub` (reused as IAP `appAccountToken`
+in a future phase).
+
+To enable in production:
+1. Apple Developer Portal → Identifiers → your App ID → **Capabilities** → check
+   "Sign in with Apple". Requires a **paid Apple Developer Program** membership;
+   Personal Team builds will hit runtime error 1000.
+2. Set `APPLE_OAUTH_CLIENT_IDS` (Secret Manager or env) to your iOS bundle id.
+3. iOS app must carry the `com.apple.developer.applesignin` entitlement —
+   `iosApp/iosApp.entitlements` is wired via `project.yml`. Run
+   `xcodegen generate` after pulling.
 
 ## Project Layout
 
