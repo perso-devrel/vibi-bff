@@ -14,7 +14,9 @@ CREATE TABLE users (
     picture VARCHAR(2048),
     created_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at TIMESTAMP WITH TIME ZONE NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE (provider, provider_sub)
+    UNIQUE (provider, provider_sub),
+    -- AuthProvider enum 의 dbValue 와 동기. 새 provider 추가 시 enum + 마이그레이션 둘 다 갱신.
+    CONSTRAINT users_provider_check CHECK (provider IN ('google', 'apple'))
 );
 
 CREATE INDEX users_email_idx ON users (email);

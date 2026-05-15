@@ -69,8 +69,7 @@ fun Application.module() {
     // AuthConfig 자체 init { } 가 GOOGLE_OAUTH_CLIENT_IDS / AUTH_JWT_SECRET 길이를
     // 검증하므로 여기 추가 require 불필요. 단 boot 시 명확히 fail-fast 되는지 확인 OK.
 
-    // DB 부트스트랩 — Flyway 가 V*__*.sql 적용 후 Exposed Database.connect. Postgres
-    // pool 이 살아 있어야 AuthService 의 user upsert 가 동작하므로 HTTP client 보다 먼저.
+    // AuthService 의 user upsert 가 의존 — HTTP client 초기화보다 먼저.
     val dataSource = DbBootstrap.init(appConfig.db)
     val userRepository = UserRepository()
 

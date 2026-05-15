@@ -1,61 +1,57 @@
 package com.vibi.bff.service
 
 import com.vibi.bff.db.UsersTable
+import com.vibi.bff.model.AuthProvider
 import java.time.Instant
 import java.util.UUID
 import org.jetbrains.exposed.sql.and
-import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
-import org.jetbrains.exposed.sql.update
+import org.jetbrains.exposed.sql.upsert
 
 /**
- * (provider, providerSub) 기준 user upsert + 조회. 신규 가입이면 UUID 생성 + insert,
- * 기존 row 이면 email/name/picture/updatedAt 갱신. 어느 경우든 internal UUID 반환 —
- * 호출자(AuthService)가 그 UUID 를 JWT sub 로 발급한다.
+ * users 테이블의 `(provider, providerSub)` 기준 single-query upsert.
  *
- * UUID 는 향후 IAP `appAccountToken` 으로도 그대로 재사용 — StoreKit 2 의
- * appAccountToken 이 UUID 만 받기 때문이다.
+ * Postgres `INSERT ... ON CONFLICT (...) DO UPDATE` 한 번으로 race condition 까지
+ * 해소 — 동시 가입 시 두 트랜잭션이 같은 row 를 안전하게 공유. 결과로 internal UUID 를
+ * 반환해 [com.vibi.bff.service.AuthService] 가 JWT sub 로 발급 + 향후 IAP
+ * `appAccountToken` 으로 재사용.
  *
- * v1 은 row 자체 lookup 만 필요하므로 `User` 도메인 모델 없이 컬럼 직접 매핑.
+ * Exposed `upsert` 가 dialect 추상화 — Postgres 는 `ON CONFLICT`, H2 PostgreSQL mode 는
+ * `MERGE` 로 매핑. 단위 테스트는 H2 in-memory 로 동일 경로 검증.
  */
 class UserRepository {
 
-    /** 결과: 해당 user 의 internal UUID. 신규/기존 구분이 필요하면 별도 method 추가. */
     fun upsert(
-        provider: String,
+        provider: AuthProvider,
         providerSub: String,
         email: String,
         name: String,
         picture: String?,
     ): UUID = transaction {
         val now = Instant.now()
-        val existing = UsersTable
-            .selectAll()
-            .where { (UsersTable.provider eq provider) and (UsersTable.providerSub eq providerSub) }
-            .singleOrNull()
-        if (existing != null) {
-            val id = existing[UsersTable.id].value
-            UsersTable.update({ UsersTable.id eq id }) {
+        UsersTable.upsert(
+            UsersTable.provider, UsersTable.providerSub,
+            onUpdate = {
                 it[UsersTable.email] = email
                 it[UsersTable.name] = name
                 it[UsersTable.picture] = picture
                 it[UsersTable.updatedAt] = now
-            }
-            id
-        } else {
-            val id = UUID.randomUUID()
-            UsersTable.insert {
-                it[UsersTable.id] = id
-                it[UsersTable.provider] = provider
-                it[UsersTable.providerSub] = providerSub
-                it[UsersTable.email] = email
-                it[UsersTable.name] = name
-                it[UsersTable.picture] = picture
-                it[UsersTable.createdAt] = now
-                it[UsersTable.updatedAt] = now
-            }
-            id
+            },
+        ) {
+            it[UsersTable.id] = UUID.randomUUID()
+            it[UsersTable.provider] = provider.dbValue
+            it[UsersTable.providerSub] = providerSub
+            it[UsersTable.email] = email
+            it[UsersTable.name] = name
+            it[UsersTable.picture] = picture
+            it[UsersTable.createdAt] = now
+            it[UsersTable.updatedAt] = now
         }
+        // RETURNING id 는 dialect 차이가 커 별도 SELECT 로 안정성 우선 (UNIQUE 인덱스라 단일 row).
+        UsersTable
+            .select(UsersTable.id)
+            .where { (UsersTable.provider eq provider.dbValue) and (UsersTable.providerSub eq providerSub) }
+            .single()[UsersTable.id].value
     }
 }

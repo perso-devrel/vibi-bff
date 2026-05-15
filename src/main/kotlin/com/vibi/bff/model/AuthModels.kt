@@ -3,6 +3,15 @@ package com.vibi.bff.model
 import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 
+/**
+ * OAuth provider 식별자. `users.provider` 컬럼의 단일 소스 — SQL `CHECK` constraint
+ * (V1__users.sql) 도 이 enum 의 [dbValue] 와 동기.
+ */
+enum class AuthProvider(val dbValue: String) {
+    GOOGLE("google"),
+    APPLE("apple"),
+}
+
 @Serializable
 data class GoogleAuthRequest(
     val idToken: String,

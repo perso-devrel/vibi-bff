@@ -3,6 +3,7 @@ package com.vibi.bff
 import com.vibi.bff.config.DbConfig
 import com.vibi.bff.db.DbBootstrap
 import com.vibi.bff.db.UsersTable
+import com.vibi.bff.model.AuthProvider
 import com.vibi.bff.service.UserRepository
 import com.zaxxer.hikari.HikariDataSource
 import kotlin.test.AfterTest
@@ -42,22 +43,22 @@ class UserRepositoryTest {
 
     @Test
     fun `upsert returns same UUID for same provider+sub`() {
-        val id1 = repo.upsert("google", "g-123", "a@example.com", "Alice", null)
-        val id2 = repo.upsert("google", "g-123", "a@example.com", "Alice", null)
+        val id1 = repo.upsert(AuthProvider.GOOGLE, "g-123", "a@example.com", "Alice", null)
+        val id2 = repo.upsert(AuthProvider.GOOGLE, "g-123", "a@example.com", "Alice", null)
         assertEquals(id1, id2)
     }
 
     @Test
     fun `upsert returns different UUID for different provider sub`() {
-        val google = repo.upsert("google", "g-1", "a@example.com", "Alice", null)
-        val apple = repo.upsert("apple", "a-1", "a@example.com", "Alice", null)
+        val google = repo.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "Alice", null)
+        val apple = repo.upsert(AuthProvider.APPLE, "a-1", "a@example.com", "Alice", null)
         assertNotEquals(google, apple)
     }
 
     @Test
     fun `upsert updates email and name on existing row`() {
-        repo.upsert("apple", "a-1", "old@example.com", "Old Name", null)
-        repo.upsert("apple", "a-1", "new@example.com", "New Name", "pic.png")
+        repo.upsert(AuthProvider.APPLE, "a-1", "old@example.com", "Old Name", null)
+        repo.upsert(AuthProvider.APPLE, "a-1", "new@example.com", "New Name", "pic.png")
 
         val row = transaction {
             UsersTable.selectAll().where { UsersTable.providerSub eq "a-1" }.single()

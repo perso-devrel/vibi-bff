@@ -8,6 +8,7 @@ import com.auth0.jwt.exceptions.JWTVerificationException
 import com.auth0.jwt.exceptions.TokenExpiredException
 import com.auth0.jwt.interfaces.DecodedJWT
 import com.vibi.bff.config.AuthConfig
+import com.vibi.bff.model.AuthProvider
 import com.vibi.bff.model.AuthResponse
 import com.vibi.bff.model.AuthUser
 import com.vibi.bff.model.GoogleTokenInfo
@@ -21,8 +22,9 @@ import io.ktor.http.isSuccess
 import java.net.URLEncoder
 import java.security.interfaces.RSAPublicKey
 import java.util.Date
-import java.util.UUID
 import java.util.concurrent.TimeUnit
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 
 /**
@@ -36,6 +38,8 @@ import org.slf4j.LoggerFactory
  *
  * 검증 통과 후 [UserRepository] 에 `(provider, providerSub)` 기준 upsert →
  * internal UUID 를 JWT `sub` 로 발급. 모바일 클라이언트는 그 UUID 를 user 식별자로 사용.
+ *
+ * JDBC blocking + JWKS 동기 HTTP 는 Netty event loop 를 잡지 않도록 `Dispatchers.IO`.
  */
 class AuthService(
     private val config: AuthConfig,
@@ -46,8 +50,6 @@ class AuthService(
     private val log = LoggerFactory.getLogger(javaClass)
     private val algorithm = Algorithm.HMAC256(config.jwtSecret)
 
-    // Apple JWKS provider — 24h cache + 1m rate-limit. Apple 의 key rotation 은 매우 드물고
-    // 클라가 한 번에 받은 token 의 kid 가 바뀔 일 없으므로 캐시 길게.
     private val appleJwkProvider by lazy {
         JwkProviderBuilder("https://appleid.apple.com/")
             .cached(10, 24, TimeUnit.HOURS)
@@ -80,18 +82,11 @@ class AuthService(
             throw ApiErrorException(HttpStatusCode.Unauthorized, "google_email_unverified")
         }
 
-        val displayName = info.name ?: info.email.substringBefore('@')
-        val uuid = userRepository.upsert(
-            provider = PROVIDER_GOOGLE,
+        return completeSignIn(
+            provider = AuthProvider.GOOGLE,
             providerSub = info.sub,
             email = info.email,
-            name = displayName,
-            picture = info.picture,
-        )
-        return AuthUser(
-            sub = uuid.toString(),
-            email = info.email,
-            name = displayName,
+            name = info.name ?: info.email.substringBefore('@'),
             picture = info.picture,
         )
     }
@@ -102,7 +97,7 @@ class AuthService(
      * @param fullName Apple 의 최초-1회 fullName. 신규 가입 시에만 user.name 으로 사용 —
      *   재로그인 시 null 이 정상이고, 기존 row 의 name 은 보존된다.
      */
-    fun verifyAppleIdToken(idToken: String, fullName: String?): AuthUser {
+    suspend fun verifyAppleIdToken(idToken: String, fullName: String?): AuthUser {
         if (idToken.isBlank()) {
             throw ApiErrorException(HttpStatusCode.BadRequest, "missing_id_token")
         }
@@ -111,61 +106,65 @@ class AuthService(
             throw ApiErrorException(HttpStatusCode.ServiceUnavailable, "apple_signin_disabled")
         }
 
-        val decoded: DecodedJWT = try {
-            JWT.decode(idToken)
-        } catch (e: JWTVerificationException) {
-            log.warn("Apple id token decode failed: {}", e.message)
-            throw ApiErrorException(HttpStatusCode.Unauthorized, "invalid_id_token")
+        val verified = verifyAppleSignatureBlocking(idToken)
+
+        // 서명 통과 후 claims 를 직접 검사 — 라이브러리 내부 message 문구 의존하지 않도록.
+        if (verified.issuer != APPLE_ISSUER) {
+            throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_iss_mismatch")
+        }
+        if (verified.audience.orEmpty().none { it in config.appleClientIds }) {
+            throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_aud_mismatch")
         }
 
-        val publicKey = try {
-            appleJwkProvider.get(decoded.keyId).publicKey as RSAPublicKey
-        } catch (e: JwkException) {
-            log.warn("Apple JWKS lookup failed for kid={}: {}", decoded.keyId, e.message)
-            throw ApiErrorException(HttpStatusCode.BadGateway, "apple_jwks_unavailable")
-        }
-
-        val verifier = JWT.require(Algorithm.RSA256(publicKey, null))
-            .withIssuer(APPLE_ISSUER)
-            .withAnyOfAudience(*config.appleClientIds.toTypedArray())
-            .build()
-        val verified: DecodedJWT = try {
-            verifier.verify(idToken)
-        } catch (e: TokenExpiredException) {
-            throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_token_expired")
-        } catch (e: JWTVerificationException) {
-            log.warn("Apple id token verify failed: {}", e.message)
-            // aud 불일치 / iss 불일치 / 서명 실패 모두 여기로 — 메시지에서 구분.
-            val code = when {
-                e.message?.contains("audience", ignoreCase = true) == true -> "apple_aud_mismatch"
-                e.message?.contains("issuer", ignoreCase = true) == true -> "apple_iss_mismatch"
-                else -> "invalid_id_token"
-            }
-            throw ApiErrorException(HttpStatusCode.Unauthorized, code)
-        }
-
-        val sub = verified.subject ?: throw ApiErrorException(HttpStatusCode.Unauthorized, "invalid_id_token")
+        val sub = verified.subject
+            ?: throw ApiErrorException(HttpStatusCode.Unauthorized, "invalid_id_token")
         val email = verified.getClaim("email").asString()
-        if (email.isNullOrBlank()) {
-            // Apple 정책상 email 은 사용자가 명시 거부해도 첫 인증 시 제공되어야 함.
-            // 누락은 비정상 — 정책 변경 시 fallback (sub@apple.local 등) 도입 검토.
-            throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_email_missing")
-        }
-        val displayName = fullName?.takeIf { it.isNotBlank() } ?: email.substringBefore('@')
+            ?: throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_email_missing")
 
-        val uuid = userRepository.upsert(
-            provider = PROVIDER_APPLE,
+        return completeSignIn(
+            provider = AuthProvider.APPLE,
             providerSub = sub,
             email = email,
-            name = displayName,
+            name = fullName?.takeIf { it.isNotBlank() } ?: email.substringBefore('@'),
             picture = null,
         )
-        return AuthUser(
-            sub = uuid.toString(),
-            email = email,
-            name = displayName,
-            picture = null,
-        )
+    }
+
+    private suspend fun verifyAppleSignatureBlocking(idToken: String): DecodedJWT =
+        withContext(Dispatchers.IO) {
+            val decoded = try {
+                JWT.decode(idToken)
+            } catch (e: JWTVerificationException) {
+                log.warn("Apple id token decode failed: {}", e.message)
+                throw ApiErrorException(HttpStatusCode.Unauthorized, "invalid_id_token")
+            }
+            val publicKey = try {
+                appleJwkProvider.get(decoded.keyId).publicKey as RSAPublicKey
+            } catch (e: JwkException) {
+                log.warn("Apple JWKS lookup failed for kid={}: {}", decoded.keyId, e.message)
+                throw ApiErrorException(HttpStatusCode.BadGateway, "apple_jwks_unavailable")
+            }
+            try {
+                JWT.require(Algorithm.RSA256(publicKey, null)).build().verify(idToken)
+            } catch (e: TokenExpiredException) {
+                throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_token_expired")
+            } catch (e: JWTVerificationException) {
+                log.warn("Apple id token signature verify failed: {}", e.message)
+                throw ApiErrorException(HttpStatusCode.Unauthorized, "invalid_id_token")
+            }
+        }
+
+    private suspend fun completeSignIn(
+        provider: AuthProvider,
+        providerSub: String,
+        email: String,
+        name: String,
+        picture: String?,
+    ): AuthUser {
+        val uuid = withContext(Dispatchers.IO) {
+            userRepository.upsert(provider, providerSub, email, name, picture)
+        }
+        return AuthUser(sub = uuid.toString(), email = email, name = name, picture = picture)
     }
 
     fun issueAccessToken(user: AuthUser): AuthResponse {
@@ -186,7 +185,5 @@ class AuthService(
     companion object {
         private const val ISSUER = "vibi-bff"
         private const val APPLE_ISSUER = "https://appleid.apple.com"
-        private const val PROVIDER_GOOGLE = "google"
-        private const val PROVIDER_APPLE = "apple"
     }
 }
