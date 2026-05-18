@@ -71,9 +71,23 @@ fun Application.configureErrorHandling() {
             call.respond(status, ErrorResponse(error = message))
         }
         exception<ApiErrorException> { call, cause ->
+            // 한 줄 INFO — silent 4xx 가 발생해도 어느 라우트에서 무슨 코드로 떨어졌는지
+            // 흔적은 남겨야 client 측 잘못된 요청 디버깅 가능.
+            log.info("4xx {} {} -> {} ({}{})",
+                call.request.local.method.value,
+                call.request.local.uri,
+                cause.statusCode.value,
+                cause.errorCode,
+                cause.detail?.let { ": $it" } ?: "",
+            )
             call.respond(cause.statusCode, ErrorResponse(error = cause.errorCode, detail = cause.detail))
         }
         exception<IllegalArgumentException> { call, cause ->
+            log.info("4xx {} {} -> 400 ({})",
+                call.request.local.method.value,
+                call.request.local.uri,
+                cause.message ?: "Bad request",
+            )
             call.respond(HttpStatusCode.BadRequest, ErrorResponse(error = cause.message ?: "Bad request"))
         }
         exception<Throwable> { call, cause ->

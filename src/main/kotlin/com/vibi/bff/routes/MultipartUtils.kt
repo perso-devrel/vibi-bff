@@ -6,7 +6,10 @@ import io.ktor.http.content.MultiPartData
 import io.ktor.http.content.PartData
 import io.ktor.http.content.forEachPart
 import io.ktor.http.content.streamProvider
+import org.slf4j.LoggerFactory
 import java.io.File
+
+private val multipartLog = LoggerFactory.getLogger("MultipartUtils")
 
 /**
  * Parse a "single file + JSON spec" multipart that tolerates a missing `file`
@@ -28,6 +31,10 @@ internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
 ): Pair<File?, T?> {
     var sourceFile: File? = null
     var spec: T? = null
+    // 관측된 part 이름들 — spec 누락/오타 진단용 (silent 4xx 라 client 가 무얼 보냈는지
+    // 확인하려면 server-side 에 흔적이 필요).
+    val seenFileParts = mutableListOf<String?>()
+    val seenFormParts = mutableListOf<String?>()
 
     // spec parse 실패 (`Json.decodeFromString` throws) 시 이미 디스크에 떨어진 source
     // file 이 누수됨 — try-catch 로 누적된 file 을 정리 후 rethrow. multipart parser
@@ -36,6 +43,7 @@ internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
         multipart.forEachPart { part ->
             when (part) {
                 is PartData.FileItem -> {
+                    seenFileParts += part.name
                     if (part.name == fileFieldName) {
                         @Suppress("DEPRECATION")
                         val blobPath = fileStorage.saveUpload(
@@ -47,6 +55,7 @@ internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
                     }
                 }
                 is PartData.FormItem -> {
+                    seenFormParts += part.name
                     if (part.name == specFieldName) {
                         // AppJson 사용 — ignoreUnknownKeys=true. 구 클라이언트가 새 DTO 에 없는
                         // 필드를 보내도 400 대신 무시.
@@ -59,8 +68,18 @@ internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
         }
     } catch (e: Throwable) {
         sourceFile?.let { runCatching { it.delete() } }
+        multipartLog.warn(
+            "multipart parse failed (file={}, spec={}): fileParts={} formParts={} ex={}",
+            fileFieldName, specFieldName, seenFileParts, seenFormParts, e.message,
+        )
         throw e
     }
 
+    if (spec == null) {
+        multipartLog.warn(
+            "multipart missing spec='{}' field: fileParts={} formParts={}",
+            specFieldName, seenFileParts, seenFormParts,
+        )
+    }
     return sourceFile to spec
 }

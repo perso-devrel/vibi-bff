@@ -6,6 +6,7 @@ import com.vibi.bff.model.RenderInputCacheResponse
 import com.vibi.bff.model.RenderResponse
 import com.vibi.bff.model.RenderStatusResponse
 import com.vibi.bff.plugins.ApiErrorException
+import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
@@ -20,7 +21,6 @@ import io.ktor.http.content.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
 
@@ -139,7 +139,10 @@ fun Route.renderRoutes(
                     }
                     is PartData.FormItem -> {
                         when (part.name) {
-                            "config" -> renderConfig = Json.decodeFromString<RenderConfig>(part.value)
+                            // AppJson — ignoreUnknownKeys=true. 모바일이 dubClips/imageClips/
+                            // audioOverrideKey/outputLanguageCode 같은 (절단된) 옛 필드를 계속
+                            // 보내도 strict Json 처럼 SerializationException 으로 폭사하지 않게.
+                            "config" -> renderConfig = AppJson.decodeFromString<RenderConfig>(part.value)
                             "inputId" -> inputId = part.value.trim().ifBlank { null }
                         }
                     }

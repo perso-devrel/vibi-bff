@@ -2,6 +2,7 @@ package com.vibi.bff.service
 
 import com.vibi.bff.config.PersoConfig
 import com.vibi.bff.model.*
+import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.PersoApiException
 import io.ktor.client.*
 import io.ktor.client.call.*
@@ -112,11 +113,19 @@ class PersoClient(
     }
 
     // Convenience: SAS + blob upload + register in one call.
+    //
+    // 디버깅: 단계별 시작/끝 로그를 박아두면 실패 시 어느 단계에서 죽었는지 즉시 분간된다.
+    // (실패는 보통 submitAudioSeparation 이전 어딘가에서 발생하는데, 성공 로그는 submit
+    // 직후에만 찍혀 사이가 깜깜했음.)
     suspend fun uploadMedia(mediaType: PersoMediaType, file: File): PersoMediaRegistration {
-        log.info("Uploading to Perso: {} ({} bytes)", file.name, file.length())
+        log.info("Uploading to Perso: {} ({} bytes, type={})", file.name, file.length(), mediaType)
         val sas = getSasToken(file.name)
+        log.info("Perso SAS issued: file={} expires={}", file.name, sas.expirationDatetime)
         uploadToBlob(sas.blobSasUrl, file)
-        return registerMedia(mediaType, sas.blobSasUrl, file.name)
+        log.info("Perso blob upload OK: file={} ({}B)", file.name, file.length())
+        val reg = registerMedia(mediaType, sas.blobSasUrl, file.name)
+        log.info("Perso registerMedia OK: file={} seq={}", file.name, reg.seq)
+        return reg
     }
 
     // ── Audio Separation (전용) ─────────────────────────────────────────────
@@ -126,6 +135,8 @@ class PersoClient(
         isVideoProject: Boolean,
         title: String? = null,
     ): Long {
+        log.info("Perso submitAudioSeparation: mediaSeq={} isVideoProject={} title={}",
+            mediaSeq, isVideoProject, title)
         val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/audio-separation")) {
             authHeader()
             contentType(ContentType.Application.Json)
@@ -235,13 +246,23 @@ class PersoClient(
         return response.body<PersoEnvelope<PersoSeparationDownloadLinks>>().result
     }
 
-    /** project meta + downloadPathInfo (storage path 직접 노출). */
+    /**
+     * project meta + downloadPathInfo (storage path 직접 노출).
+     *
+     * Perso 의 다른 endpoint 들은 `{"result":{...}}` envelope 으로 오지만 이 endpoint 는
+     * envelope 없이 raw object 로 응답하는 케이스가 관측됨 (Perso 측 inconsistency).
+     * 두 형태 모두 받도록 JsonElement 로 먼저 받아서 envelope 이면 벗기고 아니면 그대로 파싱.
+     */
     suspend fun getProjectInfo(projectSeq: Long): PersoProjectInfo {
         val response = httpClient.get(url(
             "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}"
         )) { authHeader() }
         checkResponse(response)
-        return response.body<PersoEnvelope<PersoProjectInfo>>().result
+        val element = response.body<kotlinx.serialization.json.JsonElement>()
+        val obj = element as? kotlinx.serialization.json.JsonObject
+            ?: throw PersoApiException(500, "getProjectInfo: expected JSON object, got $element")
+        val target = obj["result"] ?: obj
+        return AppJson.decodeFromJsonElement(PersoProjectInfo.serializer(), target)
     }
 
     /**

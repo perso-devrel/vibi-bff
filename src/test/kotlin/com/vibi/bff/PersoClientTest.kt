@@ -146,6 +146,30 @@ class PersoClientTest {
     }
 
     @Test
+    fun `getProjectInfo also parses raw response without result envelope`() = runBlocking {
+        val client = clientWith {
+            respond(
+                content = """{
+                    "seq":202,
+                    "downloadInfo":{
+                        "hasOriginalSpeakerAudioCollection":true,
+                        "hasOriginalBackground":true
+                    },
+                    "downloadPathInfo":{
+                        "originalBackgroundPath":"/perso-storage/y/bg.wav"
+                    }
+                }""",
+                status = HttpStatusCode.OK,
+                headers = headersOf(HttpHeaders.ContentType, "application/json"),
+            )
+        }
+        val info = client.getProjectInfo(202)
+        assertEquals(202L, info.seq)
+        assertTrue(info.downloadInfo?.hasOriginalSpeakerAudioCollection == true)
+        assertEquals("/perso-storage/y/bg.wav", info.downloadPathInfo?.originalBackgroundPath)
+    }
+
+    @Test
     fun `upstream error becomes PersoApiException with status preserved`(): Unit = runBlocking {
         val client = clientWith {
             respond(
