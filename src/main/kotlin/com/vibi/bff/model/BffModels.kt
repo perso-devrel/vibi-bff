@@ -45,9 +45,17 @@ data class BgmClip(
     val audioFileKey: String,
     val startMs: Long,
     val volume: Float = 1.0f,
+    /** 음원 내부 trim 시작 ms. 0 이면 음원 처음부터. */
+    val sourceTrimStartMs: Long = 0L,
+    /** 음원 내부 trim 끝 ms. 0 이면 음원 끝까지 (backward-compat). */
+    val sourceTrimEndMs: Long = 0L,
 ) {
     init {
         requireValidVolume("BgmClip", volume)
+        require(sourceTrimStartMs >= 0L) { "BgmClip.sourceTrimStartMs must be >= 0 (got $sourceTrimStartMs)" }
+        require(sourceTrimEndMs == 0L || sourceTrimEndMs > sourceTrimStartMs) {
+            "BgmClip.sourceTrimEndMs ($sourceTrimEndMs) must be 0 or > sourceTrimStartMs ($sourceTrimStartMs)"
+        }
     }
 }
 

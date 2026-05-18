@@ -584,7 +584,16 @@ class RenderService(
             // 각 bgm clip 에 adelay+volume 적용 후 base 와 amix.
             val mixInputs = mutableListOf("[base]")
             for ((i, clip) in bgmClips.withIndex()) {
-                filters.add(audioClipFilter(bgmInputIndices[i], clip.startMs, clip.volume, "bgm$i"))
+                filters.add(
+                    audioClipFilter(
+                        inputIdx = bgmInputIndices[i],
+                        startMs = clip.startMs,
+                        volume = clip.volume,
+                        label = "bgm$i",
+                        sourceTrimStartMs = clip.sourceTrimStartMs,
+                        sourceTrimEndMs = clip.sourceTrimEndMs,
+                    )
+                )
                 mixInputs.add("[bgm$i]")
             }
             filters.add(
@@ -831,8 +840,26 @@ class RenderService(
         return parts.joinToString(",") { "atempo=${it}" }
     }
 
-    private fun audioClipFilter(inputIdx: Int, startMs: Long, volume: Float, label: String) =
-        "[$inputIdx:a]adelay=${startMs}|${startMs},volume=${volume}[$label]"
+    /**
+     * BGM clip 의 ffmpeg audio filter — sourceTrimStart/End 있으면 atrim+asetpts 로 sub-range 만
+     * 추출 후 adelay+volume. 모바일의 BgmTrimSheet 결과 (영상보다 긴 음원의 잘린 구간) 를 그대로
+     * 렌더에 반영.
+     */
+    private fun audioClipFilter(
+        inputIdx: Int,
+        startMs: Long,
+        volume: Float,
+        label: String,
+        sourceTrimStartMs: Long = 0L,
+        sourceTrimEndMs: Long = 0L,
+    ): String {
+        val trim = if (sourceTrimStartMs > 0L || sourceTrimEndMs > 0L) {
+            val startArg = secondsToFfmpegArg(sourceTrimStartMs / 1000.0)
+            val endClause = if (sourceTrimEndMs > 0L) ":${secondsToFfmpegArg(sourceTrimEndMs / 1000.0)}" else ""
+            "atrim=${startArg}${endClause},asetpts=PTS-STARTPTS,"
+        } else ""
+        return "[$inputIdx:a]${trim}adelay=${startMs}|${startMs},volume=${volume}[$label]"
+    }
 
     private fun segmentOutputDurationMs(seg: Segment): Long = when (seg.type) {
         "VIDEO" -> {
@@ -947,7 +974,16 @@ class RenderService(
         } else {
             val mixInputs = mutableListOf(baseAudioRef)
             for ((i, clip) in bgmClips.withIndex()) {
-                filters.add(audioClipFilter(bgmInputIndices[i], clip.startMs, clip.volume, "bgm$i"))
+                filters.add(
+                    audioClipFilter(
+                        inputIdx = bgmInputIndices[i],
+                        startMs = clip.startMs,
+                        volume = clip.volume,
+                        label = "bgm$i",
+                        sourceTrimStartMs = clip.sourceTrimStartMs,
+                        sourceTrimEndMs = clip.sourceTrimEndMs,
+                    )
+                )
                 mixInputs.add("[bgm$i]")
             }
             // Directive stems: directive 마다 stem 들을 atrim 으로 [sourceOffset, sourceOffset+range]
