@@ -7,7 +7,7 @@ info:
     - Perso AI 프록시 — 음성분리
     - Vertex AI Gemini 프록시 — 채팅 function calling
     - 로컬 ffmpeg 파이프라인 — segment concat / BGM mix / 음원분리 stem mix
-    - Google OAuth 검증 + HS256 access token 발급
+    - Google / Apple Sign In 검증 + Postgres user upsert + HS256 access token 발급
 
     모든 운영 endpoint 는 `/api/v2` 아래에 마운트된다. 1MB 이상 binary 응답
     (음원 stem / 렌더 산출물) 은 BFF 자체 HMAC 토큰 (`token` query param) 으로
@@ -21,7 +21,10 @@ servers:
 
 tags:
   - name: Auth
-    description: Google OAuth ID token 검증 → BFF access token (HS256 JWT) 발급
+    description: |
+      Google / Apple ID Token 검증 → users 테이블 upsert (provider+providerSub 유니크) →
+      BFF access token (HS256 JWT) 발급. JWT `sub` 는 user 의 internal UUID
+      (provider sub 가 아님) — 향후 IAP `appAccountToken` 으로도 재사용.
   - name: Languages
     description: Perso 가 지원하는 타깃 언어 목록 프록시
   - name: Render
@@ -35,13 +38,14 @@ tags:
 
 paths:
   # ---------------------------------------------------------------- Auth
-  /auth/google:
+  /api/v2/auth/google:
     post:
       tags: [Auth]
       summary: Google ID Token → BFF access token 교환
       description: |
-        모바일이 native SDK 로 받은 Google ID Token 을 검증한 뒤 HS256 access token (JWT) 을 발급.
-        사용자 record 는 영속화하지 않고 JWT claim 에 sub/email/name/picture 가 들어간다.
+        모바일이 native Google SDK 로 받은 ID Token 을 Google `tokeninfo` 로 검증한 뒤,
+        `users` 테이블에 (provider=google, providerSub=Google sub) 로 upsert 하고 HS256
+        access token (JWT) 발급. JWT 의 `sub` 는 BFF internal UUID — Google sub 가 아님.
       requestBody:
         required: true
         content:
@@ -55,6 +59,34 @@ paths:
               schema: { $ref: '#/components/schemas/AuthResponse' }
         '401':
           description: ID Token 검증 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/auth/apple:
+    post:
+      tags: [Auth]
+      summary: Apple ID Token → BFF access token 교환
+      description: |
+        iOS 클라이언트가 AuthenticationServices 로 받은 Apple ID Token 을 Apple JWKS
+        (RS256) 로 검증한 뒤, `users` 테이블에 (provider=apple, providerSub=Apple sub) 로
+        upsert 하고 HS256 access token (JWT) 발급. JWT 의 `sub` 는 BFF internal UUID.
+
+        `fullName` 은 Apple 이 **최초 동의 시 1회만** 제공 — 신규 가입에만 user.name 으로
+        사용되고, 이후 로그인엔 null 로 와도 DB 의 기존 name 보존.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/AppleAuthRequest' }
+      responses:
+        '200':
+          description: 발급 성공
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/AuthResponse' }
+        '401':
+          description: ID Token 검증 실패 (서명/만료/aud 불일치)
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -478,11 +510,27 @@ components:
           type: string
           description: 모바일 native Google SDK 가 반환한 ID Token
 
+    AppleAuthRequest:
+      type: object
+      required: [idToken]
+      properties:
+        idToken:
+          type: string
+          description: iOS AuthenticationServices 가 반환한 Apple ID Token
+        fullName:
+          type: string
+          nullable: true
+          description: |
+            Apple 이 최초 동의 시 1회만 제공. 신규 가입에만 user.name 으로 채워지고,
+            재로그인엔 null 이어도 DB 의 기존 name 유지.
+
     AuthUser:
       type: object
       required: [sub, email, name]
       properties:
-        sub: { type: string }
+        sub:
+          type: string
+          description: BFF internal UUID (provider sub 가 아님). IAP appAccountToken 으로도 재사용.
         email: { type: string }
         name: { type: string }
         picture:
@@ -495,7 +543,7 @@ components:
       properties:
         accessToken:
           type: string
-          description: HS256 JWT
+          description: HS256 JWT (sub=AuthUser.sub)
         expiresAt:
           type: integer
           format: int64
@@ -618,6 +666,16 @@ components:
           description: |
             audio 모드는 segment audio 트랙들을 trim/concat + bgmClips mix → 단일 .m4a.
             separation stems 는 audio 모드에서 무시.
+        quality:
+          type: string
+          enum: [high, medium, low]
+          default: medium
+          description: |
+            출력 영상 품질 프로필 (파일 사이즈 = egress 비용 직결).
+              high   — CRF 20, preset slow, audio 192k.
+              medium — CRF 23, preset fast, audio 192k (기본).
+              low    — CRF 28, preset fast, audio 128k (~50% 작음).
+            audio 모드에선 quality 무시 — 후속 분리 파이프라인 입력 품질 보장 위해 별도 유지.
 
     RenderResponse:
       type: object
