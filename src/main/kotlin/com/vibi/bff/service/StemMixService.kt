@@ -119,9 +119,14 @@ class StemMixService(
                 "[$i:a]volume=${sel.volume}[a$i]"
             } + run {
                 val amixInputs = stemFiles.indices.joinToString("") { "[a$it]" }
+                // normalize=0: 입력을 1/N 로 나누지 않고 그대로 합산. Perso 의 stem 들은
+                // 원본 = sum(stems) 관계라 normalize=1 (default) 로 두면 N 개 합쳐도
+                // 평균이 되어 원본 대비 -6dB(N=2) ~ -9.5dB(N=3) 만큼 작아짐. clipping
+                // 위험은 stem 분리 손실로 sum 이 원본 amplitude 를 넘기 어려워 사실상
+                // 적음 — 넘는 케이스는 per-stem volume 으로 조정.
                 // duration=longest so shorter stems get padded with silence
                 // instead of truncating the full mix.
-                "${amixInputs}amix=inputs=${stemFiles.size}:duration=longest:dropout_transition=0[aout]"
+                "${amixInputs}amix=inputs=${stemFiles.size}:duration=longest:dropout_transition=0:normalize=0[aout]"
             }
             cmd.addAll(listOf("-filter_complex", filters.joinToString(";")))
             cmd.addAll(listOf(

@@ -53,4 +53,17 @@ class StemMixCommandTest {
         val cmd = cmdOf(StemMixSelection("background", 1f) to aFile)
         assertTrue(cmd.containsAll(listOf("-map", "[aout]")))
     }
+
+    @Test
+    fun `amix uses normalize=0 so summed stems preserve original loudness`() {
+        // Regression guard: default amix normalize=1 divides each input by N,
+        // dropping the mix ~6dB for 2 stems / ~9.5dB for 3. Perso 의 stem 들은
+        // 원본 = sum(stems) 라 normalize=0 (직접 합산) 이 맞다.
+        val cmd = cmdOf(
+            StemMixSelection("background", 1f) to aFile,
+            StemMixSelection("speaker_0", 1f) to bFile,
+        )
+        val filters = cmd[cmd.indexOf("-filter_complex") + 1]
+        assertTrue(filters.contains("normalize=0"), "amix must specify normalize=0: $filters")
+    }
 }

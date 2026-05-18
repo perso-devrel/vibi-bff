@@ -390,9 +390,13 @@ class SeparationService(
         val cmd = mutableListOf("ffmpeg", "-y")
         inputs.forEach { cmd += listOf("-i", it.absolutePath) }
         val labels = inputs.indices.joinToString("") { "[$it:a]" }
+        // normalize=0: voice_all 은 화자 stem 들을 원본 발화 bus 로 재조립하는 것 →
+        // 원본 = sum(speaker stems) 이므로 평균(default normalize=1) 이 아니라 합산이
+        // 맞음. 평균을 내면 voice_all 자체가 -6dB(2 화자) 이상 작아지고, 그걸 또
+        // StemMixService 가 다시 amix 하면 누적 -12dB ~ 까지 떨어짐.
         cmd += listOf(
             "-filter_complex",
-            "${labels}amix=inputs=${inputs.size}:duration=longest:dropout_transition=0[out]"
+            "${labels}amix=inputs=${inputs.size}:duration=longest:dropout_transition=0:normalize=0[out]"
         )
         cmd += listOf("-map", "[out]", "-q:a", "4", output.absolutePath)
         val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
