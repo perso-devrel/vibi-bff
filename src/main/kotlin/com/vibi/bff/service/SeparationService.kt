@@ -37,6 +37,10 @@ data class SeparationJob(
     @Volatile var stems: List<LocalStem> = emptyList(),
     @Volatile var consumedByMixJobId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    /** SeparationService.dedupIndex 와 1:1 — 버튼 연타로 동일 (source+spec) 가
+     * 다시 들어와도 같은 jobId 를 돌려주기 위한 키. null 이면 dedup 대상 외
+     * (legacy upload path). dispose() 가 이 키로 index 정리. */
+    val dedupKey: String? = null,
 )
 
 data class LocalStem(
@@ -55,6 +59,11 @@ class SeparationService(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
+    /** dedupKey → jobId. submit 의 atomic check-and-claim 으로 같은 키 중복 submit
+     * 차단 (버튼 연타 방어). 키는 SeparationRoutes.buildSeparationDedupKey 가 계산.
+     * dispose() 가 SeparationJob.dedupKey 로 entry 정리. FAILED 잡은 dedup 대상
+     * 아님 (재시도 허용). */
+    private val dedupIndex = ConcurrentHashMap<String, String>()
     private val cleanup = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "separation-cleanup").apply { isDaemon = true }
     }
@@ -71,10 +80,48 @@ class SeparationService(
 
     fun getJob(jobId: String): SeparationJob? = jobs[jobId]
 
-    fun submit(sourceFile: File, spec: SeparationSpec): String {
+    /**
+     * 주어진 [dedupKey] 로 등록된 jobId 중 still-active 한 것을 반환. active 는
+     * READY 직전까지의 진행 상태 + READY-but-not-yet-consumed-by-mix. FAILED 나
+     * 이미 mix 에 소비된 READY 잡은 active 가 아니므로 null 반환 → caller 는 새
+     * 잡을 만들면 됨. SeparationRoutes 의 pre-check 가 disk 낭비 회피 용도로 사용.
+     */
+    fun findActiveJob(dedupKey: String): String? {
+        val jobId = dedupIndex[dedupKey] ?: return null
+        val job = jobs[jobId] ?: return null
+        val active = job.status != "FAILED" &&
+            !(job.status == "READY" && job.consumedByMixJobId != null)
+        return if (active) jobId else null
+    }
+
+    /**
+     * [dedupKey] 가 non-null 이면 atomic check-and-claim — 같은 키의 active 잡이
+     * 있으면 [sourceFile] 을 삭제하고 기존 jobId 를 반환한다. dispose() 가 같은
+     * 키 entry 를 정리하므로 disposed 잡의 키는 자유롭게 재사용된다.
+     */
+    fun submit(sourceFile: File, spec: SeparationSpec, dedupKey: String? = null): String {
+        if (dedupKey != null) {
+            // synchronized(dedupIndex) 로 (check, claim) 을 원자화 — 두 동시 호출이
+            // 동일 키로 들어와도 한 쪽만 새 잡 생성, 다른 쪽은 기존 jobId 반환.
+            // findActiveJob 자체는 비-원자이지만 critical section 안에서 호출하므로 OK.
+            synchronized(dedupIndex) {
+                findActiveJob(dedupKey)?.let { existing ->
+                    sourceFile.delete()
+                    log.info("Separation dedup hit: key={} → existing jobId={}", dedupKey, existing)
+                    return existing
+                }
+                val jobId = createAndLaunch(sourceFile, spec, dedupKey)
+                dedupIndex[dedupKey] = jobId
+                return jobId
+            }
+        }
+        return createAndLaunch(sourceFile, spec, dedupKey = null)
+    }
+
+    private fun createAndLaunch(sourceFile: File, spec: SeparationSpec, dedupKey: String?): String {
         val jobId = "sep-${UUID.randomUUID()}"
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
-        val job = SeparationJob(jobId = jobId, outputDir = outputDir)
+        val job = SeparationJob(jobId = jobId, outputDir = outputDir, dedupKey = dedupKey)
         jobs[jobId] = job
 
         scope.launch {
@@ -83,6 +130,10 @@ class SeparationService(
             } catch (e: Exception) {
                 job.status = "FAILED"
                 job.error = e.message
+                // FAILED 상태에선 같은 키 재submit 이 새 잡을 만들어야 하므로 즉시
+                // dedup entry 정리 (cleanupAbandoned 의 FAILED_JOB_TTL 까지 기다리면
+                // 그동안 mobile 이 재시도해도 실패한 잡 ID 만 받게 됨).
+                dedupKey?.let { dedupIndex.remove(it, jobId) }
                 // Leave sourceFile on disk — caller can retry; cleanupAbandoned
                 // reaps it via dispose() once FAILED_JOB_TTL_MS passes.
                 log.error("Separation pipeline failed: jobId={}", jobId, e)
@@ -112,6 +163,9 @@ class SeparationService(
 
     fun dispose(jobId: String) {
         val job = jobs.remove(jobId) ?: return
+        // remove(key, expectedValue) 로 stale entry (이미 다른 잡이 같은 키로 교체된 경우)
+        // 는 건드리지 않음. FAILED 경로에서도 동일 정리가 일어나지만 멱등 안전.
+        job.dedupKey?.let { dedupIndex.remove(it, jobId) }
         job.outputDir.deleteRecursively()
         log.info("Disposed separation job: {}", jobId)
     }

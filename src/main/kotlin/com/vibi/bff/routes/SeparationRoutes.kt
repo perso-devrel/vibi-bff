@@ -43,6 +43,20 @@ fun Route.separationRoutes(
                 filePart?.delete()
                 throw IllegalArgumentException("spec is required")
             }
+
+            // Pre-check: 같은 (source+spec) 의 active 잡이 이미 있으면 resolve/trim
+            // 으로 디스크 낭비하지 말고 바로 기존 jobId 반환 — "이 구간 음원분리" 버튼
+            // 연타 방어. submit 의 atomic claim 이 진짜 safety net 이라 pre-check
+            // miss 해도 정확성은 유지되지만 IO 절약 효과 큼.
+            val dedupKey = buildSeparationDedupKey(spec)
+            if (dedupKey != null) {
+                separationService.findActiveJob(dedupKey)?.let { existing ->
+                    filePart?.delete()
+                    call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = existing))
+                    return@post
+                }
+            }
+
             // resolve() 는 항상 owned copy(또는 caller-owned upload)를 돌려준다 —
             // 따라서 maybeTrim 의 deleteOriginalOnFailure 분기가 필요 없다.
             // resolve / maybeTrim / submit 어느 단계든 throw 시 caller-owned source
@@ -53,7 +67,7 @@ fun Route.separationRoutes(
             try {
                 source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId)
                 pipelineInput = maybeTrim(source, spec)
-                val jobId = separationService.submit(pipelineInput, spec)
+                val jobId = separationService.submit(pipelineInput, spec, dedupKey)
                 call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = jobId))
             } catch (e: Throwable) {
                 runCatching { pipelineInput?.delete() }
@@ -213,6 +227,23 @@ fun Route.separationRoutes(
  * 영상 길이 측정 ms 단위 오차 허용치. 100ms 이내면 자동 clamp.
  */
 private const val TRIM_DURATION_TOLERANCE_MS = 100L
+
+/**
+ * Idempotency 키. 같은 (editedRenderJobId, trim 구간, 화자 수, 언어, mediaType) 으로
+ * 들어온 요청은 같은 키 → SeparationService.submit 이 기존 active jobId 반환.
+ *
+ * **editedRenderJobId path 만 지원**. legacy multipart upload 는 source 식별이 file
+ * 바이트 hash 라 별도 비용 (대용량 영상 stream hash). 현재 "이 구간 음원분리" 버튼은
+ * 항상 edited render 결과를 source 로 쓰므로 이 한정으로 충분. upload 경로 dedup 이
+ * 필요해지면 RenderInputCacheService 의 sha256 prefix 패턴 재사용 가능.
+ */
+internal fun buildSeparationDedupKey(spec: SeparationSpec): String? {
+    val editedId = spec.editedRenderJobId ?: return null
+    val start = spec.trimStartMs ?: 0L
+    val end = spec.trimEndMs ?: 0L
+    return "edited=$editedId|trim=$start-$end|spk=${spec.numberOfSpeakers}|" +
+        "lang=${spec.sourceLanguageCode}|type=${spec.mediaType}"
+}
 
 /**
  * **Caller-owned single-use** — `file` 의 owner 는 caller (SeparationRoutes 의 submit
