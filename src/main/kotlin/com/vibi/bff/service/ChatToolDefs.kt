@@ -10,8 +10,7 @@ import kotlinx.serialization.json.putJsonObject
  * 모바일 dispatcher 는 여기 등록된 name 외엔 거부 (방어선). v1 사용자 선택 도구 범위:
  *  - 영상 편집: delete/duplicate range, volume/speed
  *  - 음성 분리: range 기반 separate, stem 볼륨
- *  - 자막·더빙: 텍스트 수정, 자동 생성 (영상/BGM 모두)
- *  - 음원/녹음: 위치/볼륨
+ *  - BGM: 위치/볼륨/범위
  *
  * **시간 인자 규약**: 모든 startMs/endMs 는 글로벌 timeline 의 milliseconds, 반열린 구간
  * `[startMs, endMs)` — startMs INCLUSIVE, endMs EXCLUSIVE. "2초부터 5초까지" → startMs=2000,
@@ -88,53 +87,6 @@ object ChatToolDefs {
             ),
             required = listOf("stemId", "volume"),
         ),
-        // --- 자막·더빙 ---
-        fn(
-            name = "update_subtitle_text",
-            description = "Replace a subtitle clip's text. Preserve language unless user explicitly switches.",
-            properties = mapOf(
-                "clipId" to schema("string", "Target subtitle clip id."),
-                "text" to schema("string", "New text. Use the user's language verbatim — do not auto-translate."),
-            ),
-            required = listOf("clipId", "text"),
-        ),
-        fn(
-            name = "transcribe_for_subtitles",
-            description = "STEP 1 of the subtitle generation flow. Transcribe the project's video to a script (STT only — NO translation yet) so the user can review/edit it before subtitle clips are created. The transcribed script is delivered to the chat as a model message; the user is then expected to either confirm or request edits. After the script is shown, your NEXT turn must call apply_subtitles_with_script to actually create the subtitle clips. Use this tool whenever the user asks for subtitles — do not call generate_subtitles unless the user explicitly says 'skip review' or similar.",
-            properties = mapOf(
-                "sourceLanguageCode" to schema("string", "BCP-47 source language or 'auto'."),
-                "targetLanguageCodes" to schema("array", "Target codes the user asked for, e.g., ['en','ja']. Will be remembered for the apply step — pass the same value to apply_subtitles_with_script unless the user changed their mind."),
-            ),
-            required = listOf("targetLanguageCodes"),
-        ),
-        fn(
-            name = "apply_subtitles_with_script",
-            description = "STEP 2 of the subtitle generation flow. Create subtitle clips from a script that has already been transcribed (and possibly edited). Use this AFTER transcribe_for_subtitles has run and the user has either confirmed the script or requested edits. If the user asked for edits, regenerate the FULL SRT body with the edits applied and pass it as `srt`; if the user is fine with the original transcription, omit `srt` (the cached transcript is used). The SRT format is standard SubRip: '1\\n00:00:01,000 --> 00:00:03,000\\nHello\\n\\n2\\n...'.",
-            properties = mapOf(
-                "targetLanguageCodes" to schema("array", "BCP-47 codes to translate to, e.g., ['en','ja']."),
-                "srt" to schema("string", "Optional full SRT body with the user's edits applied. Omit if the user accepted the original transcription as-is. When provided, must be valid SRT — keep timing entries unchanged unless the user asked for timing changes."),
-                "sourceLanguageCode" to schema("string", "BCP-47 source language or 'auto'. Same as in step 1."),
-            ),
-            required = listOf("targetLanguageCodes"),
-        ),
-        fn(
-            name = "generate_subtitles",
-            description = "DEPRECATED — prefer transcribe_for_subtitles + apply_subtitles_with_script for the standard review-then-apply flow. Only call this directly if the user explicitly asks to skip the script review step.",
-            properties = mapOf(
-                "sourceLanguageCode" to schema("string", "BCP-47 source language or 'auto'."),
-                "targetLanguageCodes" to schema("array", "Target codes, e.g., ['en','ja']."),
-            ),
-            required = listOf("targetLanguageCodes"),
-        ),
-        fn(
-            name = "generate_dub",
-            description = "Trigger automatic dubbing for the project's video into a single target language. Costs minutes.",
-            properties = mapOf(
-                "sourceLanguageCode" to schema("string", "BCP-47 source language or 'auto'."),
-                "targetLanguageCode" to schema("string", "Single target lang code."),
-            ),
-            required = listOf("targetLanguageCode"),
-        ),
         // --- BGM 위치·볼륨 ---
         fn(
             name = "move_bgm_clip",
@@ -164,25 +116,6 @@ object ChatToolDefs {
             ),
             required = listOf("clipId", "newStartMs", "newEndMs"),
         ),
-        // --- BGM 자막·더빙 (Stage -1 prereq 완료 후 활성) ---
-        fn(
-            name = "generate_subtitles_for_bgm",
-            description = "Trigger automatic subtitle generation for a BGM clip's audio.",
-            properties = mapOf(
-                "clipId" to schema("string", "Target BGM clip id."),
-                "targetLanguageCodes" to schema("array", "Target codes."),
-            ),
-            required = listOf("clipId", "targetLanguageCodes"),
-        ),
-        fn(
-            name = "generate_dub_for_bgm",
-            description = "Trigger automatic dubbing for a BGM clip's audio into a target language.",
-            properties = mapOf(
-                "clipId" to schema("string", "Target BGM clip id."),
-                "targetLanguageCode" to schema("string", "Single target lang code."),
-            ),
-            required = listOf("clipId", "targetLanguageCode"),
-        ),
     )
 
     /**
@@ -203,7 +136,7 @@ object ChatToolDefs {
             CRITICAL — TOOL INVOCATION FORMAT:
             - To invoke a tool, return a structured `functionCall` response part (Vertex AI function-calling response format) with the tool's `name` and `args`. The hosting app reads `candidates[0].content.parts[].functionCall` directly.
             - NEVER write a `tool_code` markdown fence.
-            - NEVER write Python-style invocations such as `print(default_api.generate_subtitles(...))` or `default_api.foo(...)`.
+            - NEVER write Python-style invocations such as `print(default_api.<name>(...))` or `default_api.foo(...)`.
             - NEVER write YAML / pseudo-YAML such as `- tool: default_api.<name>` followed by `args:` indented mapping.
             - NEVER write the literal strings `kind:`, `rationale:`, `steps:`, `tool:`, `args:` — those are the hosting app's wire format, not yours. The app constructs them from your structured functionCall output.
             - If you have nothing to call, return plain text only (no code blocks, no fake JSON, no fake YAML).

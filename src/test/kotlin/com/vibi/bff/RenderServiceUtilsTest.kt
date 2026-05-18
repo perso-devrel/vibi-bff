@@ -4,7 +4,6 @@ import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.secondsToFfmpegArg
-import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.test.*
 
@@ -49,40 +48,6 @@ class RenderServiceUtilsTest {
         assertEquals("3600.000000", secondsToFfmpegArg(3600.0))
     }
 
-    // ── ffmpegColor ────────────────────────────────────────────────────────────
-
-    @Test
-    fun `ffmpegColor normalises hash prefix`() {
-        assertEquals("0xff0000", service.ffmpegColor("#ff0000"))
-        assertEquals("0xABCDEF", service.ffmpegColor("#ABCDEF"))
-    }
-
-    @Test
-    fun `ffmpegColor accepts bare hex without prefix`() {
-        assertEquals("0x123456", service.ffmpegColor("123456"))
-    }
-
-    @Test
-    fun `ffmpegColor trims surrounding whitespace`() {
-        assertEquals("0xff0000", service.ffmpegColor("  #ff0000  "))
-    }
-
-    @Test
-    fun `ffmpegColor falls back to black on malformed input`() {
-        assertEquals("0x000000", service.ffmpegColor("not-a-color"))
-        assertEquals("0x000000", service.ffmpegColor("#GGGGGG"))
-        assertEquals("0x000000", service.ffmpegColor("#fff"))       // 3-char shorthand not supported
-        assertEquals("0x000000", service.ffmpegColor("#00000000"))  // RRGGBBAA not supported
-    }
-
-    @Test
-    fun `ffmpegColor rejects filter injection attempts`() {
-        // Commas and quotes would escape the pad= color argument into other
-        // filters — the regex must reject anything outside 6 hex digits.
-        assertEquals("0x000000", service.ffmpegColor("#000000,drawtext='x'"))
-        assertEquals("0x000000", service.ffmpegColor("black:x=0"))
-    }
-
     // ── atempoChain ────────────────────────────────────────────────────────────
 
     @Test
@@ -115,7 +80,7 @@ class RenderServiceUtilsTest {
     // ── separationDirectives → ffmpeg command ────────────────────────────────
 
     @Test
-    fun `buildFfmpegCommand wires directive stems into amix and mutes base`() = runBlocking {
+    fun `buildFfmpegCommand wires directive stems into amix and mutes base`() {
         val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-stems").apply { mkdirs() }
         val video = File(tmp, "v.mp4").apply { writeText("x") }
         val stem0 = File(tmp, "s0.mp3").apply { writeText("x") }
@@ -124,11 +89,6 @@ class RenderServiceUtilsTest {
 
         val cmd = service.buildFfmpegCommand(
             videoFile = video,
-            audioFiles = emptyMap(),
-            imageFiles = emptyMap(),
-            subtitlesFile = null,
-            dubClips = emptyList(),
-            imageClips = emptyList(),
             videoDurationMs = 10_000,
             outputFile = out,
             separationDirectives = listOf(
@@ -158,13 +118,13 @@ class RenderServiceUtilsTest {
             filter.contains("[0:a]volume=enable='gt(between(t,1.0,4.0),0)':volume=0[base_muted]"),
             "expected base mute filter not found in: $filter",
         )
-        // stem filters with atrim+adelay+volume
+        // stem filters with atrim+adelay+volume — sourceOffsetMs=0 default → atrim=0.0:3.0
         assertTrue(
-            filter.contains("atrim=0:3.0,asetpts=PTS-STARTPTS,adelay=1000|1000,volume=1.0[stem_0_0]"),
+            filter.contains("atrim=0.0:3.0,asetpts=PTS-STARTPTS,adelay=1000|1000,volume=1.0[stem_0_0]"),
             "expected stem_0_0 filter not found in: $filter",
         )
         assertTrue(
-            filter.contains("atrim=0:3.0,asetpts=PTS-STARTPTS,adelay=1000|1000,volume=0.5[stem_0_1]"),
+            filter.contains("atrim=0.0:3.0,asetpts=PTS-STARTPTS,adelay=1000|1000,volume=0.5[stem_0_1]"),
             "expected stem_0_1 filter not found in: $filter",
         )
         // stems and base_muted go into the final amix
@@ -172,13 +132,50 @@ class RenderServiceUtilsTest {
     }
 
     /**
-     * Regression: 한글 파일명을 가진 stem 이 ffmpeg 입력 인자로 그대로 전달되는지
-     * (escape 안 깨지는지). ProcessBuilder 는 인자 array 형태로 spawn 하므로 shell
-     * escape 가 필요 없지만, filter graph 내부 path (subtitles `ass='...'` 등) 에
-     * 한글이 들어가면 별도 escape 필요. 본 테스트는 stem 입력 (단순 -i path) 케이스.
+     * 모바일이 영상 range delete 로 directive 를 split 한 경우, 뒤쪽 piece 는 `sourceOffsetMs > 0` 으로
+     * 같은 stem audio 파일의 중간부터 재생되어야 한다. ffmpeg `atrim` 의 시작점이 sourceOffsetMs/1000
+     * 으로 옮겨졌는지 검증.
      */
     @Test
-    fun `buildFfmpegCommand passes Korean filename as -i input unchanged`() = runBlocking {
+    fun `buildFfmpegCommand atrim uses sourceOffsetMs for split directive`() {
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-stems-split").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val stem = File(tmp, "s.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        // split 뒤쪽 piece — composition 의 [4s, 7s] 를 차지하지만 stem audio 의 [10s, 13s] 를 재생.
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            videoDurationMs = 20_000,
+            outputFile = out,
+            separationDirectives = listOf(
+                DirectiveWithStemFiles(
+                    rangeStartMs = 4_000,
+                    rangeEndMs = 7_000,
+                    muteOriginalSegmentAudio = true,
+                    stems = listOf(DirectiveStem(file = stem, volume = 1.0f)),
+                    sourceOffsetMs = 10_000,
+                ),
+            ),
+        )
+
+        val filterIdx = cmd.indexOf("-filter_complex")
+        val filter = cmd[filterIdx + 1]
+        // atrim 의 시작점 = sourceOffsetMs/1000 = 10.0, 끝점 = (sourceOffsetMs+rangeMs)/1000 = 13.0.
+        // adelay 는 composition 좌표라 rangeStartMs (4000) 그대로.
+        assertTrue(
+            filter.contains("atrim=10.0:13.0,asetpts=PTS-STARTPTS,adelay=4000|4000,volume=1.0[stem_0_0]"),
+            "expected split-piece atrim with sourceOffsetMs not found in: $filter",
+        )
+    }
+
+    /**
+     * Regression: 한글 파일명을 가진 stem 이 ffmpeg 입력 인자로 그대로 전달되는지
+     * (escape 안 깨지는지). ProcessBuilder 는 인자 array 형태로 spawn 하므로 shell
+     * escape 가 필요 없음.
+     */
+    @Test
+    fun `buildFfmpegCommand passes Korean filename as -i input unchanged`() {
         val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-korean").apply { mkdirs() }
         val video = File(tmp, "v.mp4").apply { writeText("x") }
         val stem = File(tmp, "화자 1.wav").apply { writeText("x") }
@@ -186,11 +183,6 @@ class RenderServiceUtilsTest {
 
         val cmd = service.buildFfmpegCommand(
             videoFile = video,
-            audioFiles = emptyMap(),
-            imageFiles = emptyMap(),
-            subtitlesFile = null,
-            dubClips = emptyList(),
-            imageClips = emptyList(),
             videoDurationMs = 5_000,
             outputFile = out,
             separationDirectives = listOf(

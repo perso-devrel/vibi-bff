@@ -1,9 +1,7 @@
 package com.vibi.bff.service
 
 import com.vibi.bff.model.BgmClip
-import com.vibi.bff.model.DubClip
 import com.vibi.bff.model.FrameConfig
-import com.vibi.bff.model.ImageClip
 import com.vibi.bff.model.Segment
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -63,9 +61,9 @@ data class RenderJob(
     val createdAt: Long = System.currentTimeMillis(),
     /** "queued" while waiting for an ffmpeg permit; null once acquired or done. */
     @Volatile var progressReason: String? = null,
-    /** Phase 1: jobs are referenced by downstream pipelines (subtitles / autodub /
-     * separation) via editedRenderJobId. cleanup is now last-access based so a
-     * referenced job stays alive as long as the client keeps touching it. */
+    /** Separation pipeline references this job via editedRenderJobId. Cleanup is
+     * last-access based so a referenced job stays alive as long as the client
+     * keeps touching it. */
     @Volatile var lastAccessedAt: Long = System.currentTimeMillis(),
 )
 
@@ -77,6 +75,8 @@ data class DirectiveWithStemFiles(
     val rangeEndMs: Long,
     val muteOriginalSegmentAudio: Boolean,
     val stems: List<DirectiveStem>,
+    /** Stem audio 파일 안의 시작 offset (ms). split directive 의 뒤쪽 piece 가 stem 중간부터 재생. */
+    val sourceOffsetMs: Long = 0L,
 )
 
 private const val MAX_PARALLEL_SEGMENTS = 2
@@ -104,8 +104,7 @@ internal fun secondsToFfmpegArg(seconds: Double): String =
 class RenderService(
     private val renderDir: File,
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
-    /** Phase 1: bumped from 1h → 2h to give downstream pipelines (subtitles /
-     * autodub / separation) a wider window to pick up the rendered output as
+    /** 2h window for the separation pipeline to pick up the rendered output as
      * source. cleanup uses lastAccessedAt so each touch resets the clock. */
     private val jobTtlMs: Long = 7200_000,
     /** Hard cap on concurrent top-level render jobs that can spawn ffmpeg.
@@ -154,14 +153,14 @@ class RenderService(
     /**
      * Phase 1: returns the completed render output file for [jobId], or null
      * when the job is missing / not yet COMPLETED / its file no longer
-     * exists on disk. Callers that consume this output as source for
-     * downstream pipelines (subtitles / autodub / separation) should pair
-     * this with [touchJob] so cleanup defers GC.
+     * exists on disk. Callers that consume this output as source for the
+     * separation pipeline should pair this with [touchJob] so cleanup
+     * defers GC.
      *
-     * Prefer [acquireRenderOutputCopy] for downstream pipeline source
-     * resolution — that copies the bytes and bumps lastAccessedAt under a
-     * single lock, so cleanup can't race with the consumer and the consumer
-     * can freely delete/rename its returned file.
+     * Prefer [acquireRenderOutputCopy] for downstream source resolution —
+     * that copies the bytes and bumps lastAccessedAt under a single lock,
+     * so cleanup can't race with the consumer and the consumer can freely
+     * delete/rename its returned file.
      */
     fun getRenderOutputFile(jobId: String): File? {
         val job = jobs[jobId] ?: return null
@@ -171,19 +170,19 @@ class RenderService(
     }
 
     /**
-     * Phase 1: bump [RenderJob.lastAccessedAt] so the cleanup sweep treats
-     * the job as recently used. No-op when the jobId is unknown.
+     * Bump [RenderJob.lastAccessedAt] so the cleanup sweep treats the job
+     * as recently used. No-op when the jobId is unknown.
      */
     fun touchJob(jobId: String) {
         jobs[jobId]?.lastAccessedAt = System.currentTimeMillis()
     }
 
     /**
-     * Phase 1 follow-up: returns an **owned copy** of the completed render
-     * output for [jobId] under [copyTargetDir], or null when the job is
-     * missing / not yet COMPLETED / its file has been reaped. The caller
-     * owns the returned file — it is safe to delete, rename, or feed into
-     * a pipeline that does so (auto-subtitle, auto-dub, separation).
+     * Returns an **owned copy** of the completed render output for [jobId]
+     * under [copyTargetDir], or null when the job is missing / not yet
+     * COMPLETED / its file has been reaped. The caller owns the returned
+     * file — it is safe to delete, rename, or feed into a pipeline that
+     * does so (separation).
      *
      * The exists-check, the byte copy, and the lastAccessedAt bump all run
      * inside `synchronized(job)`. [cleanupExpiredJobs] takes the same lock
@@ -212,23 +211,16 @@ class RenderService(
         legacyVideoFile: File?,
         videoFiles: Map<String, File>,
         segmentImageFiles: Map<String, File>,
-        audioFiles: Map<String, File>,
-        imageFiles: Map<String, File>,
-        subtitlesFile: File?,
-        dubClips: List<DubClip>,
-        imageClips: List<ImageClip>,
         videoDurationMs: Long?,
         segments: List<Segment>?,
         bgmAudioFiles: Map<String, File> = emptyMap(),
         bgmClips: List<BgmClip> = emptyList(),
         frame: FrameConfig? = null,
-        audioOverrideFile: File? = null,
         separationDirectives: List<DirectiveWithStemFiles> = emptyList(),
         inputFilesToCleanup: List<File> = emptyList(),
         /** Phase 1.5: "video" (default mp4) | "audio" (m4a/AAC). audio mode
-         * 는 자막/분리 파이프라인 source 로 쓰일 결과만 만들어내므로 비디오 트랙 ·
-         * sticker overlay · subtitle burn-in · imageClips · dubClips ·
-         * audioOverride · separation stems 모두 무시된다. */
+         * 는 분리 파이프라인 source 로 쓰일 결과만 만들어내므로 separation stems
+         * 도 무시된다 (BGM mix 는 여전히 적용). */
         outputKind: String = "video",
         /** 최종 인코딩 품질 프로필 (CRF/preset/audio). high/medium/low. audio 모드는 무시. */
         quality: String = "medium",
@@ -283,8 +275,7 @@ class RenderService(
                 } else if (segments != null) {
                     runMultiSegmentRender(
                         job, segments, videoFiles, segmentImageFiles,
-                        audioFiles, imageFiles, subtitlesFile, dubClips, imageClips,
-                        frame, bgmAudioFiles, bgmClips, audioOverrideFile,
+                        frame, bgmAudioFiles, bgmClips,
                         separationDirectives, qualityProfile,
                     )
                 } else {
@@ -296,11 +287,9 @@ class RenderService(
                         ?: throw IllegalArgumentException("videoDurationMs is required for legacy render")
                     require(duration > 0) { "videoDurationMs must be positive" }
 
-                    val (outW, outH) = if (imageClips.isNotEmpty()) getVideoSize(videoFile) else Pair(0, 0)
                     val command = buildFfmpegCommand(
-                        videoFile, audioFiles, imageFiles, subtitlesFile,
-                        dubClips, imageClips, duration, outputFile, outW, outH,
-                        bgmAudioFiles, bgmClips, audioOverrideFile,
+                        videoFile, duration, outputFile,
+                        bgmAudioFiles, bgmClips,
                         separationDirectives, qualityProfile,
                     )
                     log.info("Starting legacy ffmpeg render: jobId={}", jobId)
@@ -344,19 +333,18 @@ class RenderService(
 
     // ── Audio-only pipeline (Phase 1.5) ──────────────────────────────────────
     //
-    // 자막 / 음원분리 파이프라인이 편집된 영상의 audio 만 필요로 한다는 관찰에서
-    // 출발. 비디오 인코딩(libx264)을 통째로 건너뛰면 동일 segment list 기준으로
-    // mp4 렌더 대비 5~20x 빠르고 결과 사이즈도 ~1/30. 결과는 m4a (AAC LC).
+    // 음원분리 파이프라인이 편집된 영상의 audio 만 필요로 한다는 관찰에서 출발.
+    // 비디오 인코딩(libx264)을 통째로 건너뛰면 동일 segment list 기준으로 mp4
+    // 렌더 대비 5~20x 빠르고 결과 사이즈도 ~1/30. 결과는 m4a (AAC LC).
     //
     // 처리되지 않는 input config (audio 와 무관해 의도적으로 무시):
-    //   • imageClips · sticker overlay · subtitlesFile (burn-in 대상 없음)
     //   • IMAGE 타입 segment (audio 없음 — anullsrc 로 대체해 timeline 만 차지)
-    //   • dubClips · audioOverrideFile · separationDirectives (audio render
-    //     자체가 자막/분리/더빙 단계 BEFORE 호출되므로 mix 할 source 가 없음)
+    //   • separationDirectives (audio render 자체가 분리 단계 BEFORE 호출되므로 mix
+    //     할 source 가 없음)
     //
     // 적용되는 것:
     //   • Segment.trimStartMs/trimEndMs · speedScale (atempo) · volumeScale
-    //   • bgmClips (mix 대상으로 합류, dubClips 와 동일하게 adelay+volume 적용)
+    //   • bgmClips (mix 대상으로 합류, adelay+volume 적용)
     private suspend fun runAudioOnlyRender(
         job: RenderJob,
         segments: List<Segment>,
@@ -625,15 +613,9 @@ class RenderService(
         segments: List<Segment>,
         videoFiles: Map<String, File>,
         segmentImageFiles: Map<String, File>,
-        audioFiles: Map<String, File>,
-        imageFiles: Map<String, File>,
-        subtitlesFile: File?,
-        dubClips: List<DubClip>,
-        imageClips: List<ImageClip>,
         frame: FrameConfig?,
         bgmAudioFiles: Map<String, File>,
         bgmClips: List<BgmClip>,
-        audioOverrideFile: File?,
         separationDirectives: List<DirectiveWithStemFiles>,
         qualityProfile: QualityProfile,
     ) {
@@ -689,15 +671,14 @@ class RenderService(
             stepsDone.incrementAndGet()
             updateProgress()
 
-            // Step 4 & 5: stickers + dub audio + subtitles
-            // Use output-length semantics so speed-scaled VIDEO segments
-            // contribute their stretched/compressed length, matching what
-            // the final -t expects after concat.
+            // Step 4: final mix (base audio mute window + BGM + separation stems).
+            // Use output-length semantics so speed-scaled VIDEO segments contribute
+            // their stretched/compressed length, matching what the final -t expects
+            // after concat.
             val totalDurationMs = sorted.sumOf { segmentOutputDurationMs(it) }
             val command = buildFfmpegCommand(
-                concatFile, audioFiles, imageFiles, subtitlesFile,
-                dubClips, imageClips, totalDurationMs, job.outputFile, outW, outH,
-                bgmAudioFiles, bgmClips, audioOverrideFile,
+                concatFile, totalDurationMs, job.outputFile,
+                bgmAudioFiles, bgmClips,
                 separationDirectives, qualityProfile,
             )
             log.info("Starting final ffmpeg render: jobId={}", job.jobId)
@@ -906,46 +887,21 @@ class RenderService(
 
     // ── FFmpeg command builder ────────────────────────────────────────────────
 
-    internal suspend fun buildFfmpegCommand(
+    internal fun buildFfmpegCommand(
         videoFile: File,
-        audioFiles: Map<String, File>,
-        imageFiles: Map<String, File>,
-        subtitlesFile: File?,
-        dubClips: List<DubClip>,
-        imageClips: List<ImageClip>,
         videoDurationMs: Long,
         outputFile: File,
-        outWidth: Int = 0,
-        outHeight: Int = 0,
         bgmAudioFiles: Map<String, File> = emptyMap(),
         bgmClips: List<BgmClip> = emptyList(),
-        audioOverrideFile: File? = null,
         separationDirectives: List<DirectiveWithStemFiles> = emptyList(),
         qualityProfile: QualityProfile = QualityProfile.of("medium"),
     ): List<String> {
         val cmd = mutableListOf("ffmpeg", "-y")
         cmd.addAll(listOf("-i", videoFile.absolutePath))
 
-        // Audio override (Phase 3 auto-dub) becomes the new "base" audio
-        // track. We still consume the source video's stream slot, but its
-        // [0:a] is dropped from the mix in favor of [overrideIdx:a].
         var inputIdx = 1
-        var overrideAudioIdx: Int? = null
-        if (audioOverrideFile != null) {
-            cmd.addAll(listOf("-i", audioOverrideFile.absolutePath))
-            overrideAudioIdx = inputIdx++
-        }
 
-        // Audio inputs
-        val clipInputIndices = mutableListOf<Int>()
-        for (clip in dubClips) {
-            val f = audioFiles[clip.audioFileKey]
-                ?: throw IllegalArgumentException("Audio file not found: ${clip.audioFileKey}")
-            cmd.addAll(listOf("-i", f.absolutePath))
-            clipInputIndices.add(inputIdx++)
-        }
-
-        // BGM inputs (separate from dubClips; natural end, no loop)
+        // BGM inputs (natural end, no loop)
         val bgmInputIndices = mutableListOf<Int>()
         for (clip in bgmClips) {
             val f = bgmAudioFiles[clip.audioFileKey]
@@ -965,85 +921,48 @@ class RenderService(
             }
         }
 
-        // Sticker image inputs (deduplicated, order preserved)
-        val imageInputIndices = mutableMapOf<String, Int>()
-        for (clip in imageClips) {
-            if (clip.imageFileKey !in imageInputIndices) {
-                val f = imageFiles[clip.imageFileKey]
-                    ?: throw IllegalArgumentException("Image file not found: ${clip.imageFileKey}")
-                cmd.addAll(listOf("-i", f.absolutePath))
-                imageInputIndices[clip.imageFileKey] = inputIdx++
-            }
-        }
-
-        // Determine output resolution for sticker pixel math
-        val (outW, outH) = if (imageClips.isNotEmpty()) {
-            if (outWidth > 0 && outHeight > 0) Pair(outWidth, outHeight)
-            else getVideoSize(videoFile)
-        } else Pair(outWidth, outHeight)
-
         val filters = mutableListOf<String>()
-
-        // Audio mixing: pass-through when there's nothing to mix; otherwise
-        // build adelay+volume chains for each dub/bgm clip and amix them
-        // together with the base audio. amix duration=first caps output to
-        // the first input's length (the video's, when present), so BGM
-        // shorter than the video ends naturally and longer BGM is truncated.
-        // Auto-dub: when audioOverrideFile is set, the override REPLACES
-        // [0:a] as the base track — the source video's audio is dropped.
-        val initialBaseRef = if (overrideAudioIdx != null) "[$overrideAudioIdx:a]" else "[0:a]"
 
         // muteOriginalSegmentAudio=true 인 directive 들의 range 동안 base audio 를
         // 0 으로. enable= expression 안에 OR 로 모든 mute window 를 합쳐 한 번의
-        // volume 필터로 처리. (분리된 enable= 윈도우끼리 chain 해도 의미는 같지만
-        // 단일 expression 이 더 깔끔하고 race 없음.)
+        // volume 필터로 처리.
         val muteWindows = separationDirectives.filter { it.muteOriginalSegmentAudio }
         val baseAudioRef: String = if (muteWindows.isEmpty()) {
-            initialBaseRef
+            "[0:a]"
         } else {
             // Invariant: rangeStartMs/rangeEndMs are Long (ms) → / 1000.0 always yields
             // multiples of 0.001 → never enters scientific notation (< 1e-3) range.
-            // If the type ever changes to Double or sub-ms, route through secondsToFfmpegArg.
             val expr = muteWindows.joinToString("+") {
                 "between(t,${it.rangeStartMs / 1000.0},${it.rangeEndMs / 1000.0})"
             }
-            // volume= enable= 'expr' 에서 expr 가 nonzero (true) 면 volume 적용.
-            // 여러 윈도우를 OR 로 합치려면 + 로 충분 (between 결과 0/1 이라 합 ≥ 1 이면
-            // nonzero → mute). 'gt(...,0)' 로 명시해도 동일.
-            filters.add("${initialBaseRef}volume=enable='gt($expr,0)':volume=0[base_muted]")
+            filters.add("[0:a]volume=enable='gt($expr,0)':volume=0[base_muted]")
             "[base_muted]"
         }
 
-        val hasAnyAudio = dubClips.isNotEmpty() || bgmClips.isNotEmpty() ||
-            overrideAudioIdx != null || separationDirectives.any { it.stems.isNotEmpty() } ||
+        val hasAnyAudio = bgmClips.isNotEmpty() ||
+            separationDirectives.any { it.stems.isNotEmpty() } ||
             muteWindows.isNotEmpty()
         if (!hasAnyAudio) {
             filters.add("[0:a]anull[aout]")
         } else {
             val mixInputs = mutableListOf(baseAudioRef)
-            for ((i, clip) in dubClips.withIndex()) {
-                filters.add(audioClipFilter(clipInputIndices[i], clip.startMs, clip.volume, "dub$i"))
-                mixInputs.add("[dub$i]")
-            }
             for ((i, clip) in bgmClips.withIndex()) {
                 filters.add(audioClipFilter(bgmInputIndices[i], clip.startMs, clip.volume, "bgm$i"))
                 mixInputs.add("[bgm$i]")
             }
-            // Directive stems: directive 마다 stem 들을 atrim 으로 range 길이만큼
-            // 자르고, asetpts 로 PTS 리셋, adelay 로 rangeStartMs 만큼 밀고, volume.
-            // stem 본체 길이가 directive 길이보다 길면 truncate, 짧으면 amix
-            // duration=first 로 video 길이까지 패딩됨.
+            // Directive stems: directive 마다 stem 들을 atrim 으로 [sourceOffset, sourceOffset+range]
+            // 구간만 잘라내고, asetpts 로 PTS 리셋, adelay 로 rangeStartMs 만큼 밀고, volume.
+            // sourceOffsetMs 가 0 이면 stem 처음부터 (기본), >0 이면 stem audio 의 중간부터 — 모바일
+            // 클라이언트가 split 한 directive 의 뒤쪽 piece 에 해당.
             for ((dIdx, directive) in separationDirectives.withIndex()) {
                 val rangeMs = (directive.rangeEndMs - directive.rangeStartMs).coerceAtLeast(0L)
-                // Invariant: rangeMs is Long (ms) → / 1000.0 always yields multiples of
-                // 0.001 → never enters scientific notation. If sub-ms ever needed, route
-                // through secondsToFfmpegArg.
-                val rangeSec = rangeMs / 1000.0
+                val trimStartSec = directive.sourceOffsetMs / 1000.0
+                val trimEndSec = (directive.sourceOffsetMs + rangeMs) / 1000.0
                 for ((sIdx, stem) in directive.stems.withIndex()) {
                     val inputIndex = stemInputIndices[dIdx][sIdx]
                     val label = "stem_${dIdx}_${sIdx}"
                     filters.add(
-                        "[$inputIndex:a]atrim=0:$rangeSec,asetpts=PTS-STARTPTS," +
+                        "[$inputIndex:a]atrim=$trimStartSec:$trimEndSec,asetpts=PTS-STARTPTS," +
                             "adelay=${directive.rangeStartMs}|${directive.rangeStartMs}," +
                             "volume=${stem.volume}[$label]"
                     )
@@ -1051,42 +970,13 @@ class RenderService(
                 }
             }
             if (mixInputs.size == 1) {
-                // Only base track present (e.g., override + no clips, no stems).
                 filters.add("${mixInputs[0]}anull[aout]")
             } else {
                 filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0[aout]")
             }
         }
 
-        // Video chain: subtitle → sticker overlays
-        var vLabel = "v0"
-        if (subtitlesFile != null) {
-            cmd.addAll(listOf("-i", subtitlesFile.absolutePath))
-            filters.add("[0:v]ass='${escapeFilterPath(subtitlesFile.absolutePath)}'[$vLabel]")
-        } else {
-            filters.add("[0:v]null[$vLabel]")
-        }
-
-        for ((i, clip) in imageClips.withIndex()) {
-            val imgIdx = imageInputIndices[clip.imageFileKey]!!
-            val wPx = ((clip.widthPct / 100f) * outW).toInt().coerceAtLeast(2)
-            val hPx = ((clip.heightPct / 100f) * outH).toInt().coerceAtLeast(2)
-            val xPx = ((clip.xPct / 100f) * outW).toInt() - wPx / 2
-            val yPx = ((clip.yPct / 100f) * outH).toInt() - hPx / 2
-            val startSec = clip.startMs / 1000.0
-            val endSec = clip.endMs / 1000.0
-            val nextLabel = "v${i + 1}"
-            filters.add("[$imgIdx:v]scale=${wPx}:${hPx}[simg$i]")
-            filters.add("[$vLabel][simg$i]overlay=x=$xPx:y=$yPx:enable='between(t,$startSec,$endSec)'[$nextLabel]")
-            vLabel = nextLabel
-        }
-
-        // Rename final video label to [vout]
-        val finalLabel = "[$vLabel]"
-        val lastIdx = filters.indexOfLast { it.endsWith(finalLabel) }
-        if (lastIdx >= 0) {
-            filters[lastIdx] = filters[lastIdx].dropLast(finalLabel.length) + "[vout]"
-        }
+        filters.add("[0:v]null[vout]")
 
         cmd.addAll(listOf("-filter_complex", filters.joinToString(";")))
         cmd.addAll(listOf(
@@ -1107,39 +997,6 @@ class RenderService(
     }
 
     // ── Utilities ─────────────────────────────────────────────────────────────
-
-    private suspend fun getVideoSize(videoFile: File): Pair<Int, Int> {
-        return try {
-            val output = FfmpegRunner.run(
-                listOf(
-                    "ffprobe", "-v", "quiet",
-                    "-show_entries", "stream=width,height",
-                    "-select_streams", "v:0",
-                    "-of", "csv=p=0",
-                    videoFile.absolutePath,
-                ),
-                "ffprobe size ${videoFile.name}",
-                timeoutMinutes = 1,
-            ).trim()
-            val parts = output.lines().first().split(",")
-            val w = parts.getOrNull(0)?.toIntOrNull() ?: 1920
-            val h = parts.getOrNull(1)?.toIntOrNull() ?: 1080
-            Pair(w, h)
-        } catch (e: Exception) {
-            log.warn("ffprobe failed, defaulting to 1920x1080: {}", e.message)
-            Pair(1920, 1080)
-        }
-    }
-
-    private fun escapeFilterPath(path: String): String {
-        val fwd = path.replace("\\", "/")
-        // On Windows, preserve the drive-letter colon (e.g. "C:") and only escape remaining colons
-        return if (fwd.length >= 2 && fwd[1] == ':') {
-            fwd.substring(0, 2) + fwd.substring(2).replace(":", "\\:").replace("'", "\\'")
-        } else {
-            fwd.replace(":", "\\:").replace("'", "\\'")
-        }
-    }
 
     internal fun parseFfmpegProgress(line: String, totalDurationSec: Double): Int? {
         if (!line.startsWith("out_time_us=")) return null

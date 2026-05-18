@@ -4,15 +4,11 @@ import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.configureErrorHandling
 import com.vibi.bff.plugins.configureSerialization
 import com.vibi.bff.routes.renderRoutes
-import com.vibi.bff.service.AudioPart
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.RenderInputCacheService
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
@@ -38,32 +34,27 @@ class RenderRoutesTest {
     private val appConfig = testAppConfig(storagePath = testDir.path)
     private lateinit var fileStorage: FileStorageService
     private lateinit var renderService: RenderService
-    private lateinit var stemMixService: StemMixService
     private lateinit var separationService: SeparationService
     private lateinit var signer: SignedUrlService
     private lateinit var inputCache: RenderInputCacheService
-    private lateinit var httpClient: HttpClient
 
     @BeforeTest
     fun setup() {
         testDir.deleteRecursively()
         fileStorage = FileStorageService(appConfig.storage)
         renderService = mockk(relaxed = true)
-        stemMixService = mockk(relaxed = true)
         separationService = mockk(relaxed = true)
         signer = SignedUrlService(appConfig.separation.signingSecret)
         inputCache = RenderInputCacheService(
             baseDir = File(testDir, "render-input-cache"),
             ttlMs = 24 * 60 * 60 * 1000L,
         )
-        httpClient = HttpClient(CIO)
     }
 
     @AfterTest
     fun cleanup() {
         testDir.deleteRecursively()
         unmockkAll()
-        httpClient.close()
     }
 
     private fun testApp(block: suspend ApplicationTestBuilder.() -> Unit) = testApplication {
@@ -74,8 +65,8 @@ class RenderRoutesTest {
         routing {
             route("/api/v2") {
                 renderRoutes(
-                    renderService, fileStorage, stemMixService,
-                    separationService, signer, httpClient, inputCache,
+                    renderService, fileStorage,
+                    separationService, signer, inputCache,
                     gcsObjectStore = null,
                 )
             }
@@ -103,7 +94,6 @@ class RenderRoutesTest {
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
         assertEquals(expected, body["inputId"]!!.jsonPrimitive.content)
         assertEquals(1024L, body["videoSizeBytes"]!!.jsonPrimitive.long)
-        assertEquals(0, body["audioCount"]!!.jsonPrimitive.int)
         assertTrue(body["expiresAt"]!!.jsonPrimitive.long > System.currentTimeMillis())
     }
 
@@ -142,40 +132,13 @@ class RenderRoutesTest {
     fun `POST inputs without video part returns 400`() = testApp {
         val response = client.post("/api/v2/render/inputs") {
             setBody(MultiPartFormDataContent(formData {
-                append("audio_0", "fake".toByteArray(), Headers.build {
+                append("bgm_0", "fake".toByteArray(), Headers.build {
                     append(HttpHeaders.ContentType, "audio/mpeg")
-                    append(HttpHeaders.ContentDisposition, "filename=\"a.mp3\"")
+                    append(HttpHeaders.ContentDisposition, "filename=\"b.mp3\"")
                 })
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
-    }
-
-    @Test
-    fun `POST inputs persists segment audios under form-field name`() = testApp {
-        val videoBytes = ByteArray(512) { 1 }
-        val audioBytes = "audio-bytes".toByteArray()
-        val response = client.post("/api/v2/render/inputs") {
-            setBody(MultiPartFormDataContent(formData {
-                append("video", videoBytes, Headers.build {
-                    append(HttpHeaders.ContentType, "video/mp4")
-                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
-                })
-                append("audio_0", audioBytes, Headers.build {
-                    append(HttpHeaders.ContentType, "audio/mpeg")
-                    append(HttpHeaders.ContentDisposition, "filename=\"voice.mp3\"")
-                })
-            }))
-        }
-        assertEquals(HttpStatusCode.OK, response.status)
-        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        val inputId = body["inputId"]!!.jsonPrimitive.content
-        assertEquals(1, body["audioCount"]!!.jsonPrimitive.int)
-
-        val cached = inputCache.resolve(inputId)
-        assertNotNull(cached)
-        assertTrue(cached!!.audioFilesByFormField.containsKey("audio_0"))
-        assertEquals("audio-bytes", cached.audioFilesByFormField["audio_0"]!!.readText())
     }
 
     // ── /render with inputId form field ──────────────────────────────────────
@@ -185,7 +148,7 @@ class RenderRoutesTest {
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("inputId", "deadbeef".repeat(4)) // 32 hex chars but not in cache
-                append("config", """{"dubClips":[],"videoDurationMs":3000}""")
+                append("config", """{"videoDurationMs":3000}""")
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
@@ -203,7 +166,6 @@ class RenderRoutesTest {
         val cached = inputCache.save(
             videoFileName = "test.mp4",
             videoStream = ByteArrayInputStream(videoBytes),
-            audios = emptyList(),
             maxVideoBytes = 10_000,
         )
 
@@ -212,17 +174,11 @@ class RenderRoutesTest {
                 legacyVideoFile = any(),
                 videoFiles = any(),
                 segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
                 frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
             )
@@ -231,7 +187,7 @@ class RenderRoutesTest {
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("inputId", cached.inputId)
-                append("config", """{"dubClips":[],"videoDurationMs":3000}""")
+                append("config", """{"videoDurationMs":3000}""")
             }))
         }
         assertEquals(HttpStatusCode.OK, response.status)
@@ -244,17 +200,11 @@ class RenderRoutesTest {
                 legacyVideoFile = matchNullable<File> { it != null && it.absolutePath == cached.videoFile.absolutePath },
                 videoFiles = any(),
                 segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
                 frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 // Cache-resident files must NOT be in cleanup list — other variants
                 // are still using them.
@@ -263,103 +213,6 @@ class RenderRoutesTest {
                 },
             )
         }
-    }
-
-    @Test
-    fun `POST render with inputId resolves cached audio for dubClip`() = testApp {
-        val cached = inputCache.save(
-            videoFileName = "v.mp4",
-            videoStream = ByteArrayInputStream(ByteArray(32)),
-            audios = listOf(
-                AudioPart(
-                    formFieldName = "audio_0",
-                    originalFileName = "vo.mp3",
-                    stream = ByteArrayInputStream("voice".toByteArray()),
-                ),
-            ),
-            maxVideoBytes = 10_000,
-        )
-
-        every {
-            renderService.submitRender(
-                any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(),
-            )
-        } returns "render-cached-2"
-
-        val cfg = """
-            {
-              "dubClips":[{"audioFileKey":"audio_0","startMs":0,"durationMs":2000,"volume":1.0}],
-              "videoDurationMs":3000
-            }
-        """.trimIndent()
-
-        val response = client.post("/api/v2/render") {
-            setBody(MultiPartFormDataContent(formData {
-                append("inputId", cached.inputId)
-                append("config", cfg)
-            }))
-        }
-
-        // Validation passes only if the cached audio_0 was injected. A 200
-        // here proves audio key resolution went through the cache.
-        assertEquals(HttpStatusCode.OK, response.status)
-    }
-
-    /**
-     * audio_override 멀티파트 파일은 audio_ prefix 분기에 먼저 매치되면 안 됨.
-     * 이전 버그: audio_ 분기가 먼저 → audio_override 가 audioFiles 슬롯으로 들어가
-     *           audioOverrideKey 검증에서 항상 IllegalArgumentException → autodub→render 항상 fail.
-     */
-    @Test
-    fun `POST render routes audio_override file to override slot, not audio slot`() = testApp {
-        val capturedOverride = slot<File?>()
-        val capturedAudios = slot<Map<String, File>>()
-        every {
-            renderService.submitRender(
-                legacyVideoFile = any(),
-                videoFiles = any(),
-                segmentImageFiles = any(),
-                audioFiles = capture(capturedAudios),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
-                videoDurationMs = any(),
-                segments = any(),
-                bgmAudioFiles = any(),
-                bgmClips = any(),
-                frame = any(),
-                audioOverrideFile = captureNullable(capturedOverride),
-                separationDirectives = any(),
-                inputFilesToCleanup = any(),
-            )
-        } returns "render-override-1"
-
-        val cfg = """
-            {"dubClips":[],"videoDurationMs":3000,"audioOverrideKey":"audio_override"}
-        """.trimIndent()
-        val response = client.post("/api/v2/render") {
-            setBody(MultiPartFormDataContent(formData {
-                append("video", ByteArray(64), Headers.build {
-                    append(HttpHeaders.ContentType, "video/mp4")
-                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
-                })
-                append("audio_override", "override-bytes".toByteArray(), Headers.build {
-                    append(HttpHeaders.ContentType, "audio/mpeg")
-                    append(HttpHeaders.ContentDisposition, "filename=\"o.mp3\"")
-                })
-                append("config", cfg)
-            }))
-        }
-        assertEquals(HttpStatusCode.OK, response.status)
-        // audio_override 가 override slot 으로 — 분기 순서 정합성 보장.
-        assertNotNull(capturedOverride.captured, "audio_override file must reach the override slot")
-        assertTrue(
-            capturedAudios.captured.keys.none { it.startsWith("audio_override") },
-            "audio_override must NOT leak into audioFiles map",
-        )
     }
 
     // ── outputKind ────────────────────────────────────────────────────────────
@@ -375,17 +228,11 @@ class RenderRoutesTest {
                 legacyVideoFile = any(),
                 videoFiles = any(),
                 segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
                 frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),
@@ -398,7 +245,7 @@ class RenderRoutesTest {
                     append(HttpHeaders.ContentType, "video/mp4")
                     append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
                 })
-                append("config", """{"dubClips":[],"videoDurationMs":3000}""")
+                append("config", """{"videoDurationMs":3000}""")
             }))
         }
         assertEquals(HttpStatusCode.OK, response.status)
@@ -406,7 +253,7 @@ class RenderRoutesTest {
     }
 
     /**
-     * outputKind="audio" 가 RenderService 까지 그대로 전달되어야 자막/분리 source 용
+     * outputKind="audio" 가 RenderService 까지 그대로 전달되어야 분리 source 용
      * audio-only 렌더가 트리거됨.
      */
     @Test
@@ -417,24 +264,18 @@ class RenderRoutesTest {
                 legacyVideoFile = any(),
                 videoFiles = any(),
                 segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
                 frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),
             )
         } returns "render-audiokind-1"
 
-        val cfg = """{"dubClips":[],"videoDurationMs":3000,"outputKind":"audio"}"""
+        val cfg = """{"videoDurationMs":3000,"outputKind":"audio"}"""
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("video", ByteArray(64), Headers.build {
@@ -454,7 +295,7 @@ class RenderRoutesTest {
      */
     @Test
     fun `POST render rejects invalid outputKind`() = testApp {
-        val cfg = """{"dubClips":[],"videoDurationMs":3000,"outputKind":"weird"}"""
+        val cfg = """{"videoDurationMs":3000,"outputKind":"weird"}"""
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("video", ByteArray(64), Headers.build {

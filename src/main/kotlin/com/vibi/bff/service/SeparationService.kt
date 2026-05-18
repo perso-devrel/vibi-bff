@@ -2,6 +2,8 @@ package com.vibi.bff.service
 
 import com.vibi.bff.FAILED_JOB_TTL_MS
 import com.vibi.bff.config.SeparationConfig
+import com.vibi.bff.model.PersoDownloadInfo
+import com.vibi.bff.model.PersoProjectInfo
 import com.vibi.bff.model.SeparationSpec
 import com.vibi.bff.plugins.PersoApiException
 import kotlinx.coroutines.CoroutineScope
@@ -174,7 +176,7 @@ class SeparationService(
         // 아직 끝나지 않은 케이스가 있어 첫 다운로드 시 404 발생. download-info 폴링으로 readiness 확정.
         job.status = "DOWNLOADING"
         job.progressReason = "Waiting for storage upload"
-        waitForDownloadInfoReady(projectSeq)
+        val readyInfo = waitForDownloadInfoReady(projectSeq)
 
         job.progressReason = "Fetching speaker stems"
         val speakerFiles = downloadAndExtractSpeakerCollection(projectSeq, job.outputDir)
@@ -183,7 +185,7 @@ class SeparationService(
         }
 
         job.progressReason = "Fetching background"
-        val backgroundFile = downloadBackgroundStem(projectSeq, job.outputDir)
+        val backgroundFile = downloadBackgroundStem(projectSeq, job.outputDir, readyInfo)
 
         val local = mutableListOf<LocalStem>()
         speakerFiles.forEachIndexed { idx, file ->
@@ -262,33 +264,28 @@ class SeparationService(
     }
 
     // ── Background (.wav) 다운로드 ──────────────────────────────────────────
-    // 우선 project info endpoint 의 originalBackgroundPath (file 명 OriginalBaseBackground) 시도 —
-    // 진짜 BGM only 라 화자 수 무관하게 분리. 누락 시 originalSubBackground 로 fallback.
-    private suspend fun downloadBackgroundStem(projectSeq: Long, outputDir: File): File? {
+    // 정책 (사용자 피드백): 화자 수와 무관하게 항상 **순수 BGM** 만 노출. originalBackgroundPath
+    // (OriginalBaseBackground) 만 사용 — Perso 가 화자 수 무관하게 분리해 주는 진짜 BGM only.
+    // 과거 1명 화자에서 SubBackground 로 폴백하던 path 는 풀믹스(리액션 포함) 가 섞여 들어와
+    // "순수 배경음" 약속을 깨므로 영구 제거. 진짜 BGM 이 누락된 케이스는 stem 자체를 누락시키는
+    // 쪽이 안전 — 클라이언트 UI 는 background stem 부재를 graceful 하게 처리한다.
+    private suspend fun downloadBackgroundStem(
+        projectSeq: Long,
+        outputDir: File,
+        projectInfo: PersoProjectInfo,
+    ): File? {
+        val baseBgPath = projectInfo.downloadPathInfo?.originalBackgroundPath
+        if (baseBgPath == null) {
+            log.warn("originalBackgroundPath absent — no pure BGM stem emitted (project {})", projectSeq)
+            return null
+        }
         return try {
             val wavFile = File(outputDir, "background.wav")
-            // 1. project info 의 originalBackgroundPath 시도.
-            val info = runCatching { persoClient.getProjectInfo(projectSeq) }.getOrNull()
-            val baseBgPath = info?.downloadPathInfo?.originalBackgroundPath
-            if (baseBgPath != null) {
-                downloadFreshLinkWithRetry(
-                    label = "background base wav (project $projectSeq)",
-                    target = wavFile,
-                ) { baseBgPath }
-                log.info("Downloaded background (Base) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
-                return wavFile
-            }
-            // 2. fallback — getSeparationDownloadLinks 의 originalSubBackground.
-            log.warn("originalBackgroundPath absent; falling back to originalSubBackground (project {})", projectSeq)
             downloadFreshLinkWithRetry(
-                label = "background sub wav (project $projectSeq)",
+                label = "background base wav (project $projectSeq)",
                 target = wavFile,
-            ) {
-                persoClient.getSeparationDownloadLinks(projectSeq, "originalSubBackground")
-                    .audioFile?.originalSubBackgroundDownloadLink
-                    ?: throw PersoApiException(404, "Perso originalSubBackground link absent")
-            }
-            log.info("Downloaded background (Sub) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
+            ) { baseBgPath }
+            log.info("Downloaded background (Base) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
             wavFile
         } catch (e: Exception) {
             log.warn("Failed to download background stem (project {}): {}", projectSeq, e.message)
@@ -299,41 +296,48 @@ class SeparationService(
     /**
      * download-info 의 가용성 플래그가 모두 true 가 될 때까지 폴링 — Perso 가 storage upload 를
      * 끝낸 readiness 신호로 사용. speakers (`hasOriginalSpeakerAudioCollection`) 가 핵심,
-     * background (`hasOriginalSubBackground`) 는 best-effort 라 timeout 까지만 기다리고 누락 허용.
+     * background (`hasOriginalBackground` — pure BGM, OriginalBaseBackground) 는 best-effort.
+     * 과거에는 `hasOriginalSubBackground` 를 기다렸으나, 실제로 fetch 하는 것은 BaseBackground
+     * (`originalBackgroundPath`) 라 flag mismatch — wait 가 일찍 풀려 baseBgPath 가 미생성 상태로
+     * null 회수되는 사고가 1명 화자 케이스에서 자주 관측됐다. 같은 pure BGM flag 를 본다.
      */
     private suspend fun waitForDownloadInfoReady(
         projectSeq: Long,
         intervalMs: Long = 3_000,
         timeoutMs: Long = 60_000,
-    ) {
+    ): PersoProjectInfo {
         val deadline = System.currentTimeMillis() + timeoutMs
         var attempt = 0
         while (true) {
-            val info = persoClient.getDownloadInfo(projectSeq)
+            // getProjectInfo 는 downloadInfo 와 downloadPathInfo 를 한 응답에 묶어 돌려주므로
+            // 마지막 응답을 호출자에게 반환 — downloadBackgroundStem 이 originalBackgroundPath
+            // 를 다시 fetch 하지 않게 한다.
+            val full = persoClient.getProjectInfo(projectSeq)
+            val info = full.downloadInfo ?: PersoDownloadInfo()
             attempt += 1
-            if (info.hasOriginalSpeakerAudioCollection && info.hasOriginalSubBackground) {
-                log.info("download-info ready (speakers + background): projectSeq={} attempts={}", projectSeq, attempt)
-                return
+            if (info.hasOriginalSpeakerAudioCollection && info.hasOriginalBackground) {
+                log.info("download-info ready (speakers + pure BGM): projectSeq={} attempts={}", projectSeq, attempt)
+                return full
             }
             if (System.currentTimeMillis() >= deadline) {
-                // speakers 가 ready 면 진행 — background 만 누락이면 best-effort 로 통과.
+                // speakers 가 ready 면 진행 — pure BGM 만 누락이면 best-effort 로 통과.
                 if (info.hasOriginalSpeakerAudioCollection) {
-                    log.warn("download-info partial ready: projectSeq={} speakers=true background={} (timeout — proceed)",
-                        projectSeq, info.hasOriginalSubBackground)
-                    return
+                    log.warn("download-info partial ready: projectSeq={} speakers=true pureBGM={} (timeout — proceed)",
+                        projectSeq, info.hasOriginalBackground)
+                    return full
                 }
                 throw PersoApiException(500,
                     "Perso storage not ready after ${timeoutMs}ms: speakers=${info.hasOriginalSpeakerAudioCollection}")
             }
-            log.info("download-info not ready: projectSeq={} speakers={} background={} attempt={} — sleeping {}ms",
-                projectSeq, info.hasOriginalSpeakerAudioCollection, info.hasOriginalSubBackground, attempt, intervalMs)
+            log.info("download-info not ready: projectSeq={} speakers={} pureBGM={} attempt={} — sleeping {}ms",
+                projectSeq, info.hasOriginalSpeakerAudioCollection, info.hasOriginalBackground, attempt, intervalMs)
             kotlinx.coroutines.delay(intervalMs)
         }
     }
 
     /**
-     * Perso storage 다운로드 backoff retry — **매 시도마다 getDownloadLinks 를 다시 호출**해 fresh
-     * path 를 받는다. 단순 retry 가 안 되는 이유:
+     * Perso storage 다운로드 backoff retry — **매 시도마다 getSeparationDownloadLinks 를 다시
+     * 호출**해 fresh path 를 받는다. 단순 retry 가 안 되는 이유:
      *   1) Perso 응답 path 의 timestamp 가 호출 시점에 임베드 (`..._OriginalVoiceSpeakers_<ts>.tar`).
      *      매 호출마다 unique path → cache key 도 다름.
      *   2) 첫 GET 의 404 응답이 `Cache-Control: public, max-age=14400` 로 Cloudflare 에 4시간 캐시.

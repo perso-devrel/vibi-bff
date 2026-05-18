@@ -99,12 +99,11 @@ class MediaSourceResolverTest {
         val rendered = seedCompletedJob("render-2x", "stable-bytes")
 
         val firstCopy = resolver.resolve(filePart = null, editedRenderJobId = "render-2x")
-        // Simulate AutoSubtitleService.runPipeline deleting the source after
-        // audio extract.
+        // Simulate a downstream consumer deleting the source after consuming it.
         firstCopy.delete()
 
         val secondCopy = resolver.resolve(filePart = null, editedRenderJobId = "render-2x")
-        // Simulate AutoDubService.runPipeline renaming the source aside.
+        // Simulate a downstream consumer renaming the source aside.
         val moved = File(editedSourceDir, "moved.mp4")
         assertTrue(secondCopy.renameTo(moved), "rename should succeed on local fs")
 

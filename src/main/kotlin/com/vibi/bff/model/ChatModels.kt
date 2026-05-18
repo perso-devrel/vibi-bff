@@ -25,8 +25,6 @@ data class ChatMessage(
 @Serializable
 data class ProjectContext(
     val segments: List<ContextSegment> = emptyList(),
-    val subtitleClips: List<ContextSubtitleClip> = emptyList(),
-    val dubClips: List<ContextDubClip> = emptyList(),
     val bgmClips: List<ContextBgmClip> = emptyList(),
     val separationStems: List<ContextStem> = emptyList(),
     val separationDirectives: List<ContextSeparationDirective> = emptyList(),
@@ -50,24 +48,6 @@ data class ContextSegment(
     val sourceUri: String,
     val speedScale: Float = 1.0f,
     val volumeScale: Float = 1.0f,
-)
-
-@Serializable
-data class ContextSubtitleClip(
-    val id: String,
-    val index: Int,
-    val startMs: Long,
-    val endMs: Long,
-    val text: String,
-    val languageCode: String,
-)
-
-@Serializable
-data class ContextDubClip(
-    val id: String,
-    val startMs: Long,
-    val endMs: Long,
-    val voiceId: String,
 )
 
 @Serializable

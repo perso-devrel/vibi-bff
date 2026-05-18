@@ -11,9 +11,7 @@ import io.ktor.client.plugins.contentnegotiation.*
 import io.ktor.client.request.*
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
-import io.ktor.utils.io.*
 import kotlinx.coroutines.runBlocking
-import java.io.File
 import kotlin.test.*
 
 class PersoClientTest {
@@ -78,7 +76,7 @@ class PersoClientTest {
     }
 
     @Test
-    fun `submitTranslate unwraps envelope and returns first project id`() = runBlocking {
+    fun `submitAudioSeparation unwraps envelope and returns first project id`() = runBlocking {
         val client = clientWith {
             respond(
                 content = """{"result":{"startGenerateProjectIdList":[101,102]}}""",
@@ -86,18 +84,16 @@ class PersoClientTest {
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
-        val seq = client.submitTranslate(
+        val seq = client.submitAudioSeparation(
             mediaSeq = 999,
-            isVideoProject = true,
-            sourceLanguageCode = "ko",
-            targetLanguageCodes = listOf("ko"),
-            numberOfSpeakers = 2,
+            isVideoProject = false,
+            title = "test",
         )
         assertEquals(101L, seq)
     }
 
     @Test
-    fun `submitTranslate throws when project id list is empty`(): Unit = runBlocking {
+    fun `submitAudioSeparation throws when project id list is empty`(): Unit = runBlocking {
         val client = clientWith {
             respond(
                 content = """{"result":{"startGenerateProjectIdList":[]}}""",
@@ -106,7 +102,7 @@ class PersoClientTest {
             )
         }
         assertFailsWith<PersoApiException> {
-            client.submitTranslate(1, true, "ko", listOf("ko"), 1)
+            client.submitAudioSeparation(1, false)
         }
     }
 
@@ -126,23 +122,27 @@ class PersoClientTest {
     }
 
     @Test
-    fun `getDownloadInfo returns availability flags`() = runBlocking {
+    fun `getProjectInfo returns download path info`() = runBlocking {
         val client = clientWith {
             respond(
                 content = """{"result":{
-                    "hasOriginalVoiceOnly":true,
-                    "hasOriginalBackground":true,
-                    "hasOriginalSpeakerAudioCollection":true,
-                    "hasZipDownload":true
+                    "seq":101,
+                    "downloadInfo":{
+                        "hasOriginalVoiceOnly":true,
+                        "hasOriginalBackground":true,
+                        "hasOriginalSpeakerAudioCollection":true
+                    },
+                    "downloadPathInfo":{
+                        "originalBackgroundPath":"/perso-storage/x/bg.wav"
+                    }
                 }}""",
                 status = HttpStatusCode.OK,
                 headers = headersOf(HttpHeaders.ContentType, "application/json"),
             )
         }
-        val info = client.getDownloadInfo(101)
-        assertTrue(info.hasOriginalVoiceOnly)
-        assertTrue(info.hasOriginalBackground)
-        assertTrue(info.hasOriginalSpeakerAudioCollection)
+        val info = client.getProjectInfo(101)
+        assertTrue(info.downloadInfo?.hasOriginalVoiceOnly == true)
+        assertEquals("/perso-storage/x/bg.wav", info.downloadPathInfo?.originalBackgroundPath)
     }
 
     @Test
@@ -156,20 +156,5 @@ class PersoClientTest {
         }
         val ex = assertFailsWith<PersoApiException> { client.getProgress(1) }
         assertEquals(402, ex.statusCode)
-    }
-
-    @Test
-    fun `streamDownload writes the body to target and cleans tmp on failure`(): Unit = runBlocking {
-        val tmp = File.createTempFile("perso-test", ".bin").apply { delete() }
-        val client = clientWith {
-            respond(
-                content = ByteReadChannel("hello".toByteArray()),
-                status = HttpStatusCode.OK,
-            )
-        }
-        client.streamDownload("https://download/x", tmp)
-        assertTrue(tmp.exists())
-        assertEquals("hello", tmp.readText())
-        tmp.delete()
     }
 }

@@ -3,21 +3,19 @@ package com.vibi.bff.service
 import java.io.File
 
 /**
- * Phase 1: shared helper for the subtitles / autodub / separation submit
- * routes. The mobile client may either upload a fresh file *or* reference
- * an already-rendered output by [editedRenderJobId]. This lets the user
- * trim / sticker / image-overlay a video, render it once on the server,
- * then run multiple downstream pipelines on that exact output without
+ * Resolve the source media for the separation submit route. The mobile
+ * client may either upload a fresh file *or* reference an already-rendered
+ * output by [editedRenderJobId]. This lets the user edit a video, render
+ * it once on the server, then run separation on that exact output without
  * round-tripping the bytes back through the mobile client.
  *
  * Resolution rules:
  * - [editedRenderJobId] != null → look up the render output and **copy**
  *   it into [editedSourceDir]. The copy is owned by the caller and may be
- *   freely deleted/renamed by the downstream pipeline (auto-subtitle
- *   extracts audio + deletes the source; auto-dub renames the source into
- *   its own working dir; separation deletes the source after Perso
- *   upload). If the file part was also supplied, the render output **wins**
- *   and the uploaded file is deleted to avoid stranding bytes on disk.
+ *   freely deleted/renamed by separation (which deletes the source after
+ *   Perso upload). If the file part was also supplied, the render output
+ *   **wins** and the uploaded file is deleted to avoid stranding bytes on
+ *   disk.
  * - otherwise → use [filePart] (the upload itself is already caller-owned
  *   single-use bytes — no copy needed).
  * - neither → [IllegalArgumentException].

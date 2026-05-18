@@ -2,16 +2,12 @@ package com.vibi.bff.plugins
 
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.routes.authRoutes
-import com.vibi.bff.routes.autoDubRoutes
 import com.vibi.bff.routes.chatRoutes
 import com.vibi.bff.routes.languageRoutes
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.routes.separationRoutes
-import com.vibi.bff.routes.subtitleRoutes
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.GeminiClient
-import com.vibi.bff.service.AutoDubService
-import com.vibi.bff.service.AutoSubtitleService
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.MediaSourceResolver
@@ -39,8 +35,6 @@ fun Application.configureRouting(
     separationService: SeparationService,
     stemMixService: StemMixService,
     signedUrlService: SignedUrlService,
-    autoSubtitleService: AutoSubtitleService,
-    autoDubService: AutoDubService,
     geminiClient: GeminiClient,
     httpClient: HttpClient,
     renderInputCache: RenderInputCacheService,
@@ -55,13 +49,11 @@ fun Application.configureRouting(
             authRoutes(authService)
             languageRoutes(persoClient)
             renderRoutes(
-                renderService, fileStorage, stemMixService,
-                separationService, signedUrlService, httpClient, renderInputCache,
+                renderService, fileStorage,
+                separationService, signedUrlService, renderInputCache,
                 gcsObjectStore,
             )
             separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore)
-            subtitleRoutes(autoSubtitleService, signedUrlService, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore)
-            autoDubRoutes(autoDubService, signedUrlService, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore)
             chatRoutes(geminiClient)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.

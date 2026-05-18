@@ -21,8 +21,6 @@ fun Route.languageRoutes(persoClient: PersoClient) {
                 code = p.code,
                 name = p.name,
                 nativeName = p.nativeName,
-                supportsDubbing = p.supportsDubbing,
-                supportsSubtitles = p.supportsSubtitles,
             )
         }
         call.respond(HttpStatusCode.OK, LanguageListResponse(languages = languages))

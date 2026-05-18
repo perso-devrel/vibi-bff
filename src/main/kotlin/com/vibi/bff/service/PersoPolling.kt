@@ -6,9 +6,7 @@ import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 
 /**
- * Poll Perso for project completion. Shared by SeparationService /
- * AutoDubService / AutoSubtitleService — all three drive the same
- * translate-job lifecycle.
+ * Poll Perso for project completion. Used by SeparationService.
  *
  * Each tick the caller's [onProgress] is invoked so the service can
  * update its own job's progress/reason fields. Returns when Perso

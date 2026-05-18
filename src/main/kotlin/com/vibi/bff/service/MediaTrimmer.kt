@@ -30,10 +30,14 @@ object MediaTrimmer {
     }
 
     /**
-     * Stream-copy cut from [startMs, endMs) into [outFile]. Uses
-     * input-side `-ss` + `-t` to avoid re-encoding; video may snap to the
-     * nearest keyframe, acceptable here since downstream only consumes the
-     * audio track. Returns true on success.
+     * Audio-accurate cut from [startMs, endMs) into [outFile]. `-ss` 는 input
+     * 보다 *뒤* 에 위치 — input-side `-ss` 는 mp4 의 video keyframe 으로 fast-seek
+     * snap 해 실제 시작 지점이 사용자 선택보다 ~2초 일찍 잘리는 버그 (구간 분리에서
+     * 관측됨). output-side `-ss` 는 demuxer 가 처음부터 읽되 -ss 이전 프레임은
+     * 디스카드 → sample 정확도. downstream 은 audio 만 소비하므로 `-vn` 으로
+     * video stream 을 dropping해 헤더 부분 깨지는 video 영향 없음. `-c:a copy` 로
+     * audio 는 re-encode 없이 그대로 (mp4 의 AAC 는 frame 단위 ~21ms 정밀도라
+     * 충분).
      */
     suspend fun trim(src: File, startMs: Long, endMs: Long, outFile: File): Boolean {
         require(endMs > startMs) { "endMs must be > startMs" }
@@ -43,10 +47,11 @@ object MediaTrimmer {
         // 예: 0.000670 → "6.7E-4" 가 ffmpeg `-t` 파서에서 "Invalid duration" 으로 거부됨.
         val cmd = listOf(
             "ffmpeg", "-y",
-            "-ss", secondsToFfmpegArg(startSec),
             "-i", src.absolutePath,
+            "-ss", secondsToFfmpegArg(startSec),
             "-t", secondsToFfmpegArg(durationSec),
-            "-c", "copy",
+            "-vn",
+            "-c:a", "copy",
             "-avoid_negative_ts", "make_non_negative",
             outFile.absolutePath,
         )

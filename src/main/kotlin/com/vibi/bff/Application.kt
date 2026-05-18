@@ -4,8 +4,6 @@ import com.vibi.bff.config.loadConfig
 import com.vibi.bff.db.DbBootstrap
 import com.vibi.bff.plugins.*
 import com.vibi.bff.service.AuthService
-import com.vibi.bff.service.AutoDubService
-import com.vibi.bff.service.AutoSubtitleService
 import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.FileStorageService
@@ -74,8 +72,8 @@ fun Application.module() {
     val userRepository = UserRepository()
 
     // Vertex AI / Gemini credentials are validated lazily on the first
-    // translation call, so the server can boot without them in dev when
-    // subtitle translation isn't being exercised.
+    // chat call, so the server can boot without them in dev when the chat
+    // surface isn't being exercised.
 
     val httpClient = HttpClient(CIO) {
         install(ContentNegotiation) {
@@ -157,21 +155,8 @@ fun Application.module() {
 
     val authService = AuthService(appConfig.auth, httpClient, userRepository)
     val geminiClient = GeminiClient(appConfig.gemini, httpClient)
-    val autoSubtitleService = AutoSubtitleService(
-        persoClient = persoClient,
-        geminiClient = geminiClient,
-        outputDir = File(fileStorage.separationDir.parentFile, "subtitles"),
-        pollIntervalMs = appConfig.perso.pollIntervalMs,
-        maxPollMinutes = appConfig.perso.maxPollMinutes,
-    )
-    val autoDubService = AutoDubService(
-        persoClient = persoClient,
-        outputDir = File(fileStorage.separationDir.parentFile, "autodub"),
-        pollIntervalMs = appConfig.perso.pollIntervalMs,
-        maxPollMinutes = appConfig.perso.maxPollMinutes,
-    )
 
-    // Phase 1: subtitles / autodub / separation 의 source 결정자.
+    // Phase 1: separation 의 source 결정자.
     // multipart `file` 또는 spec.editedRenderJobId 둘 중 하나로 source 해석.
     // editedRenderJobId 경유 시 RenderService 가 owner — resolver 가 별도 디렉터리에
     // 복사한 owned-copy 를 반환해 downstream 의 delete/rename 으로부터 원본 보호.
@@ -201,7 +186,7 @@ fun Application.module() {
     configureRouting(
         fileStorage, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
-        autoSubtitleService, autoDubService, geminiClient, httpClient, renderInputCache,
+        geminiClient, httpClient, renderInputCache,
         mediaSourceResolver, authService, gcsObjectStore,
     )
 
@@ -210,8 +195,6 @@ fun Application.module() {
         renderService::shutdown,
         separationService::shutdown,
         stemMixService::shutdown,
-        autoSubtitleService::shutdown,
-        autoDubService::shutdown,
         { cacheCleanupScope.cancel() },
         dataSource::close,
     )
