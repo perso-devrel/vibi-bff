@@ -13,3 +13,4 @@ bin/
 src/main/resources/admin/
 admin-ui/node_modules/
 admin-ui/dist/
+admin-ui/*.tsbuildinfo
