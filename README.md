@@ -1,21 +1,39 @@
 # vibi BFF
 
 Kotlin/Ktor Backend-For-Frontend for the vibi mobile app (Android + iOS, KMP/CMP).
-Proxies Perso AI for audio source separation (background / all-voice / per-speaker
-stems, plus user-selected stem remix), STT, and automatic dubbing; proxies
-Vertex AI Gemini for subtitle translation and the chat-assistant function-calling
-router; and runs a local ffmpeg-based video render pipeline (dub audio mixing,
-sticker overlays, multi-segment concat, subtitle burn-in).
+Current surface:
+
+- Proxies **Perso AI** for audio source separation (background / all-voice /
+  per-speaker stems, plus user-selected stem remix).
+- Proxies **Vertex AI Gemini** for the chat-assistant function-calling router.
+- Runs a local **ffmpeg** render pipeline (multi-segment concat, BGM
+  `atrim`+`amix` sub-range mixing, audio override).
+- Gateways **Google Sign In** + **Apple Sign In** ID Token verification → upserts
+  the user in **Postgres** → issues an HS256 access token whose `sub` is the
+  internal UUID (reusable as IAP `appAccountToken`).
+- Optionally redirects large render / mix downloads to **GCS** V4 signed URLs
+  so Cloud Run egress and instance occupancy decouple.
+
+> Surface previously exposed but **removed** in commit `52f8d7c` (sticker
+> overlays, subtitle burn-in, auto-subtitle/Perso STT, auto-dub, lipsync, Gemini
+> SRT translation). The OpenAPI spec (`src/main/resources/openapi/vibi-bff.yaml`)
+> reflects only the current surface.
 
 > Detailed architecture notes live in [`CLAUDE.md`](./CLAUDE.md). The OpenAPI
-> and is served at `/swagger` when the app is running.
+> spec is served at `/swagger` when the app is running.
 
 ## Prerequisites
 
 - **JDK 21**
 - **ffmpeg** and **ffprobe** on `PATH` (required by the render pipeline)
-- A **Perso AI API key** and workspace `spaceSeq` (required for separation, STT, auto-dubbing)
-- *(Optional)* GCP service-account credentials for Vertex AI Gemini if subtitle translation / chat is exercised
+- A **Perso AI API key** and workspace `spaceSeq` (required for separation)
+- **Postgres** (Neon free tier is fine) — required for user upsert
+- At least one **Google OAuth client id** (iOS / Android / Web) — required to boot
+- *(Optional)* **Apple Sign In** client ids (iOS bundle id) — blank disables Apple
+- *(Optional)* GCP service-account credentials for **Vertex AI Gemini** if the
+  chat assistant is exercised
+- *(Optional)* A **GCS bucket** — large render / mix downloads redirect to V4
+  signed URLs instead of streaming through Cloud Run
 
 On Windows, verify:
 
@@ -33,29 +51,62 @@ cp .env.example .env
 
 Environment variables (also loadable from system env):
 
+### Perso AI
+
+| Key                            | Default                       | Description                                              |
+|--------------------------------|-------------------------------|----------------------------------------------------------|
+| `PERSO_API_KEY`                | —                             | **Required.** Perso AI API key (separation).             |
+| `PERSO_SPACE_SEQ`              | —                             | **Required.** Your Perso workspace id (`GET /portal/api/v1/spaces`). |
+| `PERSO_BASE_URL`               | `https://api.perso.ai`        | Perso API host.                                          |
+| `PERSO_STORAGE_BASE_URL`       | `https://portal-media.perso.ai` | Perso storage CDN host. `/perso-storage/...` download paths go here without auth headers. |
+| `PERSO_DOWNLOAD_ALLOWED_HOSTS` | `portal-media.perso.ai`       | Comma-separated SSRF allow-list. Host of any Perso-issued download URL must be in this set (api/storage hosts are added automatically). |
+| `PERSO_POLL_INTERVAL_MS`       | `15000`                       | Perso job polling interval.                              |
+| `PERSO_MAX_POLL_MINUTES`       | `30`                          | Separation job polling timeout (1..120).                 |
+
+### Server / storage
+
 | Key                          | Default                  | Description                                          |
 |------------------------------|--------------------------|------------------------------------------------------|
-| `PERSO_API_KEY`              | —                        | **Required.** Perso AI API key (separation / STT / auto-dub) |
-| `PERSO_SPACE_SEQ`            | —                        | **Required.** Your Perso workspace id (`GET /portal/api/v1/spaces`) |
-| `PERSO_BASE_URL`             | `https://api.perso.ai`   | Perso base URL                                        |
-| `PERSO_POLL_INTERVAL_MS`     | `5000`                   | Perso progress polling interval                       |
-| `PERSO_MAX_POLL_MINUTES`     | `30`                     | Separation job polling timeout                        |
-| `PORT`                       | `8080`                   | Server port                                          |
-| `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `render/`, `separation/`) |
-| `BFF_BASE_URL`               | `http://localhost:8080`  | Public base URL used in download links               |
-| `CORS_ALLOWED_ORIGINS`       | *(blank = any)*          | Comma-separated allow-list. Android-only deployments can set a sentinel such as `android-only.invalid` to lock out browsers. |
-| `SEPARATION_SIGNING_SECRET`  | —                        | **Required.** HMAC key (≥32 chars) for stem / mix URL signing. Generate with `openssl rand -hex 32`. |
-| `SEPARATION_ABANDON_TTL_MS`  | `1800000`                | Reap READY-but-unclaimed separations after this many ms |
-| `SEPARATION_MIX_TTL_MS`      | `600000`                 | Keep mix outputs for this many ms after completion    |
-| `SEPARATION_URL_TTL_SEC`     | `1800`                   | Stem download URL token lifetime                      |
-| `SEPARATION_MIX_URL_TTL_SEC` | `600`                    | Mix download URL token lifetime                       |
+| `PORT`                       | `8080`                   | Server port.                                         |
+| `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `render/`, `separation/`, `render-input-cache/`, `edited-source/`). |
+| `BFF_BASE_URL`               | `http://localhost:8080`  | Public base URL used in signed download links.       |
+| `CORS_ALLOWED_ORIGINS`       | *(blank = any)*          | Comma-separated allow-list. Set a sentinel such as `android-only.invalid` to lock out browsers. |
+| `GCS_BUCKET`                 | *(blank = disabled)*     | When set, large render / mix downloads upload to this bucket and respond with a `302` to a V4 signed URL. Blank falls back to `respondFile` streaming. |
+| `GCS_SIGNED_URL_TTL_SEC`     | `900`                    | V4 signed URL TTL in seconds (60..86400).            |
+| `RENDER_MAX_CONCURRENT`      | *(auto: CPU/2)*          | ffmpeg fan-out cap. Override when containerized hosts misreport `availableProcessors`. |
+| `RENDER_INPUT_CACHE_TTL_HOURS` | `24`                   | TTL of the shared `/render/inputs` slot.             |
+| `HTTP_CONNECT_TIMEOUT_MS` / `HTTP_REQUEST_TIMEOUT_MS` / `HTTP_SOCKET_TIMEOUT_MS` | `120000` / `600000` / `600000` | Upstream HttpClient timeouts. Bump when debugging slow Perso uploads. |
+
+### Separation lifecycle
+
+| Key                          | Default                  | Description                                          |
+|------------------------------|--------------------------|------------------------------------------------------|
+| `SEPARATION_SIGNING_SECRET`  | —                        | **Required.** HMAC key (≥32 chars) for stem / mix URL signing. `openssl rand -hex 32`. |
+| `SEPARATION_ABANDON_TTL_MS`  | `604800000` (7 days)     | Reap READY-but-unclaimed separations after this many ms. |
+| `SEPARATION_MIX_TTL_MS`      | `600000`                 | Keep mix outputs for this many ms after completion.  |
+| `SEPARATION_URL_TTL_SEC`     | `604800` (7 days)        | Stem download URL token lifetime. Must be ≤ abandonTtlMs so a token that outlives the reaped job never appears. |
+| `SEPARATION_MIX_URL_TTL_SEC` | `600`                    | Mix download URL token lifetime.                     |
+
+### Vertex AI (Gemini chat)
+
+| Key                          | Default                  | Description                                          |
+|------------------------------|--------------------------|------------------------------------------------------|
+| `GEMINI_PROJECT_ID`          | —                        | GCP project hosting Vertex AI (may differ from the runtime project). |
+| `GEMINI_LOCATION`            | `us-central1`            | Vertex AI region.                                    |
+| `GOOGLE_APPLICATION_CREDENTIALS` | *(blank = ADC)*      | Path to service-account JSON. Blank → Application Default Credentials (Cloud Run attached SA / local `gcloud auth application-default login`). |
+| `GEMINI_MODEL`               | `gemini-2.5-flash`       | Vertex AI model id.                                  |
+
+### Auth & Postgres
+
+| Key                          | Default                  | Description                                          |
+|------------------------------|--------------------------|------------------------------------------------------|
 | `GOOGLE_OAUTH_CLIENT_IDS`    | —                        | **Required.** Comma-separated Google OAuth client IDs (iOS / Android / Web). `aud` of ID token must match. |
 | `APPLE_OAUTH_CLIENT_IDS`     | *(blank = disabled)*     | Comma-separated Apple Sign In client IDs (typically iOS bundle id `com.vibi.ios`). Blank → `/auth/apple` returns 503. |
 | `AUTH_JWT_SECRET`            | —                        | **Required.** HMAC-SHA256 key (≥32 chars) for own access token signing. `openssl rand -hex 32`. |
-| `AUTH_JWT_EXPIRY_SECONDS`    | `604800`                 | Issued access token lifetime (60..7776000).            |
-| `DATABASE_URL`               | —                        | **Required.** JDBC URL for Postgres (Neon / Cloud SQL). Format: `jdbc:postgresql://<host>/<db>?sslmode=require`. |
-| `DB_USER`                    | —                        | **Required.** DB role.                                |
-| `DB_PASSWORD`                | —                        | **Required.** DB password.                            |
+| `AUTH_JWT_EXPIRY_SECONDS`    | `604800` (7 days)        | Issued access token lifetime (60..7776000).          |
+| `DATABASE_URL`               | —                        | **Required.** JDBC URL for Postgres (Neon / Cloud SQL). Format: `jdbc:postgresql://<host>/<db>?sslmode=require`. H2 also accepted for local tests. |
+| `DB_USER`                    | —                        | **Required.** DB role.                               |
+| `DB_PASSWORD`                | —                        | **Required.** DB password.                           |
 | `DB_MAX_POOL`                | `5`                      | HikariCP pool size (1..50). Neon free tier 100 conn cap. |
 
 ## Build & Run
@@ -79,7 +130,9 @@ to `C:/tmp/vibi-bff-build` (configured in `build.gradle.kts`).
 
 Once running:
 - Swagger UI: <http://localhost:8080/swagger>
-- Render outputs / separation stems / mix outputs / auto-subtitle SRT / auto-dub audio are **not** static-mounted — see API section below
+- Render outputs / separation stems / mix outputs are **not** static-mounted —
+  see API section below. Each download either streams via `respondFile` (default)
+  or 302-redirects to a GCS V4 signed URL (when `GCS_BUCKET` is set).
 
 ## API Overview
 
@@ -90,21 +143,28 @@ v1 has been retired.
 
 | Method | Path                                         | Notes                                                         |
 |--------|----------------------------------------------|---------------------------------------------------------------|
-| POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint))         |
-| GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`|
-| GET    | `/api/v2/render/{jobId}/download`            | Binary mp4 (no static mount)                                  |
-| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)) |
-| GET    | `/api/v2/separate/{jobId}`                   | Status + signed stem URLs when `READY`                        |
-| GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream (requires `?token=…`)                       |
-| POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems; disposes source stems on success          |
-| GET    | `/api/v2/separate/mix/{mixJobId}`            | Mix status + signed download URL when `COMPLETED`             |
-| GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`)                        |
-| POST   | `/api/v2/subtitles`                          | Multipart auto-subtitle job (Perso STT + Gemini translation)  |
-| GET    | `/api/v2/subtitles/{jobId}`                  | Subtitle job status; signed `originalSrtUrl` / `translatedSrtUrlsByLang` when ready |
-| POST   | `/api/v2/autodub`                            | Multipart auto-dub job (Perso translate + voice synthesis)    |
-| GET    | `/api/v2/autodub/{jobId}`                    | Auto-dub job status; signed `dubbedAudioUrl` / `dubbedVideoUrl` when ready |
-| GET    | `/api/v2/languages`                          | Perso-supported target language list                          |
-| POST   | `/api/v2/chat`                               | Gemini function-calling assistant — returns `{kind:"text"\|"proposal"}` (see [Chat](#chat-endpoint)) |
+| POST   | `/api/v2/auth/google`                        | Google ID Token → BFF JWT (see [Sign-In](#sign-in)).          |
+| POST   | `/api/v2/auth/apple`                         | Apple ID Token → BFF JWT (503 when `APPLE_OAUTH_CLIENT_IDS` blank). |
+| GET    | `/api/v2/languages`                          | Perso-supported target language list.                         |
+| POST   | `/api/v2/render/inputs`                      | Multipart `video` upload → `{inputId, expiresAt, videoSizeBytes}`. Reused by N variant renders. `inputId = sha256(video)[:16]`. |
+| POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint)). Optional `inputId` form field replaces the video file part. |
+| GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`. |
+| GET    | `/api/v2/render/{jobId}/download`            | Binary mp4. With `GCS_BUCKET`, `302` to a V4 signed URL.      |
+| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Source resolves from multipart `file` *or* `spec.editedRenderJobId`. |
+| GET    | `/api/v2/separate/{jobId}`                   | Status + signed stem URLs when `READY`.                       |
+| GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream (requires `?token=…`).                      |
+| POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems with `amix normalize=0`; disposes source stems on success. |
+| GET    | `/api/v2/separate/mix/{mixJobId}`            | Mix status + signed download URL when `COMPLETED`.            |
+| GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`). With `GCS_BUCKET`, `302` to a V4 signed URL. |
+| POST   | `/api/v2/chat`                               | Gemini function-calling assistant — returns `{kind:"text"\|"proposal"}` (see [Chat](#chat-endpoint)). |
+| GET    | `/api/v2/testdata/separation/list`           | (dev mock) `testdata/<startSec>-<endSec>/` folder listing.    |
+| GET    | `/api/v2/testdata/separation/{folder}/{stem}` | (dev mock) Stem audio stream (no auth).                      |
+
+> **Retired surface** (commit `52f8d7c`): `/api/v2/subtitles*`, `/api/v2/autodub*`,
+> `/api/v2/lipsync*`, sticker overlays on `/render`, subtitle burn-in on `/render`.
+> The mobile client still has historical `submitSubtitleJob` / `submitAutoDubJob` /
+> `requestLipSync` methods in `BffApi` — they will 404 if invoked. Re-introducing
+> the surface should be a fresh design, not a `git revert`.
 
 ### Chat endpoint
 
@@ -276,20 +336,34 @@ return `409 Conflict`. Download any stems you want to keep **before** calling
 - Rotate `SEPARATION_SIGNING_SECRET` carefully — changing it invalidates every
   outstanding token at once.
 
-### Sign in with Apple
+### Sign-In
 
-`/api/v2/auth/apple` accepts `{ idToken, fullName? }` from the iOS client.
-Verification path is JWKS RS256 (`https://appleid.apple.com/auth/keys`) with
-24h-cached public keys; `aud` must match `APPLE_OAUTH_CLIENT_IDS`. On success the
-user is upserted into the `users` table by `(provider='apple', provider_sub)`
-and an internal UUID is issued as the JWT `sub` (reused as IAP `appAccountToken`
-in a future phase).
+Both providers follow the same pattern: the native SDK (GoogleSignIn iOS SPM /
+Android Credential Manager / Apple `AuthenticationServices`) returns an ID Token
+which the mobile client forwards to BFF. BFF verifies, upserts a row in `users`
+(`(provider, provider_sub)` unique), and returns its own HS256 JWT whose `sub`
+is the internal UUID. That same UUID is later reusable as IAP `appAccountToken`.
+
+#### Google
+
+`POST /api/v2/auth/google` accepts `{ idToken }`. Verification calls
+`https://oauth2.googleapis.com/tokeninfo`; `aud` must match one of the values in
+`GOOGLE_OAUTH_CLIENT_IDS` (iOS / Android / Web client ids — typically all three
+are listed since one BFF serves both platforms and the web landing).
+
+#### Apple
+
+`POST /api/v2/auth/apple` accepts `{ idToken, fullName? }`. Verification path is
+JWKS RS256 (`https://appleid.apple.com/auth/keys`) with 24h-cached public keys;
+`aud` must match `APPLE_OAUTH_CLIENT_IDS`. `fullName` is Apple's first-login-only
+payload — server uses it for `users.display_name` only on insert.
 
 To enable in production:
 1. Apple Developer Portal → Identifiers → your App ID → **Capabilities** → check
    "Sign in with Apple". Requires a **paid Apple Developer Program** membership;
    Personal Team builds will hit runtime error 1000.
-2. Set `APPLE_OAUTH_CLIENT_IDS` (Secret Manager or env) to your iOS bundle id.
+2. Set `APPLE_OAUTH_CLIENT_IDS` (Secret Manager or env) to your iOS bundle id
+   (e.g. `com.vibi.ios`).
 3. iOS app must carry the `com.apple.developer.applesignin` entitlement —
    `iosApp/iosApp.entitlements` is wired via `project.yml`. Run
    `xcodegen generate` after pulling.
@@ -298,27 +372,45 @@ To enable in production:
 
 ```
 src/main/kotlin/com/vibi/bff/
-├── Application.kt              # Ktor entry point + DI wiring
-├── config/AppConfig.kt         # HOCON + env var loading (Perso, Gemini, Separation, Storage)
+├── Application.kt              # Ktor entry, DI wiring, HttpClient timeouts, shutdown hooks
+├── Constants.kt                # MAX_UPLOAD_FILE_SIZE, etc.
+├── config/AppConfig.kt         # HOCON + env var loading (Storage, Perso, Gemini, Separation, Auth, Db)
+├── db/
+│   ├── Database.kt             # HikariCP + Exposed bootstrap
+│   └── UsersTable.kt           # (provider, providerSub) unique
 ├── plugins/
 │   ├── Cors.kt, Serialization.kt, Routing.kt
 │   └── ErrorHandling.kt        # StatusPages → ErrorResponse
 ├── model/
-│   ├── BffModels.kt            # BFF request/response DTOs
-│   ├── ChatModels.kt           # Chat / Gemini DTOs
+│   ├── AuthModels.kt           # GoogleAuthRequest / AppleAuthRequest / AuthResponse
+│   ├── BffModels.kt            # Render / Separation / Mix / Language DTOs
+│   ├── ChatModels.kt           # Chat / Gemini DTOs (functionCall, proposal)
 │   └── PersoModels.kt          # Perso upstream DTOs
-├── routes/                     # /api/v2 route definitions (Render, Separation, Subtitles, AutoDub, Chat, Languages)
+├── routes/
+│   ├── AuthRoutes.kt           # /auth/google · /auth/apple
+│   ├── LanguageRoutes.kt       # /languages
+│   ├── RenderRoutes.kt         # /render · /render/inputs · /render/{id}/{status,download}
+│   ├── SeparationRoutes.kt     # /separate · /separate/{id} · /stem · /mix · /mix/{id}{,/download}
+│   ├── ChatRoutes.kt           # /chat
+│   ├── DownloadResponder.kt    # respondFile / GCS-redirect dispatcher
+│   └── MultipartUtils.kt       # parsing helpers
 └── service/
-    ├── PersoClient.kt          # Perso upstream wrapper (SAS upload / translate / poll / download)
-    ├── GeminiClient.kt         # Vertex AI Gemini wrapper (translation + function calling)
-    ├── FileStorageService.kt   # Local blob storage
-    ├── AudioUtils.kt           # MP3 frame parsing
-    ├── RenderService.kt        # ffmpeg render orchestration
-    ├── SeparationService.kt    # Perso-backed stem separation jobs
-    ├── StemMixService.kt       # ffmpeg amix-based stem remix
-    ├── AutoSubtitleService.kt  # Perso STT + Gemini translation jobs
-    ├── AutoDubService.kt       # Perso translate-with-TTS jobs
-    └── SignedUrlService.kt     # HMAC-SHA256 download URL signer
+    ├── PersoClient.kt          # Perso upstream wrapper (SAS upload / separate / poll / download, SSRF allow-list, 5xx backoff)
+    ├── PersoPolling.kt         # Job-status polling primitive
+    ├── GeminiClient.kt         # Vertex AI Gemini wrapper (function calling + tool_code fallback parser)
+    ├── ChatToolDefs.kt         # EDIT_TOOLS function declarations + SYSTEM_INSTRUCTION
+    ├── AuthService.kt          # Google tokeninfo + Apple JWKS RS256 + JWT issuance
+    ├── UserRepository.kt       # Exposed-backed user upsert
+    ├── FileStorageService.kt   # Local blob storage (uploads/, render/, separation/, edited-source/)
+    ├── MediaSourceResolver.kt  # /separate source = multipart file or editedRenderJobId (owned-copy)
+    ├── MediaTrimmer.kt         # ffmpeg stream-copy cut for optional trim
+    ├── RenderService.kt        # ffmpeg orchestration (normalize → concat → final mix -c:v copy)
+    ├── RenderInputCacheService.kt # /render/inputs slot (sha256 inputId, TTL sweep)
+    ├── SeparationService.kt    # Perso-backed stem separation jobs (idempotency, TTL reap)
+    ├── StemMixService.kt       # ffmpeg amix=normalize=0 stem remix
+    ├── SignedUrlService.kt     # HMAC-SHA256 download URL signer
+    ├── GcsObjectStore.kt       # Optional GCS upload + V4 signed URL redirect
+    └── FfmpegRunner.kt         # ffmpeg / ffprobe process spawning + stderr capture
 ```
 
 ## Testing
