@@ -161,10 +161,16 @@ class AuthService(
         name: String,
         picture: String?,
     ): AuthUser {
-        val uuid = withContext(Dispatchers.IO) {
+        val upserted = withContext(Dispatchers.IO) {
             userRepository.upsert(provider, providerSub, email, name, picture)
         }
-        return AuthUser(sub = uuid.toString(), email = email, name = name, picture = picture)
+        return AuthUser(
+            sub = upserted.id.toString(),
+            email = email,
+            name = name,
+            picture = picture,
+            role = upserted.role,
+        )
     }
 
     fun issueAccessToken(user: AuthUser): AuthResponse {
@@ -175,6 +181,7 @@ class AuthService(
             .withSubject(user.sub)
             .withClaim("email", user.email)
             .withClaim("name", user.name)
+            .withClaim("role", user.role)
             .apply { user.picture?.let { withClaim("picture", it) } }
             .withIssuedAt(Date(nowMs))
             .withExpiresAt(Date(expiresAtMs))
@@ -183,7 +190,8 @@ class AuthService(
     }
 
     companion object {
-        private const val ISSUER = "vibi-bff"
+        // plugins/Auth.kt 의 verifier 가 동일 issuer 로 검증 — 변경 시 두 곳 동시 갱신.
+        const val ISSUER = "vibi-bff"
         private const val APPLE_ISSUER = "https://appleid.apple.com"
     }
 }

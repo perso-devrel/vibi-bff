@@ -5,6 +5,7 @@ import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.plugins.statuspages.*
 import io.ktor.server.response.*
+import io.sentry.Sentry
 import org.slf4j.LoggerFactory
 import java.io.EOFException
 import java.io.IOException
@@ -96,6 +97,10 @@ fun Application.configureErrorHandling() {
                 return@exception
             }
             log.error("Unhandled exception", cause)
+            // Sentry — DSN 미설정이면 capture no-op. ApiErrorException 4xx 분기는 위에서 이미
+            // 처리됐고 여기는 진짜 unhandled (대부분 5xx) 만 떨어진다. captureException 호출은
+            // best-effort 라 실패해도 응답에 영향 없음.
+            runCatching { Sentry.captureException(cause) }
             call.respond(
                 HttpStatusCode.InternalServerError,
                 ErrorResponse(error = "Internal server error")

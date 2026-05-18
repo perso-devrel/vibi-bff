@@ -56,6 +56,10 @@ class SeparationService(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     private val pollIntervalMs: Long,
     private val maxPollMinutes: Int,
+    /** admin 대시보드용 Postgres 영속화. null 이면 분석 write skip (테스트). */
+    private val analytics: JobAnalyticsRepository? = null,
+    /** Perso API 호출 instrumentation. null 이면 외부 호출 추적 skip. */
+    private val externalCalls: ExternalApiCallsRepository? = null,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
@@ -98,8 +102,19 @@ class SeparationService(
      * [dedupKey] 가 non-null 이면 atomic check-and-claim — 같은 키의 active 잡이
      * 있으면 [sourceFile] 을 삭제하고 기존 jobId 를 반환한다. dispose() 가 같은
      * 키 entry 를 정리하므로 disposed 잡의 키는 자유롭게 재사용된다.
+     *
+     * [userId] / [sourceDurationMs] / [renderJobId] 는 admin 대시보드 분석 row 용.
+     * userId == null 이면 분석 write skip (테스트 등). renderJobId 는 spec.editedRenderJobId
+     * 경유 시 RenderJobsTable 의 PK 와 동일 텍스트, legacy 업로드 경로면 null.
      */
-    fun submit(sourceFile: File, spec: SeparationSpec, dedupKey: String? = null): String {
+    fun submit(
+        sourceFile: File,
+        spec: SeparationSpec,
+        dedupKey: String? = null,
+        userId: UUID? = null,
+        sourceDurationMs: Long = 0L,
+        renderJobId: String? = null,
+    ): String {
         if (dedupKey != null) {
             // synchronized(dedupIndex) 로 (check, claim) 을 원자화 — 두 동시 호출이
             // 동일 키로 들어와도 한 쪽만 새 잡 생성, 다른 쪽은 기존 jobId 반환.
@@ -110,23 +125,38 @@ class SeparationService(
                     log.info("Separation dedup hit: key={} → existing jobId={}", dedupKey, existing)
                     return existing
                 }
-                val jobId = createAndLaunch(sourceFile, spec, dedupKey)
+                val jobId = createAndLaunch(sourceFile, spec, dedupKey, userId, sourceDurationMs, renderJobId)
                 dedupIndex[dedupKey] = jobId
                 return jobId
             }
         }
-        return createAndLaunch(sourceFile, spec, dedupKey = null)
+        return createAndLaunch(sourceFile, spec, dedupKey = null, userId, sourceDurationMs, renderJobId)
     }
 
-    private fun createAndLaunch(sourceFile: File, spec: SeparationSpec, dedupKey: String?): String {
+    private fun createAndLaunch(
+        sourceFile: File,
+        spec: SeparationSpec,
+        dedupKey: String?,
+        userId: UUID? = null,
+        sourceDurationMs: Long = 0L,
+        renderJobId: String? = null,
+    ): String {
         val jobId = "sep-${UUID.randomUUID()}"
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
         val job = SeparationJob(jobId = jobId, outputDir = outputDir, dedupKey = dedupKey)
         jobs[jobId] = job
 
         scope.launch {
+            if (userId != null) {
+                analytics?.insertSeparationJob(jobId, userId, renderJobId, sourceDurationMs, "PROCESSING")
+            }
             try {
-                runPipeline(job, sourceFile, spec)
+                externalCalls.withExternalCall("perso", "audio-separation") {
+                    runPipeline(job, sourceFile, spec)
+                }
+                if (userId != null && job.status == "READY") {
+                    analytics?.updateSeparationJobStatus(jobId, "READY")
+                }
             } catch (e: Exception) {
                 job.status = "FAILED"
                 job.error = e.message
@@ -134,6 +164,9 @@ class SeparationService(
                 // dedup entry 정리 (cleanupAbandoned 의 FAILED_JOB_TTL 까지 기다리면
                 // 그동안 mobile 이 재시도해도 실패한 잡 ID 만 받게 됨).
                 dedupKey?.let { dedupIndex.remove(it, jobId) }
+                if (userId != null) {
+                    analytics?.updateSeparationJobStatus(jobId, "FAILED")
+                }
                 // Leave sourceFile on disk — caller can retry; cleanupAbandoned
                 // reaps it via dispose() once FAILED_JOB_TTL_MS passes.
                 log.error("Separation pipeline failed: jobId={}", jobId, e)

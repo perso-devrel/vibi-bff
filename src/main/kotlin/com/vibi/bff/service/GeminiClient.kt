@@ -34,6 +34,8 @@ import java.io.FileInputStream
 class GeminiClient(
     private val config: GeminiConfig,
     private val httpClient: HttpClient,
+    /** Gemini API 호출 instrumentation. null 이면 추적 skip (테스트). */
+    private val externalCalls: ExternalApiCallsRepository? = null,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     @Volatile private var credentials: GoogleCredentials? = null
@@ -78,6 +80,14 @@ class GeminiClient(
      */
     suspend fun chat(
         userMessages: List<Pair<String, String>>,  // role to content
+        toolFunctionDeclarations: List<JsonObject>,
+        systemInstruction: String,
+    ): GeminiChatResult = externalCalls.withExternalCall("gemini", "chat") {
+        doChat(userMessages, toolFunctionDeclarations, systemInstruction)
+    }
+
+    private suspend fun doChat(
+        userMessages: List<Pair<String, String>>,
         toolFunctionDeclarations: List<JsonObject>,
         systemInstruction: String,
     ): GeminiChatResult {

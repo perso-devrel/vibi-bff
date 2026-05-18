@@ -3,10 +3,15 @@ package com.vibi.bff
 import com.vibi.bff.config.loadConfig
 import com.vibi.bff.db.DbBootstrap
 import com.vibi.bff.plugins.*
+import io.sentry.Sentry
+import com.vibi.bff.service.AdminRepository
 import com.vibi.bff.service.AuthService
+import com.vibi.bff.service.CreditRepository
+import com.vibi.bff.service.ExternalApiCallsRepository
 import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.JobAnalyticsRepository
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.RenderInputCacheService
@@ -46,6 +51,25 @@ fun main(args: Array<String>) {
 
 private val MASKED_QUERY_PARAMS = Regex("(token|id_token|access_token|code)=[^&]+")
 
+/**
+ * Sentry 부트스트랩. `SENTRY_DSN_BFF` env 가 비면 no-op — dev/test 에서 운영 Sentry 프로젝트
+ * 오염 안 함. `SENTRY_ENV` (e.g. "prod", "staging") 와 `SENTRY_TRACES_SAMPLE_RATE` (기본 0.1)
+ * 도 env 만.
+ */
+private fun initSentry() {
+    val dsn = System.getenv("SENTRY_DSN_BFF")?.takeIf { it.isNotBlank() } ?: return
+    val env = System.getenv("SENTRY_ENV")?.takeIf { it.isNotBlank() } ?: "dev"
+    val tracesRate = System.getenv("SENTRY_TRACES_SAMPLE_RATE")?.toDoubleOrNull() ?: 0.1
+    Sentry.init { options ->
+        options.dsn = dsn
+        options.environment = env
+        options.tracesSampleRate = tracesRate
+        options.isAttachStacktrace = true
+        // SDK release 식별자. CI 가 SENTRY_RELEASE 로 git SHA 주입 권장.
+        System.getenv("SENTRY_RELEASE")?.takeIf { it.isNotBlank() }?.let { options.release = it }
+    }
+}
+
 // real env > existing system property > .env
 private fun loadDotenv() {
     val dotenv = io.github.cdimascio.dotenv.dotenv {
@@ -59,6 +83,11 @@ private fun loadDotenv() {
 }
 
 fun Application.module() {
+    // Sentry init — module() 초반에 두어 이후 모든 boot 단계 예외도 캡처. DSN 미설정이면
+    // init no-op 라 dev/test 무영향. 본 호출 자체는 Sentry-internal global state 만 만지므로
+    // application 전체 lifecycle 에 영향 없음.
+    initSentry()
+
     val appConfig = loadConfig(environment.config)
 
     require(appConfig.perso.apiKey.isNotBlank()) {
@@ -70,6 +99,10 @@ fun Application.module() {
     // AuthService 의 user upsert 가 의존 — HTTP client 초기화보다 먼저.
     val dataSource = DbBootstrap.init(appConfig.db)
     val userRepository = UserRepository()
+    val jobAnalyticsRepository = JobAnalyticsRepository()
+    val externalApiCallsRepository = ExternalApiCallsRepository()
+    val adminRepository = AdminRepository()
+    val creditRepository = CreditRepository()
 
     // Vertex AI / Gemini credentials are validated lazily on the first
     // chat call, so the server can boot without them in dev when the chat
@@ -115,7 +148,11 @@ fun Application.module() {
     // (containerized hosts often misreport availableProcessors).
     val renderMaxConcurrent = System.getenv("RENDER_MAX_CONCURRENT")?.toIntOrNull()
         ?: RenderService.defaultMaxConcurrent()
-    val renderService = RenderService(fileStorage.renderDir, maxConcurrentRenders = renderMaxConcurrent)
+    val renderService = RenderService(
+        fileStorage.renderDir,
+        maxConcurrentRenders = renderMaxConcurrent,
+        analytics = jobAnalyticsRepository,
+    )
 
     // Shared input cache. RENDER_INPUT_CACHE_TTL_HOURS overrides the 24h default
     // when a deployment needs longer reuse windows (long-running mobile session
@@ -147,6 +184,8 @@ fun Application.module() {
         config = appConfig.separation,
         pollIntervalMs = appConfig.perso.pollIntervalMs,
         maxPollMinutes = appConfig.perso.maxPollMinutes,
+        analytics = jobAnalyticsRepository,
+        externalCalls = externalApiCallsRepository,
     )
     val stemMixService = StemMixService(
         mixDir = File(fileStorage.separationDir, "mix"),
@@ -154,7 +193,7 @@ fun Application.module() {
     )
 
     val authService = AuthService(appConfig.auth, httpClient, userRepository)
-    val geminiClient = GeminiClient(appConfig.gemini, httpClient)
+    val geminiClient = GeminiClient(appConfig.gemini, httpClient, externalApiCallsRepository)
 
     // Phase 1: separation 의 source 결정자.
     // multipart `file` 또는 spec.editedRenderJobId 둘 중 하나로 source 해석.
@@ -188,6 +227,8 @@ fun Application.module() {
         separationService, stemMixService, signedUrlService,
         geminiClient, httpClient, renderInputCache,
         mediaSourceResolver, authService, gcsObjectStore,
+        adminRepository,
+        userRepository, creditRepository,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(

@@ -1,12 +1,16 @@
 package com.vibi.bff.plugins
 
 import com.vibi.bff.config.AppConfig
+import com.vibi.bff.routes.adminRoutes
 import com.vibi.bff.routes.authRoutes
 import com.vibi.bff.routes.chatRoutes
+import com.vibi.bff.routes.creditRoutes
 import com.vibi.bff.routes.languageRoutes
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.routes.separationRoutes
+import com.vibi.bff.service.AdminRepository
 import com.vibi.bff.service.AuthService
+import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.GcsObjectStore
@@ -17,6 +21,7 @@ import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.StemMixService
+import com.vibi.bff.service.UserRepository
 import com.vibi.bff.plugins.NotFoundException
 import io.ktor.client.HttpClient
 import io.ktor.http.*
@@ -41,20 +46,53 @@ fun Application.configureRouting(
     mediaSourceResolver: MediaSourceResolver,
     authService: AuthService,
     gcsObjectStore: GcsObjectStore?,
+    adminRepository: AdminRepository,
+    userRepository: UserRepository,
+    creditRepository: CreditRepository,
 ) {
+    val log = org.slf4j.LoggerFactory.getLogger("BootCheck")
     routing {
         swaggerUI(path = "swagger", swaggerFile = "openapi/vibi-bff.yaml")
 
+        // Admin SPA — Swagger 와 같은 패턴으로 BFF 가 직접 서빙. ADMIN_SLUG blank 면 마운트 자체 skip
+        // (= 외부에선 admin 페이지 존재도 인지 불가). Vite 빌드 산출물이 src/main/resources/admin/ 에 있다.
+        // SPA HashRouter 라 server 측 fallback 필요 없음 — /${slug}/ 로 들어오면 index.html 만 떨어뜨리면
+        // # 뒤는 모두 client-side routing.
+        val adminSlug = appConfig.admin.slug
+        if (adminSlug.isNotBlank()) {
+            val spaIndexExists = this::class.java.classLoader
+                .getResource("${appConfig.admin.resourcePath}/index.html") != null
+            if (spaIndexExists) {
+                staticResources("/$adminSlug", appConfig.admin.resourcePath) {
+                    default("index.html")
+                }
+                log.info("Admin SPA mounted at /{}/ (resource={})", adminSlug, appConfig.admin.resourcePath)
+            } else {
+                log.warn(
+                    "ADMIN_SLUG='{}' set but classpath:/{}/index.html not found — " +
+                        "did you run `npm run build` in admin-ui/?",
+                    adminSlug, appConfig.admin.resourcePath,
+                )
+            }
+        }
+
         route("/api/v2") {
-            authRoutes(authService)
+            authRoutes(authService, userRepository, jwtSecret = appConfig.auth.jwtSecret)
+            creditRoutes(creditRepository, jwtSecret = appConfig.auth.jwtSecret)
             languageRoutes(persoClient)
             renderRoutes(
                 renderService, fileStorage,
                 separationService, signedUrlService, renderInputCache,
                 gcsObjectStore,
+                jwtSecret = appConfig.auth.jwtSecret,
             )
-            separationRoutes(separationService, stemMixService, signedUrlService, fileStorage, appConfig, mediaSourceResolver, gcsObjectStore)
+            separationRoutes(
+                separationService, stemMixService, signedUrlService, fileStorage,
+                appConfig, mediaSourceResolver, gcsObjectStore,
+                jwtSecret = appConfig.auth.jwtSecret,
+            )
             chatRoutes(geminiClient)
+            adminRoutes(adminRepository, jwtSecret = appConfig.auth.jwtSecret)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.
             // 각 폴더 안에 stem 오디오 파일들 (배경음/화자1/... 한글 파일명, .wav/.mp3/.m4a 등).

@@ -108,6 +108,9 @@ class RenderService(
      * before doing any ffmpeg work, so queued jobs report status=PROCESSING
      * with progressReason="queued" until a slot frees up. */
     maxConcurrentRenders: Int = defaultMaxConcurrent(),
+    /** admin 대시보드용 Postgres 영속화. null 이면 분석 write skip (테스트 / DB-less dev).
+     * 운영에선 Application.kt 가 항상 주입한다. */
+    private val analytics: JobAnalyticsRepository? = null,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, RenderJob>()
@@ -218,6 +221,12 @@ class RenderService(
         /** 최종 인코딩 품질 프로필 (audio bitrate). high/medium/low. audio 모드는 무시.
          * Video 는 stream-copy 라 quality 영향 없음 (per-segment trim 의 libx264 는 고정 설정). */
         quality: String = "medium",
+        /** admin 대시보드 귀속용. JWT sub 에서 라우트가 추출. null 이면 분석 write skip
+         * (테스트 등). 운영에선 RenderRoutes 가 항상 채운다. */
+        userId: UUID? = null,
+        /** 사용자가 올린 입력 영상의 총 길이 (segments trim 합산 또는 legacy videoDurationMs).
+         * 대시보드의 "영상 길이" KPI 원본. */
+        sourceDurationMs: Long = 0L,
     ): String {
         require(outputKind == "video" || outputKind == "audio") {
             "outputKind must be 'video' or 'audio' (got '$outputKind')"
@@ -230,6 +239,9 @@ class RenderService(
         jobs[jobId] = job
 
         scope.launch {
+            if (userId != null) {
+                analytics?.insertRenderJob(jobId, userId, sourceDurationMs, "PROCESSING")
+            }
             var process: Process? = null
             // While waiting for an ffmpeg permit, mark the job as PROCESSING with
             // progressReason="queued" so polling clients see meaningful state
@@ -318,6 +330,12 @@ class RenderService(
             } finally {
                 inputFilesToCleanup.forEach { it.delete() }
                 ffmpegSemaphore.release()
+                if (userId != null) {
+                    val finalStatus = job.status
+                    if (finalStatus == "COMPLETED" || finalStatus == "FAILED") {
+                        analytics?.updateRenderJobStatus(jobId, finalStatus)
+                    }
+                }
             }
         }
 

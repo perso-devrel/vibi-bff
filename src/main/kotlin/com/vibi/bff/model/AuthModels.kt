@@ -43,6 +43,7 @@ data class AuthUser(
     val email: String,
     val name: String,
     val picture: String? = null,
+    val role: String = "user",
 )
 
 @Serializable

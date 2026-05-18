@@ -14,6 +14,7 @@ object UsersTable : UUIDTable("users", "id") {
     val email = varchar("email", 320)
     val name = varchar("name", 255)
     val picture = varchar("picture", 2048).nullable()
+    val role = varchar("role", 16).default("user")
     val createdAt = timestamp("created_at")
     val updatedAt = timestamp("updated_at")
 }

@@ -25,6 +25,11 @@ tags:
       Google / Apple ID Token 검증 → users 테이블 upsert (provider+providerSub 유니크) →
       BFF access token (HS256 JWT) 발급. JWT `sub` 는 user 의 internal UUID
       (provider sub 가 아님) — 향후 IAP `appAccountToken` 으로도 재사용.
+      DELETE /account 는 App Store 가이드라인 5.1.1(v) 의 in-app account deletion 충족.
+  - name: Credits
+    description: |
+      크레딧 잔액 + IAP 영수증 가산. App Store / Play Store productId 와 1:1 매핑된
+      카탈로그(CreditCatalog) 만 허용. (platform, transactionId) UNIQUE 로 재시도 중복 차단.
   - name: Languages
     description: Perso 가 지원하는 타깃 언어 목록 프록시
   - name: Render
@@ -87,6 +92,80 @@ paths:
               schema: { $ref: '#/components/schemas/AuthResponse' }
         '401':
           description: ID Token 검증 실패 (서명/만료/aud 불일치)
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/auth/account:
+    delete:
+      tags: [Auth]
+      summary: 회원탈퇴 (인증된 본인 영구 삭제)
+      description: |
+        Authorization 헤더의 JWT sub 에 해당하는 user row 를 삭제한다. FK 정책:
+          • user_credits / credit_transactions — `ON DELETE CASCADE` 로 함께 삭제 (영수증 row 제외)
+          • render_jobs / separation_jobs — `ON DELETE SET NULL` 로 익명 row 보존 (KPI 연속성)
+        Apple 의 경우 클라이언트도 Sign In with Apple 토큰 revoke 를 호출하는 것이 권장된다 (TODO 표시).
+      security:
+        - bearerAuth: []
+      responses:
+        '204':
+          description: 삭제 완료
+        '401':
+          description: 인증 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  # ---------------------------------------------------------------- Credits
+  /api/v2/credits:
+    get:
+      tags: [Credits]
+      summary: 현재 사용자 크레딧 잔액
+      security:
+        - bearerAuth: []
+      responses:
+        '200':
+          description: 잔액
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreditBalanceResponse' }
+        '401':
+          description: 인증 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
+  /api/v2/credits/purchase:
+    post:
+      tags: [Credits]
+      summary: IAP 영수증 가산 (idempotent)
+      description: |
+        StoreKit2 / Play Billing 영수증을 BFF 가 검증한 뒤 잔액에 가산. 같은
+        `(platform, transactionId)` 조합으로 재호출되면 `granted=0` 이 반환된다.
+        productId 는 [CreditCatalog](`src/main/kotlin/com/vibi/bff/model/CreditModels.kt`) 의 키여야 한다.
+
+        **v1**: receipt 가 비어있지 않으면 통과로 간주하는 stub. 출시 전 Apple App Store
+        Server API / Google Play Developer API 호출로 교체 필요.
+      security:
+        - bearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: '#/components/schemas/CreditPurchaseRequest' }
+      responses:
+        '200':
+          description: 처리 결과
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreditPurchaseResponse' }
+        '400':
+          description: 영수증/productId 검증 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: 인증 실패
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -549,6 +628,48 @@ components:
           format: int64
           description: epoch millis
         user: { $ref: '#/components/schemas/AuthUser' }
+
+    # -------------------------- Credits
+    CreditBalanceResponse:
+      type: object
+      required: [balance]
+      properties:
+        balance:
+          type: integer
+          minimum: 0
+          description: 현재 잔액 (row 가 없으면 0)
+
+    CreditPurchaseRequest:
+      type: object
+      required: [productId, platform, receipt, transactionId]
+      properties:
+        productId:
+          type: string
+          description: App Store Connect / Play Console 의 SKU. CreditCatalog 에 등록된 값만 허용.
+          example: vibi.credits.50
+        platform:
+          type: string
+          enum: [apple, google]
+        receipt:
+          type: string
+          description: StoreKit2 Transaction.jsonRepresentation 또는 Play Billing purchaseToken
+        transactionId:
+          type: string
+          description: idempotency key — App Store / Play Store 의 unique transaction ID
+
+    CreditPurchaseResponse:
+      type: object
+      required: [granted, balance, transactionId]
+      properties:
+        granted:
+          type: integer
+          minimum: 0
+          description: 이번 호출로 가산된 크레딧. duplicate transactionId 면 0.
+        balance:
+          type: integer
+          minimum: 0
+        transactionId:
+          type: string
 
     # -------------------------- Languages
     LanguageOption:

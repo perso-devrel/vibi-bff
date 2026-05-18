@@ -5,6 +5,7 @@ import com.vibi.bff.config.AppConfig
 import com.vibi.bff.model.*
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.NotFoundException
+import com.vibi.bff.plugins.requireUser
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.GcsObjectStore
 import com.vibi.bff.service.MediaSourceResolver
@@ -28,12 +29,15 @@ fun Route.separationRoutes(
     appConfig: AppConfig,
     mediaSourceResolver: MediaSourceResolver,
     gcsObjectStore: GcsObjectStore?,
+    /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
+    jwtSecret: String? = null,
 ) {
     route("/separate") {
         // POST /api/v2/separate — submit job
         // Accepts either multipart `file` (legacy) or `spec.editedRenderJobId`
         // referencing a completed /api/v2/render output. See MediaSourceResolver.
         post {
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val (filePart, specOpt) = parseOptionalUploadAndSpec<SeparationSpec>(
                 call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE),
                 fileStorage,
@@ -67,7 +71,15 @@ fun Route.separationRoutes(
             try {
                 source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId)
                 pipelineInput = maybeTrim(source, spec)
-                val jobId = separationService.submit(pipelineInput, spec, dedupKey)
+                val sourceDurationMs = computeSeparationSourceDurationMs(pipelineInput, spec)
+                val jobId = separationService.submit(
+                    sourceFile = pipelineInput,
+                    spec = spec,
+                    dedupKey = dedupKey,
+                    userId = principal?.userId,
+                    sourceDurationMs = sourceDurationMs,
+                    renderJobId = spec.editedRenderJobId,
+                )
                 call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = jobId))
             } catch (e: Throwable) {
                 runCatching { pipelineInput?.delete() }
@@ -227,6 +239,22 @@ fun Route.separationRoutes(
  * 영상 길이 측정 ms 단위 오차 허용치. 100ms 이내면 자동 clamp.
  */
 private const val TRIM_DURATION_TOLERANCE_MS = 100L
+
+/**
+ * admin 대시보드의 "영상 당 분리 사용량" KPI 원본. spec 에 trim 윈도우가 있으면 그 길이,
+ * 없으면 source 파일을 ffprobe 로 측정. probe 실패하면 0 (대시보드에서 길이 모름으로 표시).
+ *
+ * [MediaTrimmer.probeDurationMs] 는 suspend (내부 withContext(Dispatchers.IO)) 라 본 함수도
+ * suspend. ffprobe 실패는 분석 손실로만 끝나고 separation 잡 자체는 계속 — runCatching 으로 흡수.
+ */
+internal suspend fun computeSeparationSourceDurationMs(pipelineInput: File, spec: SeparationSpec): Long {
+    if (spec.trimStartMs != null && spec.trimEndMs != null) {
+        return (spec.trimEndMs - spec.trimStartMs).coerceAtLeast(0L)
+    }
+    return runCatching { MediaTrimmer.probeDurationMs(pipelineInput) ?: 0L }
+        .getOrDefault(0L)
+        .coerceAtLeast(0L)
+}
 
 /**
  * Idempotency 키. 같은 (editedRenderJobId, trim 구간, 화자 수, 언어, mediaType) 으로

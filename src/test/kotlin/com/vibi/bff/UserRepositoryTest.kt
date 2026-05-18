@@ -13,6 +13,7 @@ import kotlin.test.assertEquals
 import kotlin.test.assertNotEquals
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
 
 class UserRepositoryTest {
 
@@ -66,5 +67,24 @@ class UserRepositoryTest {
         assertEquals("new@example.com", row[UsersTable.email])
         assertEquals("New Name", row[UsersTable.name])
         assertEquals("pic.png", row[UsersTable.picture])
+    }
+
+    @Test
+    fun `upsert returns default role 'user' for new row`() {
+        val upserted = repo.upsert(AuthProvider.GOOGLE, "g-new", "x@example.com", "X", null)
+        assertEquals("user", upserted.role)
+    }
+
+    @Test
+    fun `upsert preserves admin role across re-login`() {
+        val first = repo.upsert(AuthProvider.GOOGLE, "g-admin", "ops@example.com", "Ops", null)
+        // 운영자가 SQL 로 admin 승격한 상황 시뮬레이션.
+        transaction {
+            UsersTable.update({ UsersTable.id eq first.id }) { it[role] = "admin" }
+        }
+        // 같은 사용자가 재로그인 → upsert 가 'admin' 을 'user' 로 강등시키면 안 됨.
+        val second = repo.upsert(AuthProvider.GOOGLE, "g-admin", "ops@example.com", "Ops Renamed", null)
+        assertEquals(first.id, second.id)
+        assertEquals("admin", second.role)
     }
 }

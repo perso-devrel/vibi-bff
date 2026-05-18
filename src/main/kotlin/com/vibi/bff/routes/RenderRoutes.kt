@@ -8,6 +8,7 @@ import com.vibi.bff.model.RenderStatusResponse
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
+import com.vibi.bff.plugins.requireUser
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
 import com.vibi.bff.service.FileStorageService
@@ -36,6 +37,8 @@ fun Route.renderRoutes(
     signedUrlService: SignedUrlService,
     inputCacheService: RenderInputCacheService,
     gcsObjectStore: GcsObjectStore?,
+    /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
+    jwtSecret: String? = null,
 ) {
     route("/render") {
         // POST /api/v2/render/inputs — shared input cache. Mobile uploads the
@@ -102,6 +105,8 @@ fun Route.renderRoutes(
         }
 
         post {
+            // 사용자 귀속 — admin 대시보드의 "사용자별 사용량" 집계 source. jwtSecret null 이면 분석 skip.
+            val principal = jwtSecret?.let { call.requireUser(it) }
             // Ktor 3.x default formFieldLimit 50MB → 70MB+ 영상 multipart 거부됨. 500MB 까지 허용.
             val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
@@ -224,6 +229,8 @@ fun Route.renderRoutes(
                 inputFilesToCleanup = inputFiles,
                 outputKind = config.outputKind,
                 quality = config.quality,
+                userId = principal?.userId,
+                sourceDurationMs = computeRenderSourceDurationMs(config),
             )
 
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
@@ -336,4 +343,21 @@ private fun parseQueryParam(query: String, key: String): String? {
         if (pair.substring(0, eq) == key) return pair.substring(eq + 1)
     }
     return null
+}
+
+/**
+ * admin 대시보드의 "영상 길이" KPI 원본. 사용자가 올린 입력 영상의 총 길이 ms.
+ * segments 있으면 각 segment 의 trim 윈도우 합산, 없으면 legacy videoDurationMs.
+ * speedScale 은 입력 길이와 무관하므로 적용 안 함 (사용자가 올린 raw 분량 기준).
+ */
+internal fun computeRenderSourceDurationMs(config: com.vibi.bff.model.RenderConfig): Long {
+    val segs = config.segments
+    if (!segs.isNullOrEmpty()) {
+        return segs.sumOf { seg ->
+            val ts = seg.trimStartMs ?: 0L
+            val te = seg.trimEndMs?.takeIf { it > 0L } ?: seg.durationMs
+            (te - ts).coerceAtLeast(0L)
+        }
+    }
+    return (config.videoDurationMs ?: 0L).coerceAtLeast(0L)
 }

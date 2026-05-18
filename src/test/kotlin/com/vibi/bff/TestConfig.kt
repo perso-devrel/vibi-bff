@@ -1,5 +1,6 @@
 package com.vibi.bff
 
+import com.vibi.bff.config.AdminConfig
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.config.AuthConfig
 import com.vibi.bff.config.DbConfig
@@ -63,4 +64,5 @@ fun testAppConfig(
         password = "",
         maxPoolSize = 2,
     ),
+    admin = AdminConfig(slug = ""),
 )

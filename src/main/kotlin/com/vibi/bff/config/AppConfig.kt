@@ -10,7 +10,32 @@ data class AppConfig(
     val separation: SeparationConfig,
     val auth: AuthConfig,
     val db: DbConfig,
+    val admin: AdminConfig,
 )
+
+/**
+ * 운영자 admin SPA 마운트 경로 + 빌드 산출물 경로.
+ *
+ * - [slug] — 추측 불가능한 prefix (env ADMIN_SLUG). blank 면 admin UI 자체를 마운트 안 함
+ *   (= staticResources 호출 자체 skip). 운영자만 알아야 하는 값이라 코드 상수 0.
+ * - [resourcePath] — classpath 안 SPA 빌드 산출물 디렉터리. Vite build outDir 와 1:1
+ *   (`src/main/resources/admin/`). 별도 path 로 바꿀 일 거의 없음.
+ */
+data class AdminConfig(
+    val slug: String,
+    val resourcePath: String = "admin",
+) {
+    init {
+        if (slug.isNotBlank()) {
+            require(slug.matches(Regex("^[a-zA-Z0-9_-]+$"))) {
+                "ADMIN_SLUG must be alphanumeric / dash / underscore only (got '$slug')"
+            }
+            require(slug.length in 6..64) {
+                "ADMIN_SLUG length must be 6..64 (got ${slug.length})"
+            }
+        }
+    }
+}
 
 data class StorageConfig(
     val basePath: String,
@@ -178,6 +203,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val separation = vibi.config("separation")
     val auth = vibi.config("auth")
     val db = vibi.config("db")
+    val admin = vibi.config("admin")
 
     return AppConfig(
         storage = StorageConfig(
@@ -230,6 +256,9 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
             user = db.property("user").getString(),
             password = db.property("password").getString(),
             maxPoolSize = db.property("maxPoolSize").getString().toInt(),
+        ),
+        admin = AdminConfig(
+            slug = admin.propertyOrNull("slug")?.getString().orEmpty().trim(),
         ),
     )
 }
