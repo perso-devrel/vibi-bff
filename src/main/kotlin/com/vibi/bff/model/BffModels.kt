@@ -62,15 +62,10 @@ data class BgmClip(
 @Serializable
 data class Segment(
     val sourceFileKey: String,
-    val type: String, // "VIDEO" or "IMAGE"
     val order: Int,
     val durationMs: Long,
     val trimStartMs: Long? = null,
     val trimEndMs: Long? = null,
-    val width: Int? = null,
-    val height: Int? = null,
-    val imageWidthPct: Float? = null,
-    val imageHeightPct: Float? = null,
     val volumeScale: Float = 1.0f,
     val speedScale: Float = 1.0f,
 ) {
@@ -81,22 +76,9 @@ data class Segment(
 }
 
 @Serializable
-data class FrameConfig(
-    val width: Int,
-    val height: Int,
-    val backgroundColorHex: String = "#000000",
-) {
-    init {
-        require(width > 0) { "FrameConfig.width must be > 0 (got $width)" }
-        require(height > 0) { "FrameConfig.height must be > 0 (got $height)" }
-    }
-}
-
-@Serializable
 data class RenderConfig(
     val videoDurationMs: Long? = null,          // legacy (Task 2 이하)
     val segments: List<Segment>? = null,        // Task 3a+
-    val frame: FrameConfig? = null,
     val bgmClips: List<BgmClip> = emptyList(),
     /** my_plan: 음성분리 명세. 각 directive 의 stem `audioUrl` 을 BFF 가 다운로드
      * (또는 자체 HMAC URL 매핑) 후 ffmpeg amix 로 합성. */

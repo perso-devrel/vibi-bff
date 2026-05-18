@@ -173,12 +173,10 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = any(),
                 videoFiles = any(),
-                segmentImageFiles = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
             )
@@ -199,12 +197,10 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = matchNullable<File> { it != null && it.absolutePath == cached.videoFile.absolutePath },
                 videoFiles = any(),
-                segmentImageFiles = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
                 separationDirectives = any(),
                 // Cache-resident files must NOT be in cleanup list — other variants
                 // are still using them.
@@ -227,12 +223,10 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = any(),
                 videoFiles = any(),
-                segmentImageFiles = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),
@@ -263,12 +257,10 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = any(),
                 videoFiles = any(),
-                segmentImageFiles = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),

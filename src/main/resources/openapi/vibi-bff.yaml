@@ -580,32 +580,17 @@ components:
 
     Segment:
       type: object
-      required: [sourceFileKey, type, order, durationMs]
+      required: [sourceFileKey, order, durationMs]
       properties:
         sourceFileKey:
           type: string
-          description: 'video segment 는 `video_<key>`, image segment 는 `segment_image_<key>` 매칭'
-        type:
-          type: string
-          enum: [VIDEO, IMAGE]
+          description: 'multipart `video_<key>` 파트 매칭'
         order: { type: integer }
         durationMs: { type: integer, format: int64 }
         trimStartMs: { type: integer, format: int64, nullable: true }
         trimEndMs: { type: integer, format: int64, nullable: true }
-        width: { type: integer, nullable: true }
-        height: { type: integer, nullable: true }
-        imageWidthPct: { type: number, format: float, nullable: true }
-        imageHeightPct: { type: number, format: float, nullable: true }
         volumeScale: { type: number, format: float, default: 1.0 }
         speedScale: { type: number, format: float, default: 1.0 }
-
-    FrameConfig:
-      type: object
-      required: [width, height]
-      properties:
-        width: { type: integer }
-        height: { type: integer }
-        backgroundColorHex: { type: string, default: '#000000' }
 
     SeparationStemSelectionDto:
       type: object
@@ -652,7 +637,6 @@ components:
           type: array
           nullable: true
           items: { $ref: '#/components/schemas/Segment' }
-        frame: { $ref: '#/components/schemas/FrameConfig' }
         bgmClips:
           type: array
           items: { $ref: '#/components/schemas/BgmClip' }
@@ -671,10 +655,11 @@ components:
           enum: [high, medium, low]
           default: medium
           description: |
-            출력 영상 품질 프로필 (파일 사이즈 = egress 비용 직결).
-              high   — CRF 20, preset slow, audio 192k.
-              medium — CRF 23, preset fast, audio 192k (기본).
-              low    — CRF 28, preset fast, audio 128k (~50% 작음).
+            출력 audio 비트레이트 프로필. video 는 최종 패스에서 stream-copy 되므로
+            quality 와 무관 (per-segment trim 의 libx264 도 별개 고정 설정).
+              high   — audio 192k.
+              medium — audio 192k (기본).
+              low    — audio 128k.
             audio 모드에선 quality 무시 — 후속 분리 파이프라인 입력 품질 보장 위해 별도 유지.
 
     RenderResponse:

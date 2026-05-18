@@ -108,7 +108,6 @@ fun Route.renderRoutes(
             var legacyVideoFile: File? = null
             val videoFiles = mutableMapOf<String, File>()
             val bgmAudioFiles = mutableMapOf<String, File>()
-            val segmentImageFiles = mutableMapOf<String, File>()
             var renderConfig: RenderConfig? = null
             var inputId: String? = null
 
@@ -133,8 +132,6 @@ fun Route.renderRoutes(
                                 videoFiles[name] = saveFile(part, "$name.mp4")
                             name.startsWith("bgm_") ->
                                 bgmAudioFiles[name] = saveFile(part, "$name.mp3")
-                            name.startsWith("segment_image_") ->
-                                segmentImageFiles[name] = saveFile(part, "$name.jpg")
                         }
                     }
                     is PartData.FormItem -> {
@@ -213,19 +210,16 @@ fun Route.renderRoutes(
             legacyVideoFile?.let { if (it !in cacheResidentFiles) inputFiles.add(it) }
             inputFiles.addAll(videoFiles.values)
             inputFiles.addAll(bgmAudioFiles.values)
-            inputFiles.addAll(segmentImageFiles.values)
             // SeparationService 가 stem 파일의 owner — 자체 TTL 로 관리하므로 여기 cleanup
             // 대상에 포함하지 않음 (다른 동시 render job 이 같은 stem 사용 가능).
 
             val jobId = renderService.submitRender(
                 legacyVideoFile = legacyVideoFile,
                 videoFiles = videoFiles,
-                segmentImageFiles = segmentImageFiles,
                 bgmAudioFiles = bgmAudioFiles,
                 bgmClips = config.bgmClips,
                 videoDurationMs = config.videoDurationMs,
                 segments = config.segments,
-                frame = config.frame,
                 separationDirectives = resolvedDirectives,
                 inputFilesToCleanup = inputFiles,
                 outputKind = config.outputKind,

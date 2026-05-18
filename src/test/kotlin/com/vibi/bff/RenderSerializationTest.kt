@@ -1,7 +1,6 @@
 package com.vibi.bff
 
 import com.vibi.bff.model.BgmClip
-import com.vibi.bff.model.FrameConfig
 import com.vibi.bff.model.RenderConfig
 import com.vibi.bff.model.RenderInputCacheResponse
 import com.vibi.bff.model.Segment
@@ -18,6 +17,8 @@ class RenderSerializationTest {
 
     @Test
     fun `Segment defaults volumeScale and speedScale to 1_0`() {
+        // 옛 클라이언트가 보내는 type/width/height/imageWidthPct 같은 절단된 필드는
+        // ignoreUnknownKeys=true 로 묵시 무시 (AppJson 정책 — RenderRoutes.kt 주석 참고).
         val decoded: Segment = json.decodeFromString(
             """{"sourceFileKey":"video_0","type":"VIDEO","order":0,"durationMs":5000}"""
         )
@@ -28,7 +29,7 @@ class RenderSerializationTest {
     @Test
     fun `Segment accepts custom volumeScale and speedScale`() {
         val decoded: Segment = json.decodeFromString(
-            """{"sourceFileKey":"video_0","type":"VIDEO","order":0,"durationMs":5000,"volumeScale":0.5,"speedScale":2.0}"""
+            """{"sourceFileKey":"video_0","order":0,"durationMs":5000,"volumeScale":0.5,"speedScale":2.0}"""
         )
         assertEquals(0.5f, decoded.volumeScale)
         assertEquals(2.0f, decoded.speedScale)
@@ -38,7 +39,6 @@ class RenderSerializationTest {
     fun `Segment round-trips through JSON`() {
         val original = Segment(
             sourceFileKey = "video_0",
-            type = "VIDEO",
             order = 0,
             durationMs = 5000,
             volumeScale = 0.8f,
@@ -52,12 +52,12 @@ class RenderSerializationTest {
     fun `Segment rejects non-positive speedScale`() {
         assertFailsWith<IllegalArgumentException> {
             json.decodeFromString<Segment>(
-                """{"sourceFileKey":"v","type":"VIDEO","order":0,"durationMs":1000,"speedScale":0}"""
+                """{"sourceFileKey":"v","order":0,"durationMs":1000,"speedScale":0}"""
             )
         }
         assertFailsWith<IllegalArgumentException> {
             json.decodeFromString<Segment>(
-                """{"sourceFileKey":"v","type":"VIDEO","order":0,"durationMs":1000,"speedScale":-1}"""
+                """{"sourceFileKey":"v","order":0,"durationMs":1000,"speedScale":-1}"""
             )
         }
     }
@@ -66,33 +66,8 @@ class RenderSerializationTest {
     fun `Segment rejects negative volumeScale`() {
         assertFailsWith<IllegalArgumentException> {
             json.decodeFromString<Segment>(
-                """{"sourceFileKey":"v","type":"VIDEO","order":0,"durationMs":1000,"volumeScale":-0.1}"""
+                """{"sourceFileKey":"v","order":0,"durationMs":1000,"volumeScale":-0.1}"""
             )
-        }
-    }
-
-    // ── FrameConfig ───────────────────────────────────────────────────────────
-
-    @Test
-    fun `FrameConfig defaults backgroundColorHex`() {
-        val decoded: FrameConfig = json.decodeFromString("""{"width":1920,"height":1080}""")
-        assertEquals("#000000", decoded.backgroundColorHex)
-    }
-
-    @Test
-    fun `FrameConfig round-trips`() {
-        val original = FrameConfig(width = 1080, height = 1920, backgroundColorHex = "#ff00aa")
-        val restored: FrameConfig = json.decodeFromString(json.encodeToString(original))
-        assertEquals(original, restored)
-    }
-
-    @Test
-    fun `FrameConfig rejects non-positive dimensions`() {
-        assertFailsWith<IllegalArgumentException> {
-            json.decodeFromString<FrameConfig>("""{"width":0,"height":1080}""")
-        }
-        assertFailsWith<IllegalArgumentException> {
-            json.decodeFromString<FrameConfig>("""{"width":1920,"height":-1}""")
         }
     }
 
@@ -114,9 +89,9 @@ class RenderSerializationTest {
     // ── RenderConfig composition ──────────────────────────────────────────────
 
     @Test
-    fun `RenderConfig decodes frame and bgmClips alongside existing fields`() {
-        // 구버전 클라이언트 호환: dubClips/imageClips/audioOverrideKey 같은 제거된 필드는
-        // ignoreUnknownKeys=true 로 묵시 무시.
+    fun `RenderConfig decodes bgmClips alongside existing fields`() {
+        // 구버전 클라이언트 호환: dubClips/imageClips/audioOverrideKey/frame/segment.type 같은
+        // 제거된 필드는 ignoreUnknownKeys=true 로 묵시 무시.
         val raw = """
             {
               "dubClips":[{"audioFileKey":"audio_0","startMs":0,"durationMs":3000,"volume":1.0}],
@@ -130,18 +105,15 @@ class RenderSerializationTest {
         val cfg: RenderConfig = json.decodeFromString(raw)
 
         assertEquals(1.5f, cfg.segments!!.first().speedScale)
-        assertEquals(1080, cfg.frame!!.width)
-        assertEquals("#123456", cfg.frame!!.backgroundColorHex)
         assertEquals(1, cfg.bgmClips.size)
         assertEquals("bgm_0", cfg.bgmClips.first().audioFileKey)
     }
 
     @Test
-    fun `RenderConfig defaults frame and bgmClips for backwards compat`() {
+    fun `RenderConfig defaults bgmClips empty for backwards compat`() {
         val raw = """{}"""
         val cfg: RenderConfig = json.decodeFromString(raw)
 
-        assertNull(cfg.frame)
         assertTrue(cfg.bgmClips.isEmpty())
     }
 
