@@ -22,6 +22,8 @@ import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.StemMixService
 import com.vibi.bff.service.UserRepository
+import com.vibi.bff.service.iap.AppleReceiptVerifier
+import com.vibi.bff.service.iap.GoogleReceiptVerifier
 import com.vibi.bff.plugins.NotFoundException
 import io.ktor.client.HttpClient
 import io.ktor.http.*
@@ -49,6 +51,8 @@ fun Application.configureRouting(
     adminRepository: AdminRepository,
     userRepository: UserRepository,
     creditRepository: CreditRepository,
+    appleReceiptVerifier: AppleReceiptVerifier?,
+    googleReceiptVerifier: GoogleReceiptVerifier?,
 ) {
     val log = org.slf4j.LoggerFactory.getLogger("BootCheck")
     routing {
@@ -78,7 +82,12 @@ fun Application.configureRouting(
 
         route("/api/v2") {
             authRoutes(authService, userRepository, jwtSecret = appConfig.auth.jwtSecret)
-            creditRoutes(creditRepository, jwtSecret = appConfig.auth.jwtSecret)
+            creditRoutes(
+                creditRepository,
+                appleVerifier = appleReceiptVerifier,
+                googleVerifier = googleReceiptVerifier,
+                jwtSecret = appConfig.auth.jwtSecret,
+            )
             languageRoutes(persoClient)
             renderRoutes(
                 renderService, fileStorage,

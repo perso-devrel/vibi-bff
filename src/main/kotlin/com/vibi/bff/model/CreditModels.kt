@@ -33,12 +33,15 @@ data class CreditBalanceResponse(
  *
  * - [productId] — App Store Connect / Play Console 에 등록된 SKU. [CreditCatalog] 와 cross-check.
  * - [platform] — "apple" | "google". 각자 다른 검증 endpoint 호출.
- * - [receipt] — StoreKit2 `Transaction.jsonRepresentation` (base64) 또는
- *   Play Billing `Purchase.purchaseToken`. BFF 가 그대로 Apple / Google 서버 검증 API 에 전달.
+ * - [receipt] — Apple 일 때는 transactions endpoint 가 transactionId 만 받으므로 검증에 직접 사용
+ *   하지 않지만 (`Transaction.jsonRepresentation` base64 를 그대로 보내도 무관) BFF 는 미사용.
+ *   Google 일 때는 Play Billing `Purchase.purchaseToken`. BFF 가 Google API 호출에 그대로 사용.
+ * - [transactionId] — Apple `Transaction.id` / Google `Purchase.orderId`. idempotency UNIQUE
+ *   key + 검증 양쪽에 사용.
  *
- * v1 은 **검증 stub** — receipt 가 비어있지 않으면 통과로 간주하고 잔액 가산. 실서비스 출시 전
- * Apple App Store Server API (`/inApps/v1/transactions/{transactionId}`) 와 Google Play
- * Developer API (`purchases.products.get`) 호출로 교체 필요. TODO 주석으로 표시.
+ * 검증 흐름: 라우트가 [com.vibi.bff.service.iap.AppleReceiptVerifier] /
+ * [com.vibi.bff.service.iap.GoogleReceiptVerifier] 로 Apple/Google 서버 직접 호출 후 통과해야
+ * 잔액 가산. 실패 시 외부 메시지는 `receipt_invalid` 로 단일화.
  */
 @Serializable
 data class CreditPurchaseRequest(
@@ -47,6 +50,15 @@ data class CreditPurchaseRequest(
     val receipt: String,
     /** App Store/Play Store 의 unique transaction ID — idempotency key. */
     val transactionId: String,
+)
+
+/**
+ * 관리자 무료 충전 요청. body 는 [productId] 만 — txId 는 서버가 생성 (admin-<UUID>) 해
+ * 매 호출마다 새 idempotency key 로 가산된다. 운영자 테스트·시연용.
+ */
+@Serializable
+data class AdminGrantRequest(
+    val productId: String,
 )
 
 /**

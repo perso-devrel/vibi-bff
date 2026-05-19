@@ -11,7 +11,85 @@ data class AppConfig(
     val auth: AuthConfig,
     val db: DbConfig,
     val admin: AdminConfig,
+    val iap: IapConfig,
 )
+
+/**
+ * IAP receipt 검증 설정. Apple / Google 각각 nullable — 미설정 (모든 자격증명 blank) 이면
+ * 해당 platform 의 `POST /credits/purchase` 요청은 [com.vibi.bff.routes.creditRoutes] 에서
+ * `iap_unconfigured` 400 으로 명시 거부된다. dev 빌드도 stub 통과시키지 않는다 — 출시 코드와
+ * 동일 경로를 타게 해 "stub 으로 통과 → 잔액 가산" 보안 구멍 차단.
+ *
+ * - [apple] — App Store Server API 자격증명. 셋 중 하나라도 blank 면 통째 null.
+ * - [google] — Android Publisher API service account JSON. blank 면 null.
+ */
+data class IapConfig(
+    val apple: AppleIapConfig?,
+    val google: GoogleIapConfig?,
+)
+
+/**
+ * Apple App Store Server API (`/inApps/v1/transactions/{transactionId}`) 호출용. ES256 JWT
+ * 로 인증 ([com.vibi.bff.service.iap.AppleReceiptVerifier]). 본 config 가 null 이면 Apple
+ * 영수증 검증 자체가 비활성 — 라우트가 명시적으로 400 거부.
+ *
+ * - [issuerId] — App Store Connect → Users and Access → Keys 페이지 상단 Issuer ID (UUID).
+ * - [keyId] — 발급한 In-App Purchase 키의 Key ID (10자 alphanumeric).
+ * - [privateKeyPem] — `.p8` 파일 본문. env var 로 주입할 때 줄바꿈은 `\n` literal 로 박은 뒤
+ *   본 클래스가 실제 newline 으로 복원. PEM header/footer 포함.
+ * - [bundleId] — iOS 앱 bundle id (e.g. `com.vibi.ios`). 검증 시 응답 payload 의 bundleId 가
+ *   이 값과 일치해야 통과.
+ * - [environment] — `production` (앱스토어 정식) 또는 `sandbox` (TestFlight / sandbox tester).
+ *   환경별로 host 가 갈리므로 명시 필요. 기본 `production`.
+ */
+data class AppleIapConfig(
+    val issuerId: String,
+    val keyId: String,
+    val privateKeyPem: String,
+    val bundleId: String,
+    val environment: String,
+) {
+    init {
+        require(issuerId.isNotBlank()) { "IAP_APPLE_ISSUER_ID must not be blank" }
+        require(keyId.isNotBlank()) { "IAP_APPLE_KEY_ID must not be blank" }
+        require(privateKeyPem.contains("BEGIN PRIVATE KEY")) {
+            "IAP_APPLE_PRIVATE_KEY must contain PEM '-----BEGIN PRIVATE KEY-----' header"
+        }
+        require(bundleId.isNotBlank()) { "IAP_APPLE_BUNDLE_ID must not be blank" }
+        require(environment in setOf("production", "sandbox")) {
+            "IAP_APPLE_ENV must be 'production' or 'sandbox' (got '$environment')"
+        }
+    }
+
+    /** Apple 의 host 결정. App Store Server API 는 prod/sandbox 가 다른 호스트. */
+    val apiHost: String get() = when (environment) {
+        "sandbox" -> "https://api.storekit-sandbox.itunes.apple.com"
+        else -> "https://api.storekit.itunes.apple.com"
+    }
+}
+
+/**
+ * Google Android Publisher API 의 `purchases.products.get` 호출용. Service account JSON 으로
+ * OAuth2 access token 발급 → `androidpublisher` scope 로 호출
+ * ([com.vibi.bff.service.iap.GoogleReceiptVerifier]).
+ *
+ * - [packageName] — 안드로이드 앱 패키지명 (e.g. `com.vibi.android`).
+ * - [serviceAccountJson] — Google Cloud Console 에서 다운로드한 service account JSON **본문**.
+ *   Play Console 의 "재무 데이터 보기 + 주문 및 구독 관리" 권한 부여 필요. env var 로 본문을
+ *   직접 주입하거나 파일 경로 운영도 고려 가능 — 본 v1 은 본문만 받음.
+ */
+data class GoogleIapConfig(
+    val packageName: String,
+    val serviceAccountJson: String,
+) {
+    init {
+        require(packageName.isNotBlank()) { "IAP_GOOGLE_PACKAGE_NAME must not be blank" }
+        require(serviceAccountJson.contains("\"client_email\"")) {
+            "IAP_GOOGLE_SERVICE_ACCOUNT_JSON must look like a service account JSON " +
+                "(missing 'client_email' field)"
+        }
+    }
+}
 
 /**
  * 운영자 admin SPA 마운트 경로 + 빌드 산출물 경로.
@@ -227,6 +305,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val auth = vibi.config("auth")
     val db = vibi.config("db")
     val admin = vibi.config("admin")
+    val iap = vibi.config("iap")
 
     return AppConfig(
         storage = run {
@@ -291,5 +370,38 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
         admin = AdminConfig(
             slug = admin.propertyOrNull("slug")?.getString().orEmpty().trim(),
         ),
+        iap = run {
+            val appleConfig = iap.config("apple")
+            val googleConfig = iap.config("google")
+            // Apple 자격증명. 셋 중 하나라도 blank 면 전체 비활성. env var 의 `\n` literal 을
+            // 실제 newline 으로 복원 — `.p8` PEM 줄바꿈을 한 줄 env 로 주입할 수 있게.
+            val appleIssuer = appleConfig.propertyOrNull("issuerId")?.getString()?.trim().orEmpty()
+            val appleKeyId = appleConfig.propertyOrNull("keyId")?.getString()?.trim().orEmpty()
+            val applePem = appleConfig.propertyOrNull("privateKeyPem")?.getString().orEmpty()
+                .replace("\\n", "\n")
+            val appleBundleId = appleConfig.propertyOrNull("bundleId")?.getString()?.trim().orEmpty()
+            val appleEnv = appleConfig.propertyOrNull("environment")?.getString()?.trim()?.lowercase()
+                ?.takeIf { it.isNotBlank() } ?: "production"
+            val apple = if (
+                appleIssuer.isNotBlank() && appleKeyId.isNotBlank() &&
+                applePem.isNotBlank() && appleBundleId.isNotBlank()
+            ) {
+                AppleIapConfig(
+                    issuerId = appleIssuer,
+                    keyId = appleKeyId,
+                    privateKeyPem = applePem,
+                    bundleId = appleBundleId,
+                    environment = appleEnv,
+                )
+            } else null
+
+            val googlePackage = googleConfig.propertyOrNull("packageName")?.getString()?.trim().orEmpty()
+            val googleSa = googleConfig.propertyOrNull("serviceAccountJson")?.getString().orEmpty()
+            val google = if (googlePackage.isNotBlank() && googleSa.isNotBlank()) {
+                GoogleIapConfig(packageName = googlePackage, serviceAccountJson = googleSa)
+            } else null
+
+            IapConfig(apple = apple, google = google)
+        },
     )
 }

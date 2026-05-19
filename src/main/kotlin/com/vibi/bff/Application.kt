@@ -20,6 +20,8 @@ import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.StemMixService
 import com.vibi.bff.service.UserRepository
+import com.vibi.bff.service.iap.AppleReceiptVerifier
+import com.vibi.bff.service.iap.GoogleReceiptVerifier
 import java.io.File
 import java.util.concurrent.TimeUnit
 import kotlinx.coroutines.CoroutineScope
@@ -195,6 +197,12 @@ fun Application.module() {
     val authService = AuthService(appConfig.auth, httpClient, userRepository)
     val geminiClient = GeminiClient(appConfig.gemini, httpClient, externalApiCallsRepository)
 
+    // IAP receipt verifiers — config 가 null (미설정) 이면 verifier 도 null. 라우트가 null
+    // 분기로 `iap_unconfigured` 400 응답하므로 stub 통과 없음. 출시 외 환경 (dev/test) 에서도
+    // 영수증 검증을 진짜로 통과시키려면 sandbox env + sandbox tester 영수증 필요.
+    val appleReceiptVerifier = appConfig.iap.apple?.let { AppleReceiptVerifier(it, httpClient) }
+    val googleReceiptVerifier = appConfig.iap.google?.let { GoogleReceiptVerifier(it, httpClient) }
+
     // Phase 1: separation 의 source 결정자.
     // multipart `file` 또는 spec.editedRenderJobId 둘 중 하나로 source 해석.
     // editedRenderJobId 경유 시 RenderService 가 owner — resolver 가 별도 디렉터리에
@@ -229,6 +237,7 @@ fun Application.module() {
         mediaSourceResolver, authService, objectStore,
         adminRepository,
         userRepository, creditRepository,
+        appleReceiptVerifier, googleReceiptVerifier,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(
