@@ -274,31 +274,32 @@ class SeparationService(
         job.progressReason = "Fetching background"
         val backgroundFile = downloadBackgroundStem(projectSeq, job.outputDir, readyInfo)
 
+        // Perso 가 내려주는 stem 은 PCM wav (비압축) — egress 비용의 큰 부분. FLAC 으로 transcode
+        // 해 lossless 유지하면서 ~50% 절감. 모바일 (Android MediaPlayer / iOS AVAudioFile) 모두
+        // native 디코드 지원. content-type 은 SeparationRoutes 가 stem.file.extension 으로 자동 매핑.
         val local = mutableListOf<LocalStem>()
         speakerFiles.forEachIndexed { idx, file ->
             val stemId = "speaker_$idx"
-            val finalFile = File(job.outputDir, "$stemId.${file.extension.ifEmpty { "audio" }}")
-            // renameTo 는 cross-FS / target-exists / Windows file lock 등에서 silently
-            // false 반환 — fallback 으로 copy + delete. 둘 다 실패하면 stem 자체가 없는
-            // 셈이라 skip 하지 않고 explicit throw (downstream amix 에서 NPE 보다 명확).
-            if (!file.renameTo(finalFile)) {
-                file.copyTo(finalFile, overwrite = true)
-                file.delete()
-            }
+            val finalFile = File(job.outputDir, "$stemId.flac")
+            transcodeToFlac(file, finalFile)
+            file.delete()
             local.add(LocalStem(stemId, "화자 ${idx + 1}", finalFile))
             log.info("Speaker stem ready: stemId={} file={} size={}B", stemId, finalFile.name, finalFile.length())
         }
 
         // voice_all = 모든 화자 mix. 화자가 1명이면 speaker_0 와 동일하므로 skip.
         if (local.size >= 2) {
-            val voiceAllFile = File(job.outputDir, "voice_all.mp3")
+            val voiceAllFile = File(job.outputDir, "voice_all.flac")
             ffmpegMixFiles(local.map { it.file }, voiceAllFile)
             local.add(0, LocalStem("voice_all", "모든 화자", voiceAllFile))
         }
 
-        backgroundFile?.let {
-            local.add(LocalStem("background", "배경음", it))
-            log.info("Background stem ready: file={} size={}B", it.name, it.length())
+        backgroundFile?.let { wav ->
+            val flacBg = File(job.outputDir, "background.flac")
+            transcodeToFlac(wav, flacBg)
+            wav.delete()
+            local.add(LocalStem("background", "배경음", flacBg))
+            log.info("Background stem ready: file={} size={}B", flacBg.name, flacBg.length())
         }
 
         job.stems = local
@@ -485,9 +486,30 @@ class SeparationService(
             "-filter_complex",
             "${labels}amix=inputs=${inputs.size}:duration=longest:dropout_transition=0:normalize=0[out]"
         )
-        cmd += listOf("-map", "[out]", "-q:a", "4", output.absolutePath)
+        // FLAC lossless — voice_all 은 downstream StemMixService 가 다시 amix 의 입력으로 쓰므로
+        // mp3 같은 lossy 단계가 끼면 음질 손실 누적. compression_level 5 는 ffmpeg default,
+        // encode 시간/크기 균형.
+        cmd += listOf("-map", "[out]", "-c:a", "flac", "-compression_level", "5", output.absolutePath)
         val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
         drainAndAwait(process, "ffmpeg mix files (${inputs.size})")
+    }
+
+    /**
+     * Single-stream FLAC transcode. Perso wav stem 을 FLAC 으로 무손실 압축해 egress 절반.
+     * compression_level 5 (ffmpeg default) — 더 높은 level 은 encode 시간만 늘고 size 차이 미미.
+     */
+    private suspend fun transcodeToFlac(input: File, output: File) {
+        require(input.absolutePath != output.absolutePath) { "transcodeToFlac: input == output" }
+        val cmd = listOf(
+            "ffmpeg", "-y",
+            "-i", input.absolutePath,
+            "-c:a", "flac",
+            "-compression_level", "5",
+            output.absolutePath,
+        )
+        val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
+        drainAndAwait(process, "ffmpeg flac transcode ${input.name}")
+        if (!output.exists()) throw RuntimeException("ffmpeg flac transcode produced no output: ${input.name}")
     }
 
     /**
