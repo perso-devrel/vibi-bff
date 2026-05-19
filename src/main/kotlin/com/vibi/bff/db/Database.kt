@@ -30,6 +30,14 @@ object DbBootstrap {
             driverClassName = if (isH2) "org.h2.Driver" else "org.postgresql.Driver"
             // 트랜잭션 격리 — Postgres default (READ_COMMITTED) 와 일치. 명시해 H2 와도 동등.
             transactionIsolation = "TRANSACTION_READ_COMMITTED"
+            // Neon free tier 는 idle 시 compute 가 suspended 상태로 들어가서 첫 connect 가
+            // cold start 동안 boot. Hikari 의 connectionTimeout 이 Postgres 드라이버의 socket
+            // login timeout 으로 propagate 되므로 default 30s 면 cold start 마진이 빠듯하다.
+            // 60s + initializationFailTimeout 120s 로 첫 부팅 시 한 번의 cold start 를 견디게 함.
+            if (!isH2) {
+                connectionTimeout = 60_000
+                initializationFailTimeout = 120_000
+            }
         }
         val ds = HikariDataSource(hikari)
 

@@ -8,6 +8,17 @@ import UserDetailPage from "./pages/UserDetailPage";
 export default function App() {
   const location = useLocation();
   const isLogin = location.pathname === "/login";
+
+  // 로그인 화면은 admin 헤더/컨테이너 밖에서 full-screen 으로 자체 레이아웃을 가짐.
+  if (isLogin) {
+    return (
+      <Routes>
+        <Route path="/login" element={<LoginPage />} />
+        <Route path="*" element={<Navigate to="/login" replace />} />
+      </Routes>
+    );
+  }
+
   const authed = !!loadAuth();
 
   return (
@@ -18,14 +29,14 @@ export default function App() {
             <Link to="/" className="text-lg font-semibold tracking-tight">
               vibi · admin
             </Link>
-            {authed && !isLogin && (
+            {authed && (
               <nav className="flex items-center gap-4 text-sm text-neutral-600">
                 <Link to="/" className="hover:text-neutral-900">Overview</Link>
                 <Link to="/users" className="hover:text-neutral-900">Users</Link>
               </nav>
             )}
           </div>
-          {authed && !isLogin && (
+          {authed && (
             <button
               type="button"
               onClick={() => {
@@ -42,7 +53,6 @@ export default function App() {
       </header>
       <main className="mx-auto max-w-6xl px-6 py-8">
         <Routes>
-          <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<RequireAuth><DashboardPage /></RequireAuth>} />
           <Route path="/users" element={<RequireAuth><UsersPage /></RequireAuth>} />
           <Route path="/users/:id" element={<RequireAuth><UserDetailPage /></RequireAuth>} />
