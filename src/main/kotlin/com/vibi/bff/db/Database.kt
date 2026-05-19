@@ -37,6 +37,13 @@ object DbBootstrap {
             if (!isH2) {
                 connectionTimeout = 60_000
                 initializationFailTimeout = 120_000
+                // Neon 은 idle connection 을 server-side 에서 ~5 min 후 끊는다. Hikari 기본
+                // maxLifetime(30 min) 은 그보다 길어 stale 커넥션이 풀에 잔존, validate 단계에서
+                // "connection has been closed" 경고 다발 발생. maxLifetime 을 Neon idle limit 보다
+                // 짧게 잡아 Hikari 가 먼저 회전시키도록 한다.
+                maxLifetime = 240_000
+                idleTimeout = 180_000
+                keepaliveTime = 60_000
             }
         }
         val ds = HikariDataSource(hikari)

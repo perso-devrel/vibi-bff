@@ -19,6 +19,7 @@ import io.ktor.client.request.get
 import io.ktor.client.statement.bodyAsText
 import io.ktor.http.HttpStatusCode
 import io.ktor.http.isSuccess
+import java.net.URI
 import java.net.URLEncoder
 import java.security.interfaces.RSAPublicKey
 import java.util.Date
@@ -51,7 +52,10 @@ class AuthService(
     private val algorithm = Algorithm.HMAC256(config.jwtSecret)
 
     private val appleJwkProvider by lazy {
-        JwkProviderBuilder("https://appleid.apple.com/")
+        // Apple 의 `/.well-known/jwks.json` 은 `http://www.apple.com/filenotfound` 로 302 (HTTPS→HTTP
+        // downgrade 라 JDK 가 추적 안 함). 실제 JWKS 는 `/auth/keys`. domain-string 생성자가 .well-known
+        // 경로를 자동 부착하므로 URL 명시 오버로드 사용.
+        JwkProviderBuilder(URI("https://appleid.apple.com/auth/keys").toURL())
             .cached(10, 24, TimeUnit.HOURS)
             .rateLimited(10, 1, TimeUnit.MINUTES)
             .build()
