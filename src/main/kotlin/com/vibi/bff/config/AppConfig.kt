@@ -40,19 +40,29 @@ data class AdminConfig(
 data class StorageConfig(
     val basePath: String,
     /**
-     * GCS bucket — 설정 시 download 엔드포인트가 산출물을 업로드 후 V4 signed URL 로
-     * 302 redirect. blank 면 기존 respondFile streaming 으로 fallback (로컬 dev / GCS 미사용 환경).
+     * Cloudflare R2 bucket — 설정 시 download 엔드포인트가 산출물을 R2 에 업로드 후
+     * SigV4 presigned URL 로 302 redirect. blank 면 respondFile streaming 으로 fallback
+     * (로컬 dev / R2 미사용 환경). R2 egress 무료라 Cloud Run egress 비용 0.
      */
-    val gcsBucket: String,
+    val r2Bucket: String,
+    /** Cloudflare 계정 ID (dashboard URL 의 32자 hex). endpoint host 결정. */
+    val r2AccountId: String,
+    /** R2 API token access key (Object Read & Write 권한). */
+    val r2AccessKeyId: String,
+    /** R2 API token secret. */
+    val r2SecretAccessKey: String,
     /**
-     * V4 signed URL TTL. 60..86400 범위. 모바일이 status 응답 받자마자 다운로드한다는 가정.
+     * Presigned URL TTL. 60..86400 범위. 모바일이 status 응답 받자마자 다운로드한다는 가정.
      */
-    val gcsSignedUrlTtlSec: Long,
+    val signedUrlTtlSec: Long,
 ) {
     init {
-        if (gcsBucket.isNotBlank()) {
-            require(gcsSignedUrlTtlSec in 60..86_400) {
-                "GCS_SIGNED_URL_TTL_SEC must be in 60..86400 (got $gcsSignedUrlTtlSec)"
+        if (r2Bucket.isNotBlank()) {
+            require(r2AccountId.isNotBlank()) { "R2_ACCOUNT_ID required when R2_BUCKET set" }
+            require(r2AccessKeyId.isNotBlank()) { "R2_ACCESS_KEY_ID required when R2_BUCKET set" }
+            require(r2SecretAccessKey.isNotBlank()) { "R2_SECRET_ACCESS_KEY required when R2_BUCKET set" }
+            require(signedUrlTtlSec in 60..86_400) {
+                "SIGNED_URL_TTL_SEC must be in 60..86400 (got $signedUrlTtlSec)"
             }
         }
     }
@@ -208,8 +218,11 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     return AppConfig(
         storage = StorageConfig(
             basePath = storage.property("basePath").getString(),
-            gcsBucket = storage.propertyOrNull("gcsBucket")?.getString()?.trim().orEmpty(),
-            gcsSignedUrlTtlSec = storage.propertyOrNull("gcsSignedUrlTtlSec")?.getString()?.toLong() ?: 900L,
+            r2Bucket = storage.propertyOrNull("r2Bucket")?.getString()?.trim().orEmpty(),
+            r2AccountId = storage.propertyOrNull("r2AccountId")?.getString()?.trim().orEmpty(),
+            r2AccessKeyId = storage.propertyOrNull("r2AccessKeyId")?.getString()?.trim().orEmpty(),
+            r2SecretAccessKey = storage.propertyOrNull("r2SecretAccessKey")?.getString()?.trim().orEmpty(),
+            signedUrlTtlSec = storage.propertyOrNull("signedUrlTtlSec")?.getString()?.toLong() ?: 900L,
         ),
         baseUrl = vibi.property("baseUrl").getString(),
         perso = PersoConfig(

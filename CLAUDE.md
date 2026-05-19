@@ -2,10 +2,10 @@
 
 ## Project Overview
 
-vibi BFF — Kotlin/Ktor backend. **Perso AI** 프록시 (오디오 분리) + **Vertex AI Gemini** 프록시 (자연어 채팅 function calling) + 로컬 ffmpeg 렌더 파이프라인 (multi-segment concat, BGM atrim+amix, audio override) + **Google / Apple Sign In** ID Token 검증 + **Postgres** user upsert + HS256 JWT 발급 + 옵션 **GCS** V4 signed URL redirect.
+vibi BFF — Kotlin/Ktor backend. **Perso AI** 프록시 (오디오 분리) + **Vertex AI Gemini** 프록시 (자연어 채팅 function calling) + 로컬 ffmpeg 렌더 파이프라인 (multi-segment concat, BGM atrim+amix, audio override) + **Google / Apple Sign In** ID Token 검증 + **Postgres** user upsert + HS256 JWT 발급 + 옵션 **Cloudflare R2** SigV4 presigned URL redirect.
 
 - **Stack**: Kotlin 2.0, Ktor 3.0.3, Netty, kotlinx.serialization, JDK 21, Exposed + HikariCP, Postgres
-- **Runtime deps**: `ffmpeg`, `ffprobe` on `PATH`; Postgres (Neon free tier 호환); GCS bucket (옵션)
+- **Runtime deps**: `ffmpeg`, `ffprobe` on `PATH`; Postgres (Neon free tier 호환); Cloudflare R2 bucket (옵션)
 - 자체 git repo, 자체 gradle 빌드 (워크스페이스 루트의 KMP 멀티프로젝트와는 별개)
 - 외부 사용자/온보딩용 풀 문서 + API 레퍼런스: [`README.md`](./README.md)
 
@@ -33,7 +33,7 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 - `plugins/` — CORS, Serialization (`AppJson = Json { ignoreUnknownKeys=true, encodeDefaults=true }`), `ErrorHandling` (StatusPages), `Routing`.
 - `routes/` — `/api/v2` (`AuthRoutes` · `LanguageRoutes` · `RenderRoutes` (+ `/inputs`) · `SeparationRoutes` · `ChatRoutes` · `DownloadResponder`·`MultipartUtils` 헬퍼). dev mock 으로 `/testdata/separation/*`.
 - `model/` — `AuthModels` · `BffModels` · `ChatModels` · `PersoModels`. BFF DTO 와 Perso upstream DTO 분리, `@SerialName` 으로 snake_case ↔ camelCase 매핑.
-- `service/` — `PersoClient`, `PersoPolling`, `GeminiClient`, `ChatToolDefs`, `FileStorageService`, `MediaSourceResolver`, `MediaTrimmer`, `RenderService`, `RenderInputCacheService`, `SeparationService`, `StemMixService`, `SignedUrlService`, `AuthService`, `UserRepository`, `GcsObjectStore`, `FfmpegRunner`.
+- `service/` — `PersoClient`, `PersoPolling`, `GeminiClient`, `ChatToolDefs`, `FileStorageService`, `MediaSourceResolver`, `MediaTrimmer`, `RenderService`, `RenderInputCacheService`, `SeparationService`, `StemMixService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
 
 > 과거 `AutoSubtitleService` / `AutoDubService` / `LipSyncService` + 관련 route·DTO 는 **commit `52f8d7c refactor(bff): sticker/자막/더빙 surface 절단`** 으로 일괄 제거. 모바일에 잔존하는 caller (BffApi 메서드들 + Auto*RepositoryImpl) 는 호출 시 404 — 재도입 작업 시 본 commit 의 디프를 base 로 복원하지 말고 새로 설계할 것.
 
@@ -133,9 +133,9 @@ normalize 단계에서 이미 output 해상도·codec 으로 맞췄으므로 최
 
 `MediaSourceResolver` 가 둘 중 하나로 source 해석. `editedRenderJobId` 경유 시 RenderService 산출물을 별도 디렉터리 (`edited-source/`) 로 owned-copy → downstream delete/rename 으로부터 원본 보호. 모바일은 segment 원본을 그대로 `/separate` 에 직접 보내는 흐름이 default (commit `3d94e95 refactor(separation): /render 선행 호출 제거`).
 
-### Cloud Run egress 분리 — `GCS_BUCKET` 설정 시 V4 signed URL redirect
+### Cloud Run egress 분리 — `R2_BUCKET` 설정 시 SigV4 presigned URL redirect
 
-`/render/{id}/download` 와 `/separate/mix/{id}/download` 가 GCS 에 upload → V4 signed URL 302 redirect. Cloud Run egress 와 인스턴스 점유 분리. blank 면 `respondFile` streaming (로컬 dev). TTL 60..86400.
+`/render/{id}/download` 와 `/separate/mix/{id}/download` 가 R2 에 upload → SigV4 presigned URL 302 redirect. R2 egress 무료 → Cloud Run egress 비용 0. 인스턴스 점유 분리. blank 면 `respondFile` streaming (로컬 dev). TTL 60..86400.
 
 ## Error handling
 
@@ -147,8 +147,8 @@ normalize 단계에서 이미 output 해상도·codec 으로 맞췄으므로 최
 
 Render outputs · separation stems · stem-mix outputs **never static-mounted**. Two backends:
 
-1. **로컬 streaming** (default, `GCS_BUCKET` 비어있을 때) — `respondFile` 로 Ktor 가 직접 서브. 작은 산출물 / 로컬 dev 용.
-2. **GCS V4 signed URL redirect** (`GCS_BUCKET` 설정 시) — 산출물을 bucket 에 업로드 후 V4 signed URL (TTL `GCS_SIGNED_URL_TTL_SEC`) 로 302. Cloud Run 인스턴스가 큰 응답 동안 점유되지 않음.
+1. **로컬 streaming** (default, `R2_BUCKET` 비어있을 때) — `respondFile` 로 Ktor 가 직접 서브. 작은 산출물 / 로컬 dev 용.
+2. **R2 SigV4 presigned URL redirect** (`R2_BUCKET` 설정 시) — 산출물을 Cloudflare R2 bucket 에 업로드 후 presigned URL (TTL `SIGNED_URL_TTL_SEC`) 로 302. R2 egress 무료 → Cloud Run egress 비용 0. 인스턴스도 큰 응답 동안 점유되지 않음.
 
 두 backend 모두 HMAC-signed `?token=...` 요구 (separation/mix). Render download 는 `jobId` 자체가 random — 단 짧은 TTL 후 GC.
 

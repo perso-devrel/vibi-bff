@@ -7,7 +7,7 @@ import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.plugins.requireUser
 import com.vibi.bff.service.FileStorageService
-import com.vibi.bff.service.GcsObjectStore
+import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.MediaTrimmer
 import com.vibi.bff.service.SeparationService
@@ -28,7 +28,7 @@ fun Route.separationRoutes(
     fileStorage: FileStorageService,
     appConfig: AppConfig,
     mediaSourceResolver: MediaSourceResolver,
-    gcsObjectStore: GcsObjectStore?,
+    objectStore: ObjectStore?,
     /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
     jwtSecret: String? = null,
 ) {
@@ -145,7 +145,7 @@ fun Route.separationRoutes(
                 objectKey = "separation/$jobId/${stem.stemId}.$ext",
                 contentType = contentTypeForExtension(ext, ContentType("audio", "wav")),
                 downloadFilename = "${stem.stemId}.$ext",
-                gcs = gcsObjectStore,
+                store = objectStore,
             )
         }
 
@@ -228,7 +228,7 @@ fun Route.separationRoutes(
                 objectKey = "separation/mix/$mixJobId.mp3",
                 contentType = ContentType("audio", "mpeg"),
                 downloadFilename = "$mixJobId.mp3",
-                gcs = gcsObjectStore,
+                store = objectStore,
             )
         }
     }

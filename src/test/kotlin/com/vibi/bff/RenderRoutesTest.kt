@@ -67,7 +67,7 @@ class RenderRoutesTest {
                 renderRoutes(
                     renderService, fileStorage,
                     separationService, signer, inputCache,
-                    gcsObjectStore = null,
+                    objectStore = null,
                 )
             }
         }

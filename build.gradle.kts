@@ -72,11 +72,13 @@ dependencies {
     // Apache Commons Compress — Perso audio-separation 의 OriginalVoiceSpeakers .tar archive 풀이용.
     implementation("org.apache.commons:commons-compress:1.26.2")
 
-    // Google Cloud Storage — Cloud Run egress 분리. 큰 산출물 (render mp4, dub mp3/mp4, stem)
-    // 을 GCS 에 업로드 후 V4 signed URL 로 클라이언트가 직접 다운로드. Cloud Run 인스턴스가
-    // 바이트 전송으로 잠기지 않아 max-instances=2 cap 에서 동시 다운로드 처리량 회복.
-    // 미설정 (GCS_BUCKET blank) 일 때는 로컬 디스크 fallback 으로 동작.
-    implementation("com.google.cloud:google-cloud-storage:2.43.0")
+    // Cloudflare R2 (S3-compatible) — Cloud Run egress 분리. 큰 산출물 (render mp4,
+    // separation stem, mix) 을 R2 에 업로드 후 SigV4 presigned URL 로 클라이언트가 직접
+    // 다운로드. **R2 egress 무료** 라 BFF 가 부담하는 egress 비용이 0 으로 떨어짐 (GCS 는
+    // 1GB/월 free 후 $0.12/GB). url-connection-client 는 SDK 의 가장 가벼운 sync HTTP 백엔드 —
+    // Apache HttpClient 의존성 제거. 미설정 (R2_BUCKET blank) 시 로컬 디스크 fallback.
+    implementation("software.amazon.awssdk:s3:2.29.40")
+    implementation("software.amazon.awssdk:url-connection-client:2.29.40")
 
     // Sentry — 운영 모니터링. SENTRY_DSN_BFF env 가 비면 init no-op (dev/test 무영향).
     // logback appender 까지는 도입 안 함 (5xx 캐치에서 explicit captureException 만 사용).

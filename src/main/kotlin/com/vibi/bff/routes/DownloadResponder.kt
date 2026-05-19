@@ -1,6 +1,6 @@
 package com.vibi.bff.routes
 
-import com.vibi.bff.service.GcsObjectStore
+import com.vibi.bff.service.ObjectStore
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.response.*
@@ -11,9 +11,9 @@ import java.io.File
 /**
  * 큰 산출물 다운로드 응답 단일 진입점.
  *
- * - [gcs] != null  → 파일을 GCS 에 (idempotent) 업로드 후 V4 signed URL 로 302 redirect.
- *   Cloud Run 인스턴스가 바이트 전송으로 잠기지 않아 동시 다운로드 처리량 회복.
- * - [gcs] == null  → 기존 respondFile streaming fallback (로컬 dev / GCS 미사용).
+ * - [store] != null  → 파일을 R2 에 (idempotent) 업로드 후 SigV4 presigned URL 로 302 redirect.
+ *   Cloud Run 인스턴스가 바이트 전송으로 잠기지 않아 동시 다운로드 처리량 회복. R2 egress 무료.
+ * - [store] == null  → 기존 respondFile streaming fallback (로컬 dev / R2 미사용).
  *
  * 호출 전 caller 가 token 검증 / status 체크 / file.exists() 확인 끝낸 상태여야 함.
  */
@@ -22,12 +22,12 @@ suspend fun ApplicationCall.respondDownload(
     objectKey: String,
     contentType: ContentType,
     downloadFilename: String?,
-    gcs: GcsObjectStore?,
+    store: ObjectStore?,
 ) {
-    if (gcs != null) {
+    if (store != null) {
         val url = withContext(Dispatchers.IO) {
-            gcs.uploadIfAbsent(file, objectKey, contentType.toString())
-            gcs.signedUrl(
+            store.uploadIfAbsent(file, objectKey, contentType.toString())
+            store.signedUrl(
                 objectKey = objectKey,
                 downloadFilename = downloadFilename,
                 contentType = contentType.toString(),

@@ -12,7 +12,7 @@ import com.vibi.bff.plugins.requireUser
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
 import com.vibi.bff.service.FileStorageService
-import com.vibi.bff.service.GcsObjectStore
+import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.RenderInputCacheService
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
@@ -36,7 +36,7 @@ fun Route.renderRoutes(
     separationService: SeparationService,
     signedUrlService: SignedUrlService,
     inputCacheService: RenderInputCacheService,
-    gcsObjectStore: GcsObjectStore?,
+    objectStore: ObjectStore?,
     /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
     jwtSecret: String? = null,
 ) {
@@ -268,7 +268,7 @@ fun Route.renderRoutes(
                 objectKey = "render/$jobId/$fileName",
                 contentType = contentTypeForExtension(ext, ContentType.Application.OctetStream),
                 downloadFilename = fileName,
-                gcs = gcsObjectStore,
+                store = objectStore,
             )
         }
     }

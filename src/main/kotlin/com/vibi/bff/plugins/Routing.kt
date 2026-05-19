@@ -13,7 +13,7 @@ import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.FileStorageService
-import com.vibi.bff.service.GcsObjectStore
+import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.RenderInputCacheService
@@ -45,7 +45,7 @@ fun Application.configureRouting(
     renderInputCache: RenderInputCacheService,
     mediaSourceResolver: MediaSourceResolver,
     authService: AuthService,
-    gcsObjectStore: GcsObjectStore?,
+    objectStore: ObjectStore?,
     adminRepository: AdminRepository,
     userRepository: UserRepository,
     creditRepository: CreditRepository,
@@ -83,12 +83,12 @@ fun Application.configureRouting(
             renderRoutes(
                 renderService, fileStorage,
                 separationService, signedUrlService, renderInputCache,
-                gcsObjectStore,
+                objectStore,
                 jwtSecret = appConfig.auth.jwtSecret,
             )
             separationRoutes(
                 separationService, stemMixService, signedUrlService, fileStorage,
-                appConfig, mediaSourceResolver, gcsObjectStore,
+                appConfig, mediaSourceResolver, objectStore,
                 jwtSecret = appConfig.auth.jwtSecret,
             )
             chatRoutes(geminiClient)

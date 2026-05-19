@@ -26,8 +26,11 @@ fun testAppConfig(
 ): AppConfig = AppConfig(
     storage = StorageConfig(
         basePath = storagePath,
-        gcsBucket = "",
-        gcsSignedUrlTtlSec = 900,
+        r2Bucket = "",
+        r2AccountId = "",
+        r2AccessKeyId = "",
+        r2SecretAccessKey = "",
+        signedUrlTtlSec = 900,
     ),
     baseUrl = baseUrl,
     perso = PersoConfig(

@@ -11,7 +11,7 @@ Current surface:
 - Gateways **Google Sign In** + **Apple Sign In** ID Token verification → upserts
   the user in **Postgres** → issues an HS256 access token whose `sub` is the
   internal UUID (reusable as IAP `appAccountToken`).
-- Optionally redirects large render / mix downloads to **GCS** V4 signed URLs
+- Optionally redirects large render / mix downloads to **Cloudflare R2** SigV4 presigned URLs (egress free)
   so Cloud Run egress and instance occupancy decouple.
 
 > Surface previously exposed but **removed** in commit `52f8d7c` (sticker
@@ -32,7 +32,7 @@ Current surface:
 - *(Optional)* **Apple Sign In** client ids (iOS bundle id) — blank disables Apple
 - *(Optional)* GCP service-account credentials for **Vertex AI Gemini** if the
   chat assistant is exercised
-- *(Optional)* A **GCS bucket** — large render / mix downloads redirect to V4
+- *(Optional)* A **Cloudflare R2 bucket** — large render / mix downloads redirect to SigV4
   signed URLs instead of streaming through Cloud Run
 
 On Windows, verify:
@@ -71,8 +71,10 @@ Environment variables (also loadable from system env):
 | `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `render/`, `separation/`, `render-input-cache/`, `edited-source/`). |
 | `BFF_BASE_URL`               | `http://localhost:8080`  | Public base URL used in signed download links.       |
 | `CORS_ALLOWED_ORIGINS`       | *(blank = any)*          | Comma-separated allow-list. Set a sentinel such as `android-only.invalid` to lock out browsers. |
-| `GCS_BUCKET`                 | *(blank = disabled)*     | When set, large render / mix downloads upload to this bucket and respond with a `302` to a V4 signed URL. Blank falls back to `respondFile` streaming. |
-| `GCS_SIGNED_URL_TTL_SEC`     | `900`                    | V4 signed URL TTL in seconds (60..86400).            |
+| `R2_BUCKET`                  | *(blank = disabled)*     | When set, large render / separation / mix downloads upload to this Cloudflare R2 bucket and respond with a `302` to a SigV4 presigned URL. **R2 egress free** → zero Cloud Run egress cost. Blank falls back to `respondFile` streaming. |
+| `R2_ACCOUNT_ID`              | —                        | Cloudflare account ID (32-char hex from dashboard URL). Required when `R2_BUCKET` set. |
+| `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | — | R2 API token (Object Read & Write). Cloudflare dashboard → R2 → Manage API Tokens. |
+| `SIGNED_URL_TTL_SEC`         | `900`                    | Presigned URL TTL in seconds (60..86400).            |
 | `RENDER_MAX_CONCURRENT`      | *(auto: CPU/2)*          | ffmpeg fan-out cap. Override when containerized hosts misreport `availableProcessors`. |
 | `RENDER_INPUT_CACHE_TTL_HOURS` | `24`                   | TTL of the shared `/render/inputs` slot.             |
 | `HTTP_CONNECT_TIMEOUT_MS` / `HTTP_REQUEST_TIMEOUT_MS` / `HTTP_SOCKET_TIMEOUT_MS` | `120000` / `600000` / `600000` | Upstream HttpClient timeouts. Bump when debugging slow Perso uploads. |
@@ -132,7 +134,7 @@ Once running:
 - Swagger UI: <http://localhost:8080/swagger>
 - Render outputs / separation stems / mix outputs are **not** static-mounted —
   see API section below. Each download either streams via `respondFile` (default)
-  or 302-redirects to a GCS V4 signed URL (when `GCS_BUCKET` is set).
+  or 302-redirects to a Cloudflare R2 SigV4 presigned URL (when `R2_BUCKET` is set).
 
 ## API Overview
 
@@ -149,13 +151,13 @@ v1 has been retired.
 | POST   | `/api/v2/render/inputs`                      | Multipart `video` upload → `{inputId, expiresAt, videoSizeBytes}`. Reused by N variant renders. `inputId = sha256(video)[:16]`. |
 | POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint)). Optional `inputId` form field replaces the video file part. |
 | GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`. |
-| GET    | `/api/v2/render/{jobId}/download`            | Binary mp4. With `GCS_BUCKET`, `302` to a V4 signed URL.      |
+| GET    | `/api/v2/render/{jobId}/download`            | Binary mp4. With `R2_BUCKET`, `302` to an R2 presigned URL.   |
 | POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Source resolves from multipart `file` *or* `spec.editedRenderJobId`. |
 | GET    | `/api/v2/separate/{jobId}`                   | Status + signed stem URLs when `READY`.                       |
 | GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream (requires `?token=…`).                      |
 | POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems with `amix normalize=0`; disposes source stems on success. |
 | GET    | `/api/v2/separate/mix/{mixJobId}`            | Mix status + signed download URL when `COMPLETED`.            |
-| GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`). With `GCS_BUCKET`, `302` to a V4 signed URL. |
+| GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`). With `R2_BUCKET`, `302` to an R2 presigned URL. |
 | POST   | `/api/v2/chat`                               | Gemini function-calling assistant — returns `{kind:"text"\|"proposal"}` (see [Chat](#chat-endpoint)). |
 | GET    | `/api/v2/testdata/separation/list`           | (dev mock) `testdata/<startSec>-<endSec>/` folder listing.    |
 | GET    | `/api/v2/testdata/separation/{folder}/{stem}` | (dev mock) Stem audio stream (no auth).                      |
@@ -392,7 +394,7 @@ src/main/kotlin/com/vibi/bff/
 │   ├── RenderRoutes.kt         # /render · /render/inputs · /render/{id}/{status,download}
 │   ├── SeparationRoutes.kt     # /separate · /separate/{id} · /stem · /mix · /mix/{id}{,/download}
 │   ├── ChatRoutes.kt           # /chat
-│   ├── DownloadResponder.kt    # respondFile / GCS-redirect dispatcher
+│   ├── DownloadResponder.kt    # respondFile / R2-redirect dispatcher
 │   └── MultipartUtils.kt       # parsing helpers
 └── service/
     ├── PersoClient.kt          # Perso upstream wrapper (SAS upload / separate / poll / download, SSRF allow-list, 5xx backoff)
@@ -409,7 +411,7 @@ src/main/kotlin/com/vibi/bff/
     ├── SeparationService.kt    # Perso-backed stem separation jobs (idempotency, TTL reap)
     ├── StemMixService.kt       # ffmpeg amix=normalize=0 stem remix
     ├── SignedUrlService.kt     # HMAC-SHA256 download URL signer
-    ├── GcsObjectStore.kt       # Optional GCS upload + V4 signed URL redirect
+    ├── ObjectStore.kt          # Optional Cloudflare R2 upload + SigV4 presigned URL redirect
     └── FfmpegRunner.kt         # ffmpeg / ffprobe process spawning + stderr capture
 ```
 
