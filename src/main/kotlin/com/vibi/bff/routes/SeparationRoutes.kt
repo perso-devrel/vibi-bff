@@ -142,7 +142,7 @@ fun Route.separationRoutes(
             val ext = stem.file.extension.ifBlank { "wav" }
             call.respondDownload(
                 file = stem.file,
-                objectKey = "separation/$jobId/${stem.stemId}.$ext",
+                objectKey = ObjectKey.separationStem(jobId, stem.stemId, ext),
                 contentType = contentTypeForExtension(ext, ContentType("audio", "wav")),
                 downloadFilename = "${stem.stemId}.$ext",
                 store = objectStore,
@@ -225,7 +225,7 @@ fun Route.separationRoutes(
             }
             call.respondDownload(
                 file = job.outputFile,
-                objectKey = "separation/mix/$mixJobId.mp3",
+                objectKey = ObjectKey.separationMix(mixJobId),
                 contentType = ContentType("audio", "mpeg"),
                 downloadFilename = "$mixJobId.mp3",
                 store = objectStore,

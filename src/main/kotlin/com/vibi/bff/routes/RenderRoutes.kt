@@ -265,7 +265,7 @@ fun Route.renderRoutes(
             val fileName = "$jobId.$ext"
             call.respondDownload(
                 file = job.outputFile,
-                objectKey = "render/$jobId/$fileName",
+                objectKey = ObjectKey.renderOutput(jobId, fileName),
                 contentType = contentTypeForExtension(ext, ContentType.Application.OctetStream),
                 downloadFilename = fileName,
                 store = objectStore,

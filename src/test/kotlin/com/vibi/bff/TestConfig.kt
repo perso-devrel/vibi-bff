@@ -27,9 +27,7 @@ fun testAppConfig(
     storage = StorageConfig(
         basePath = storagePath,
         r2Bucket = "",
-        r2AccountId = "",
-        r2AccessKeyId = "",
-        r2SecretAccessKey = "",
+        r2 = null,
         signedUrlTtlSec = 900,
     ),
     baseUrl = baseUrl,

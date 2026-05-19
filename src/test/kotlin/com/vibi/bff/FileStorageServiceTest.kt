@@ -12,9 +12,7 @@ class FileStorageServiceTest {
     private val config = StorageConfig(
         basePath = testDir.path,
         r2Bucket = "",
-        r2AccountId = "",
-        r2AccessKeyId = "",
-        r2SecretAccessKey = "",
+        r2 = null,
         signedUrlTtlSec = 900,
     )
     private lateinit var service: FileStorageService

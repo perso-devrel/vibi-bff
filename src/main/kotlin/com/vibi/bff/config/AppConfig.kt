@@ -45,12 +45,8 @@ data class StorageConfig(
      * (로컬 dev / R2 미사용 환경). R2 egress 무료라 Cloud Run egress 비용 0.
      */
     val r2Bucket: String,
-    /** Cloudflare 계정 ID (dashboard URL 의 32자 hex). endpoint host 결정. */
-    val r2AccountId: String,
-    /** R2 API token access key (Object Read & Write 권한). */
-    val r2AccessKeyId: String,
-    /** R2 API token secret. */
-    val r2SecretAccessKey: String,
+    /** R2 credentials. r2Bucket blank 면 null — 백엔드 미사용. */
+    val r2: R2Credentials?,
     /**
      * Presigned URL TTL. 60..86400 범위. 모바일이 status 응답 받자마자 다운로드한다는 가정.
      */
@@ -58,13 +54,30 @@ data class StorageConfig(
 ) {
     init {
         if (r2Bucket.isNotBlank()) {
-            require(r2AccountId.isNotBlank()) { "R2_ACCOUNT_ID required when R2_BUCKET set" }
-            require(r2AccessKeyId.isNotBlank()) { "R2_ACCESS_KEY_ID required when R2_BUCKET set" }
-            require(r2SecretAccessKey.isNotBlank()) { "R2_SECRET_ACCESS_KEY required when R2_BUCKET set" }
+            requireNotNull(r2) { "R2 credentials required when R2_BUCKET set" }
             require(signedUrlTtlSec in 60..86_400) {
                 "SIGNED_URL_TTL_SEC must be in 60..86400 (got $signedUrlTtlSec)"
             }
         }
+    }
+}
+
+/**
+ * R2 backend 가 활성일 때만 의미 있는 자격증명 묶음. StorageConfig 의 R2-specific 필드를
+ * 분리해 backend 비활성 경로 (`r2 == null`) 와 단일 if 으로 분기 가능.
+ */
+data class R2Credentials(
+    /** Cloudflare 계정 ID (dashboard URL 의 32자 hex). endpoint host 결정. */
+    val accountId: String,
+    /** R2 API token access key (Object Read & Write 권한). */
+    val accessKeyId: String,
+    /** R2 API token secret. */
+    val secretAccessKey: String,
+) {
+    init {
+        require(accountId.isNotBlank()) { "R2_ACCOUNT_ID must not be blank" }
+        require(accessKeyId.isNotBlank()) { "R2_ACCESS_KEY_ID must not be blank" }
+        require(secretAccessKey.isNotBlank()) { "R2_SECRET_ACCESS_KEY must not be blank" }
     }
 }
 
@@ -216,14 +229,19 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val admin = vibi.config("admin")
 
     return AppConfig(
-        storage = StorageConfig(
-            basePath = storage.property("basePath").getString(),
-            r2Bucket = storage.propertyOrNull("r2Bucket")?.getString()?.trim().orEmpty(),
-            r2AccountId = storage.propertyOrNull("r2AccountId")?.getString()?.trim().orEmpty(),
-            r2AccessKeyId = storage.propertyOrNull("r2AccessKeyId")?.getString()?.trim().orEmpty(),
-            r2SecretAccessKey = storage.propertyOrNull("r2SecretAccessKey")?.getString()?.trim().orEmpty(),
-            signedUrlTtlSec = storage.propertyOrNull("signedUrlTtlSec")?.getString()?.toLong() ?: 900L,
-        ),
+        storage = run {
+            val r2Bucket = storage.propertyOrNull("r2Bucket")?.getString()?.trim().orEmpty()
+            StorageConfig(
+                basePath = storage.property("basePath").getString(),
+                r2Bucket = r2Bucket,
+                r2 = if (r2Bucket.isNotBlank()) R2Credentials(
+                    accountId = storage.propertyOrNull("r2AccountId")?.getString()?.trim().orEmpty(),
+                    accessKeyId = storage.propertyOrNull("r2AccessKeyId")?.getString()?.trim().orEmpty(),
+                    secretAccessKey = storage.propertyOrNull("r2SecretAccessKey")?.getString()?.trim().orEmpty(),
+                ) else null,
+                signedUrlTtlSec = storage.propertyOrNull("signedUrlTtlSec")?.getString()?.toLong() ?: 900L,
+            )
+        },
         baseUrl = vibi.property("baseUrl").getString(),
         perso = PersoConfig(
             apiKey = perso.property("apiKey").getString(),

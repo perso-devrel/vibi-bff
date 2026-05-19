@@ -58,7 +58,7 @@ class ObjectStore(
         } catch (e: S3Exception) {
             // R2 는 missing key 에 404 (NoSuchKey) 또는 403 (token 권한에 따라) 으로 응답.
             // 둘 다 "없음" 으로 간주하고 upload 진행 — 권한 진짜 부족이면 putObject 에서 throw.
-            if (e.statusCode() in setOf(403, 404)) -1L else throw e
+            if (e.statusCode() in MISSING_KEY_STATUS_CODES) -1L else throw e
         }
         if (existingLen == fileLen) {
             uploadedKeys[objectKey] = fileLen
@@ -102,24 +102,30 @@ class ObjectStore(
     }
 
     companion object {
-        /** [StorageConfig.r2Bucket] 가 비어있으면 null (로컬 dev / R2 미사용). */
+        private val log = LoggerFactory.getLogger(ObjectStore::class.java)
+
+        /** R2 가 인식하는 region 특수값 — 실제 데이터는 단일 글로벌 namespace, 트래픽 라우팅은
+         * Cloudflare edge 담당. AWS SDK 가 빈 region 을 거부하므로 placeholder 필수. */
+        private val R2_REGION = Region.of("auto")
+
+        /** HEAD object 가 missing key 신호로 반환할 수 있는 status code. R2 의 token 권한에 따라
+         * 404 (NoSuchKey) 또는 403 둘 다 가능. 권한 진짜 부족이면 putObject 가 throw 하므로 안전. */
+        private val MISSING_KEY_STATUS_CODES = setOf(403, 404)
+
+        /** [StorageConfig.r2] 가 null 이면 백엔드 비활성 (로컬 dev / R2 미사용). */
         fun fromConfig(config: StorageConfig): ObjectStore? {
-            if (config.r2Bucket.isBlank()) {
-                LoggerFactory.getLogger(ObjectStore::class.java).info(
-                    "Object store disabled (R2_BUCKET blank) — using respondFile streaming"
-                )
+            val r2 = config.r2 ?: run {
+                log.info("Object store disabled (R2_BUCKET blank) — using respondFile streaming")
                 return null
             }
 
-            // R2 endpoint: 계정별 고정 도메인. region 은 'auto' — R2 가 인식하는 특수값
-            // (실제 데이터는 단일 글로벌 namespace, 트래픽 라우팅은 Cloudflare edge 가 담당).
-            val endpoint = URI.create("https://${config.r2AccountId}.r2.cloudflarestorage.com")
+            val endpoint = URI.create("https://${r2.accountId}.r2.cloudflarestorage.com")
             val creds = StaticCredentialsProvider.create(
-                AwsBasicCredentials.create(config.r2AccessKeyId, config.r2SecretAccessKey)
+                AwsBasicCredentials.create(r2.accessKeyId, r2.secretAccessKey)
             )
             val s3 = S3Client.builder()
                 .endpointOverride(endpoint)
-                .region(Region.of("auto"))
+                .region(R2_REGION)
                 .credentialsProvider(creds)
                 // UrlConnectionHttpClient — SDK 의 가장 가벼운 sync HTTP 백엔드. Apache HttpClient
                 // 의존성 제거 + JDK 내장 HttpURLConnection 사용. 본 BFF 의 R2 호출은 저빈도
@@ -128,11 +134,11 @@ class ObjectStore(
                 .build()
             val presigner = S3Presigner.builder()
                 .endpointOverride(endpoint)
-                .region(Region.of("auto"))
+                .region(R2_REGION)
                 .credentialsProvider(creds)
                 .build()
 
-            LoggerFactory.getLogger(ObjectStore::class.java).info(
+            log.info(
                 "Object store (R2) enabled: bucket={} defaultSignedUrlTtlSec={}",
                 config.r2Bucket, config.signedUrlTtlSec,
             )
