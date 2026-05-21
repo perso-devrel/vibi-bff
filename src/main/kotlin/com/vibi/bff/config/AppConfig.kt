@@ -249,8 +249,11 @@ data class AuthConfig(
             "AUTH_JWT_SECRET must be at least 32 chars (got ${jwtSecret.length}). " +
                 "Generate with: openssl rand -hex 32"
         }
-        require(jwtExpirySeconds in 60..(90L * 24 * 3600)) {
-            "AUTH_JWT_EXPIRY_SECONDS must be in 60..7776000 (got $jwtExpirySeconds)"
+        // 상한선 30일 — refresh token 미구현 상태에서 access token 만으로 90일 살리면
+        // 탈취 시 노출 창이 과대. 운영 default 는 application.conf 에서 7일 (604800).
+        // refresh token 도입 시 access token 은 1h 이하로 더 짧게.
+        require(jwtExpirySeconds in 60..(30L * 24 * 3600)) {
+            "AUTH_JWT_EXPIRY_SECONDS must be in 60..2592000 (got $jwtExpirySeconds)"
         }
     }
 }
