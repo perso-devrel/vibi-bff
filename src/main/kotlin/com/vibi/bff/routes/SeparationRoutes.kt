@@ -122,6 +122,7 @@ fun Route.separationRoutes(
                 error = job.error,
                 stems = stems,
                 mixJobId = job.consumedByMixJobId,
+                actualDurationMs = job.actualDurationMs,
             ))
         }
 
@@ -340,8 +341,9 @@ internal suspend fun maybeTrim(
         )
     } else rawEnd
 
-    val ext = file.extension.ifEmpty { "bin" }
-    val trimmed = File(file.parentFile, "${file.nameWithoutExtension}.trimmed.$ext")
+    // MediaTrimmer.trim 출력은 sample-accurate FLAC (lossless, audio-only). SeparationService 가
+    // 확장자로 "이미 audio 분리됨" 시그널을 받아 별도 MP3 추출 단계를 skip.
+    val trimmed = File(file.parentFile, "${file.nameWithoutExtension}.trimmed.${MediaTrimmer.OUTPUT_EXTENSION}")
     val ok = MediaTrimmer.trim(file, start, end, trimmed)
     if (!ok) {
         file.delete()

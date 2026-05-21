@@ -311,10 +311,13 @@ class SeparationRoutesTest {
         verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
-    // No trim fields → MediaTrimmer never consulted, submit called directly
+    // No trim fields → trim() is not called (no cut needed). probeDurationMs 는 admin
+    // analytics 의 sourceDurationMs 측정용으로 trim 유무와 무관하게 호출 — runCatching 으로
+    // 감싸여 실패해도 잡 진행에 영향 없음.
     @Test
-    fun `POST separate without trim bypasses MediaTrimmer`() = testApp {
+    fun `POST separate without trim skips MediaTrimmer trim but still probes for analytics`() = testApp {
         mockkObject(MediaTrimmer)
+        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 5_000L
         every { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-ok"
 
         val response = postSeparate(
@@ -323,7 +326,6 @@ class SeparationRoutesTest {
         )
 
         assertEquals(HttpStatusCode.Accepted, response.status)
-        coVerify(exactly = 0) { MediaTrimmer.probeDurationMs(any()) }
         coVerify(exactly = 0) { MediaTrimmer.trim(any(), any(), any(), any()) }
         verify(exactly = 1) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }

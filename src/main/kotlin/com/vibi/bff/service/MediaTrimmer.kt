@@ -6,11 +6,15 @@ import java.io.File
 /**
  * Pre-separation trim utility. `probeDurationMs` is used to validate
  * `trimEndMs <= fileDuration` before we pay for upstream compute; `trim`
- * produces a stream-copy cut that is then uploaded to Perso in place of
- * the original. Both operations shell out to ffmpeg/ffprobe on PATH.
+ * produces a **sample-accurate FLAC** audio cut (video stream dropped)
+ * that is then uploaded to Perso in place of the original. Both
+ * operations shell out to ffmpeg/ffprobe on PATH.
  */
 object MediaTrimmer {
     private val log = LoggerFactory.getLogger(MediaTrimmer::class.java)
+
+    /** [trim] 출력 확장자. caller 가 같은 값을 outFile 에 써야 ffmpeg 가 FLAC muxer 를 선택. */
+    const val OUTPUT_EXTENSION = "flac"
 
     suspend fun probeDurationMs(file: File): Long? {
         val cmd = listOf(
@@ -30,14 +34,14 @@ object MediaTrimmer {
     }
 
     /**
-     * Audio-accurate cut from [startMs, endMs) into [outFile]. `-ss` 는 input
-     * 보다 *뒤* 에 위치 — input-side `-ss` 는 mp4 의 video keyframe 으로 fast-seek
-     * snap 해 실제 시작 지점이 사용자 선택보다 ~2초 일찍 잘리는 버그 (구간 분리에서
-     * 관측됨). output-side `-ss` 는 demuxer 가 처음부터 읽되 -ss 이전 프레임은
-     * 디스카드 → sample 정확도. downstream 은 audio 만 소비하므로 `-vn` 으로
-     * video stream 을 dropping해 헤더 부분 깨지는 video 영향 없음. `-c:a copy` 로
-     * audio 는 re-encode 없이 그대로 (mp4 의 AAC 는 frame 단위 ~21ms 정밀도라
-     * 충분).
+     * Sample-accurate audio cut from [startMs, endMs) into [outFile] as **FLAC**.
+     *
+     * `-ss` 는 `-i` *뒤* 에 위치 — input-side `-ss` 는 video keyframe 으로 fast-seek snap 해
+     * 시작 지점이 사용자 선택보다 ~2초 일찍 잘리는 버그가 관측됐다. output-side `-ss` 는 demuxer
+     * 가 처음부터 읽되 -ss 이전 프레임은 디스카드 → sample 정확도.
+     *
+     * FLAC lossless — Perso 가 어차피 PCM 으로 decode 하므로 quality 손실 0. AAC stream-copy 로
+     * 잘랐을 때의 frame boundary snap (~21ms) 을 피하기 위해 디코드 경로 필수.
      */
     suspend fun trim(src: File, startMs: Long, endMs: Long, outFile: File): Boolean {
         require(endMs > startMs) { "endMs must be > startMs" }
@@ -51,19 +55,19 @@ object MediaTrimmer {
             "-ss", secondsToFfmpegArg(startSec),
             "-t", secondsToFfmpegArg(durationSec),
             "-vn",
-            "-c:a", "copy",
-            "-avoid_negative_ts", "make_non_negative",
+            "-c:a", "flac",
+            "-compression_level", "5",
             outFile.absolutePath,
         )
         return try {
-            FfmpegRunner.run(cmd, "ffmpeg trim ${src.name}", timeoutMinutes = 5)
+            FfmpegRunner.run(cmd, "ffmpeg flac extract+trim ${src.name}", timeoutMinutes = 10)
             if (!outFile.exists() || outFile.length() == 0L) {
-                log.error("ffmpeg trim produced empty output for {}", src.name)
+                log.error("ffmpeg flac extract produced empty output for {}", src.name)
                 outFile.delete()
                 false
             } else true
         } catch (e: Exception) {
-            log.error("ffmpeg trim exception for {}: {}", src.name, e.message)
+            log.error("ffmpeg flac extract exception for {}: {}", src.name, e.message)
             outFile.delete()
             false
         }

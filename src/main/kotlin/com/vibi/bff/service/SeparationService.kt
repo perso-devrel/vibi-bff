@@ -27,6 +27,9 @@ import java.util.concurrent.TimeUnit
 // COMPLETED mix triggers dispose(jobId); FAILED is kept briefly so clients
 // can read the error before the cleanup task reaps it.
 
+/** speaker stem id = "$SPEAKER_STEM_PREFIX$idx" (idx 0-based). 모바일 Stem.SPEAKER_PREFIX 와 일치. */
+internal const val SPEAKER_STEM_PREFIX = "speaker_"
+
 data class SeparationJob(
     val jobId: String,
     @Volatile var status: String = "PENDING",
@@ -215,17 +218,20 @@ class SeparationService(
     private suspend fun runPipeline(job: SeparationJob, sourceFile: File, spec: SeparationSpec) {
         val isVideo = spec.mediaType == "VIDEO"
 
-        // 영상 → mp3 추출 후 audio project 로 업로드 — audio-separation 결과는 audio 트랙만으로
-        // 동일하게 나오므로 video 트랙 통째로 보내는 건 낭비.
+        // Perso 는 audio-only 업로드만 받음. MediaTrimmer.trim 을 거친 입력은 이미 sample-accurate
+        // FLAC 이라 그대로 보내고, no-trim 영상 fallback 만 MP3 추출이 필요.
         job.status = "PROCESSING"
-        val uploadFile = if (isVideo) {
-            job.progressReason = "Extracting audio"
-            val mp3 = File(job.outputDir, "audio.mp3")
-            extractAudioForUpload(sourceFile, mp3)
-            sourceFile.delete()
-            mp3
-        } else {
-            sourceFile
+        val isPreExtractedAudio = sourceFile.extension.equals(MediaTrimmer.OUTPUT_EXTENSION, ignoreCase = true)
+        val uploadFile = when {
+            isPreExtractedAudio -> sourceFile
+            isVideo -> {
+                job.progressReason = "Extracting audio"
+                val mp3 = File(job.outputDir, "audio.mp3")
+                extractAudioForUpload(sourceFile, mp3)
+                sourceFile.delete()
+                mp3
+            }
+            else -> sourceFile
         }
 
         job.status = "UPLOADING_UPSTREAM"
@@ -286,7 +292,7 @@ class SeparationService(
         // native 디코드 지원. content-type 은 SeparationRoutes 가 stem.file.extension 으로 자동 매핑.
         val local = mutableListOf<LocalStem>()
         speakerFiles.forEachIndexed { idx, file ->
-            val stemId = "speaker_$idx"
+            val stemId = "$SPEAKER_STEM_PREFIX$idx"
             val finalFile = File(job.outputDir, "$stemId.flac")
             transcodeToFlac(file, finalFile)
             file.delete()
@@ -308,6 +314,15 @@ class SeparationService(
             local.add(LocalStem("background", "배경음", flacBg))
             log.info("Background stem ready: file={} size={}B", flacBg.name, flacBg.length())
         }
+
+        // speaker stem 들은 모두 같은 trim 입력에서 분리돼 동일 길이라 1개만 측정.
+        job.actualDurationMs = runCatching {
+            MediaTrimmer.probeDurationMs(local.first { it.stemId.startsWith(SPEAKER_STEM_PREFIX) }.file)
+        }.getOrNull()
+        log.info(
+            "Stem actual duration probed: jobId={} actualDurationMs={}",
+            job.jobId, job.actualDurationMs,
+        )
 
         job.stems = local
         job.progress = 100

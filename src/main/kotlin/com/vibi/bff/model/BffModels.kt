@@ -241,6 +241,12 @@ data class SeparationStatusResponse(
     val error: String? = null,
     val stems: List<StemInfo> = emptyList(),
     val mixJobId: String? = null,
+    /**
+     * READY 상태에서 stem FLAC 의 실측 길이(ms). 클라이언트가 사용자 선택 trim 길이 대신 이 값을
+     * 써서 timeline 막대(SeparationDirective.rangeEndMs) 와 stem 실제 길이를 1:1 매칭. null 이면
+     * 측정 실패 → 클라이언트는 사용자 선택값 fallback.
+     */
+    val actualDurationMs: Long? = null,
 )
 
 @Serializable
