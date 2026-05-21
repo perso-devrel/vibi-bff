@@ -69,7 +69,7 @@ fun Route.separationRoutes(
             var source: File? = null
             var pipelineInput: File? = null
             try {
-                source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId)
+                source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId, principal?.userId)
                 pipelineInput = maybeTrim(source, spec)
                 val sourceDurationMs = computeSeparationSourceDurationMs(pipelineInput, spec)
                 val jobId = separationService.submit(
@@ -90,10 +90,17 @@ fun Route.separationRoutes(
 
         // GET /api/v2/separate/{jobId} — status + stem URLs (signed)
         get("/{jobId}") {
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("jobId required")
             val job = separationService.getJob(jobId)
                 ?: throw NotFoundException("Separation job not found: $jobId")
+
+            // owner / caller 둘 다 있을 때만 매칭 검증 (RenderRoutes 와 동일 패턴).
+            // mismatch 시 not-found 로 응답해 IDOR 시 존재 oracle 차단.
+            if (job.ownerUserId != null && principal?.userId != null && job.ownerUserId != principal.userId) {
+                throw NotFoundException("Separation job not found: $jobId")
+            }
 
             val ttl = appConfig.separation.urlTtlSec
             val stems = if (job.status == "READY") {
@@ -151,9 +158,19 @@ fun Route.separationRoutes(
 
         // POST /api/v2/separate/{jobId}/mix — kick off mixing; on success, stems are disposed
         post("/{jobId}/mix") {
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("jobId required")
             val req = call.receive<StemMixRequest>()
+
+            // mix 는 separation 잡의 stems 를 reserve → 성공 시 dispose. 다른 사용자가
+            // 남의 잡을 mix command 로 소비/삭제시키는 IDOR 막기 위해 reserveForMix
+            // 호출 전에 ownerUserId 검증. mismatch 는 not-found 로 응답.
+            val existing = separationService.getJob(jobId)
+                ?: throw NotFoundException("Separation job not found: $jobId")
+            if (existing.ownerUserId != null && principal?.userId != null && existing.ownerUserId != principal.userId) {
+                throw NotFoundException("Separation job not found: $jobId")
+            }
 
             val mixJobId = stemMixService.newJobId()
             val job = separationService.reserveForMix(jobId, mixJobId)

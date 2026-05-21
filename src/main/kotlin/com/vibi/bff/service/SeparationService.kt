@@ -41,6 +41,13 @@ data class SeparationJob(
      * 다시 들어와도 같은 jobId 를 돌려주기 위한 키. null 이면 dedup 대상 외
      * (legacy upload path). dispose() 가 이 키로 index 정리. */
     val dedupKey: String? = null,
+    /** READY 시 ffprobe 로 잰 stem FLAC 의 실측 길이 (ms). 클라이언트가 timeline 막대 길이를
+     * 사용자 선택값 대신 이 값으로 보정해 stem 파일과 1:1 매칭. null = 측정 실패 또는 미-READY. */
+    @Volatile var actualDurationMs: Long? = null,
+    /** submit 의 principal.userId 가 그대로 보존. null 이면 미인증 잡 (테스트 / jwtSecret
+     * 미주입 분기). 라우트가 status/mix 호출 시 caller principal 과 매칭 — mismatch 면
+     * 다른 사용자가 남의 잡을 mix command 로 소비/dispose 시키는 IDOR 차단. */
+    val ownerUserId: UUID? = null,
 )
 
 data class LocalStem(
@@ -143,7 +150,7 @@ class SeparationService(
     ): String {
         val jobId = "sep-${UUID.randomUUID()}"
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
-        val job = SeparationJob(jobId = jobId, outputDir = outputDir, dedupKey = dedupKey)
+        val job = SeparationJob(jobId = jobId, outputDir = outputDir, dedupKey = dedupKey, ownerUserId = userId)
         jobs[jobId] = job
 
         scope.launch {

@@ -237,10 +237,16 @@ fun Route.renderRoutes(
         }
 
         get("/{jobId}/status") {
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("Render jobId required")
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
+
+            // download 와 동일 — owner / caller 둘 다 있을 때 매칭 검증. mismatch 시 not-found.
+            if (job.ownerUserId != null && principal?.userId != null && job.ownerUserId != principal.userId) {
+                throw NotFoundException("Render job not found: $jobId")
+            }
 
             call.respond(HttpStatusCode.OK, RenderStatusResponse(
                 jobId = job.jobId,
@@ -252,10 +258,18 @@ fun Route.renderRoutes(
         }
 
         get("/{jobId}/download") {
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("Render jobId required")
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
+
+            // 자원 소유권 — job.ownerUserId 가 principal.userId 와 일치해야 다운로드. 둘 중
+            // 하나라도 null 이면 검증 skip (테스트 / 운영 boot 직후 jwtSecret 미주입 분기).
+            // mismatch 는 not-found 와 동일 메시지로 응답해 IDOR 시 owner 존재 여부 oracle 차단.
+            if (job.ownerUserId != null && principal?.userId != null && job.ownerUserId != principal.userId) {
+                throw NotFoundException("Render job not found: $jobId")
+            }
 
             if (job.status != "COMPLETED" || !job.outputFile.exists()) {
                 throw NotFoundException("Render not ready: status=${job.status}")

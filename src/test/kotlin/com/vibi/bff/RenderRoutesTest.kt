@@ -6,6 +6,7 @@ import com.vibi.bff.plugins.configureSerialization
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.RenderInputCacheService
+import com.vibi.bff.service.RenderJob
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
@@ -20,6 +21,7 @@ import kotlinx.serialization.json.*
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 import kotlin.test.*
 
 /**
@@ -57,7 +59,10 @@ class RenderRoutesTest {
         unmockkAll()
     }
 
-    private fun testApp(block: suspend ApplicationTestBuilder.() -> Unit) = testApplication {
+    private fun testApp(
+        jwtSecret: String? = null,
+        block: suspend ApplicationTestBuilder.() -> Unit,
+    ) = testApplication {
         application {
             configureSerialization()
             configureErrorHandling()
@@ -68,6 +73,7 @@ class RenderRoutesTest {
                     renderService, fileStorage,
                     separationService, signer, inputCache,
                     objectStore = null,
+                    jwtSecret = jwtSecret,
                 )
             }
         }
@@ -298,5 +304,69 @@ class RenderRoutesTest {
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    // ── 자원 소유권 검증 ────────────────────────────────────────────────────────
+    //
+    // RenderJob.ownerUserId 가 set 된 잡을 다른 user 의 JWT 로 status/download 호출 시 404.
+    // 같은 owner 면 통과. jwtSecret null 분기 (라우트가 인증 강제 안 함) 는 backward compat 로
+    // owner 무관하게 통과 — 테스트 시드 (RenderService unit test) 코드가 그대로 살아있게.
+
+    private val testJwtSecret = "a".repeat(64)
+
+    private fun completedJob(jobId: String, ownerUserId: UUID?): RenderJob {
+        val outFile = File(testDir, "$jobId.mp4").apply {
+            parentFile?.mkdirs()
+            writeBytes(ByteArray(8))
+        }
+        return RenderJob(
+            jobId = jobId,
+            status = "COMPLETED",
+            outputFile = outFile,
+            ownerUserId = ownerUserId,
+        )
+    }
+
+    @Test
+    fun `GET render status returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        val otherId = UUID.randomUUID()
+        every { renderService.getJob("render-a") } returns completedJob("render-a", ownerId)
+
+        val response = client.get("/api/v2/render/render-a/status") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
+        }
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `GET render status returns 200 when caller is owner`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        every { renderService.getJob("render-b") } returns completedJob("render-b", ownerId)
+
+        val response = client.get("/api/v2/render/render-b/status") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(ownerId, testJwtSecret)}")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+    }
+
+    @Test
+    fun `GET render download returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        val otherId = UUID.randomUUID()
+        every { renderService.getJob("render-c") } returns completedJob("render-c", ownerId)
+
+        val response = client.get("/api/v2/render/render-c/download") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
+        }
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `GET render status without ownership check when jwtSecret null (backward compat)`() = testApp {
+        // jwtSecret 미주입 분기 — 헤더 없이도 통과. owner null 잡 + 미인증.
+        every { renderService.getJob("render-d") } returns completedJob("render-d", ownerUserId = null)
+        val response = client.get("/api/v2/render/render-d/status")
+        assertEquals(HttpStatusCode.OK, response.status)
     }
 }

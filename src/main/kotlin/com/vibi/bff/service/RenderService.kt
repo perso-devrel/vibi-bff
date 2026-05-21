@@ -60,6 +60,10 @@ data class RenderJob(
      * last-access based so a referenced job stays alive as long as the client
      * keeps touching it. */
     @Volatile var lastAccessedAt: Long = System.currentTimeMillis(),
+    /** submitRender 의 principal.userId 가 그대로 보존. null 이면 미인증 잡 (테스트 /
+     * 운영 boot 직후 jwtSecret 미주입 분기). 다운로드 / editedRenderJobId 재사용 시
+     * 소유권 검증에 사용 — null 이면 검증 skip. */
+    val ownerUserId: UUID? = null,
 )
 
 /** 한 separationDirective 의 ffmpeg 입력용 형태. selections 의 audioUrl 은 라우트 단계에서
@@ -191,8 +195,14 @@ class RenderService(
      * The copy file is named `source-<uuid>.<ext>` to keep the original
      * outputFile name and any sibling sticky-state files unambiguous.
      */
-    fun acquireRenderOutputCopy(jobId: String, copyTargetDir: File): File? {
+    fun acquireRenderOutputCopy(jobId: String, copyTargetDir: File, callerUserId: UUID? = null): File? {
         val job = jobs[jobId] ?: return null
+        // owner / caller 가 둘 다 있을 때만 매칭 검증 — owner null (test / 미인증 잡) 또는
+        // caller null (jwtSecret 미주입 분기) 면 통과. owner mismatch 는 not-found 와 동일
+        // 응답 경로 (null) 로 두어 IDOR 정보 누출 (existence oracle) 방지.
+        if (job.ownerUserId != null && callerUserId != null && job.ownerUserId != callerUserId) {
+            return null
+        }
         synchronized(job) {
             if (job.status != "COMPLETED") return null
             if (!job.outputFile.exists()) return null
@@ -235,7 +245,7 @@ class RenderService(
         val jobId = "render-${UUID.randomUUID()}"
         val outputExt = if (outputKind == "audio") "m4a" else "mp4"
         val outputFile = File(renderDir, "$jobId.$outputExt")
-        val job = RenderJob(jobId = jobId, outputFile = outputFile)
+        val job = RenderJob(jobId = jobId, outputFile = outputFile, ownerUserId = userId)
         jobs[jobId] = job
 
         scope.launch {
