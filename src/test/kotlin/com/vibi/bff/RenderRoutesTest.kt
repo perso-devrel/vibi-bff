@@ -185,6 +185,10 @@ class RenderRoutesTest {
                 bgmClips = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
+                outputKind = any(),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         } returns "render-cached-1"
 
@@ -213,6 +217,10 @@ class RenderRoutesTest {
                 inputFilesToCleanup = match { list ->
                     list.none { f -> f.absolutePath == cached.videoFile.absolutePath }
                 },
+                outputKind = any(),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         }
     }
@@ -236,6 +244,9 @@ class RenderRoutesTest {
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         } returns "render-defaultkind-1"
 
@@ -270,6 +281,9 @@ class RenderRoutesTest {
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         } returns "render-audiokind-1"
 
