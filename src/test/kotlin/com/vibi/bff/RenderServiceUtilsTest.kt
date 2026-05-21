@@ -131,6 +131,38 @@ class RenderServiceUtilsTest {
         assertTrue(filter.contains("[base_muted][stem_0_0][stem_0_1]amix="), "amix wiring missing in: $filter")
     }
 
+    @Test
+    fun `buildFfmpegCommand amix uses normalize=0 and alimiter for separation mix`() {
+        // Regression guard: separation directive 구간에서 [base_muted] 는 silence 인데 amix 의 default
+        // normalize=1 은 그 input 까지 N 으로 카운트해 stem 들을 1/(N+1) 로 나눠 사용자가 "분리된
+        // stem 이 원본보다 작게 들림" 으로 체감하는 직접 원인이었다. normalize=0 합산 + alimiter 로
+        // 천장 squash 가 운영 정책.
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-norm").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val stem = File(tmp, "s.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            videoDurationMs = 5_000,
+            outputFile = out,
+            separationDirectives = listOf(
+                DirectiveWithStemFiles(
+                    rangeStartMs = 0,
+                    rangeEndMs = 5_000,
+                    muteOriginalSegmentAudio = true,
+                    stems = listOf(DirectiveStem(file = stem, volume = 1.0f)),
+                ),
+            ),
+        )
+
+        val filter = cmd[cmd.indexOf("-filter_complex") + 1]
+        assertTrue(filter.contains("normalize=0"), "amix must specify normalize=0: $filter")
+        assertTrue(filter.contains("alimiter=limit="), "alimiter must follow amix: $filter")
+        // 최종 -map 은 limiter 출력을 가리켜야 함.
+        assertTrue(cmd.containsAll(listOf("-map", "[aout]")), "-map must point to [aout]: $cmd")
+    }
+
     /**
      * 모바일이 영상 range delete 로 directive 를 split 한 경우, 뒤쪽 piece 는 `sourceOffsetMs > 0` 으로
      * 같은 stem audio 파일의 중간부터 재생되어야 한다. ffmpeg `atrim` 의 시작점이 sourceOffsetMs/1000

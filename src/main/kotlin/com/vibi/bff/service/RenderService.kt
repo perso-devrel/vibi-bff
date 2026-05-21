@@ -586,10 +586,15 @@ class RenderService(
                 )
                 mixInputs.add("[bgm$i]")
             }
+            // normalize=0: amix default normalize=1 은 silent input 도 N 으로 카운트해 모든 input 을
+            // 1/N 으로 나눠 음량이 작아짐. base + BGM 합산이 의도된 음량으로 나오려면 0 필수.
+            // alimiter: 합산이 천장(±1.0)을 초과할 때만 부드럽게 누름 — 평상시 통과, peak 만 squash.
+            // limit=0.95 로 -0.4dB 헤드룸. BGM volume 슬라이더 0..2 boost 케이스의 clipping 안전망.
             filters.add(
                 "${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:" +
-                    "duration=first:dropout_transition=0[aout]"
+                    "duration=first:dropout_transition=0:normalize=0[amix_out]"
             )
+            filters.add("[amix_out]alimiter=limit=0.95:attack=5:release=50[aout]")
             "[aout]"
         }
 
@@ -926,7 +931,13 @@ class RenderService(
             if (mixInputs.size == 1) {
                 filters.add("${mixInputs[0]}anull[aout]")
             } else {
-                filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0[aout]")
+                // normalize=0: separation 구간에서 [base_muted] 는 silence 지만 amix default normalize=1
+                // 은 그 input 까지 N 으로 카운트해 stem 들을 1/(N+1) 로 나눠버림. base 가 mute 됐는데도
+                // stems 가 작아져 사용자가 "분리된 stem 이 원본보다 작게 들림" 으로 체감하는 직접 원인.
+                // alimiter: stem.volume 슬라이더 boost / BGM 겹침 / 분리 모델 over-estimate 잔여 오차 등의
+                // 합산이 천장을 넘을 때 부드럽게 누름. -0.4dB 헤드룸 (limit=0.95).
+                filters.add("${mixInputs.joinToString("")}amix=inputs=${mixInputs.size}:duration=first:dropout_transition=0:normalize=0[amix_out]")
+                filters.add("[amix_out]alimiter=limit=0.95:attack=5:release=50[aout]")
             }
         }
 

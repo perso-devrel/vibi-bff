@@ -68,6 +68,31 @@ class RenderServiceAudioCommandTest {
     }
 
     @Test
+    fun `buildAudioConcatCommand amix uses normalize=0 and alimiter`() {
+        // Regression guard: default amix normalize=1 은 silent input 도 N 으로 카운트해 base 와
+        // BGM 을 1/N 으로 나눠 의도 대비 −6 dB(2개) ~ −9.5 dB(3개) 작아진다. normalize=0 합산 후
+        // alimiter 로 천장만 squash 하는 패턴이 운영 정책 (StemMixCommandTest 와 동일).
+        val tmp = File(System.getProperty("java.io.tmpdir"), "vibi-test-rsac-norm").apply { mkdirs() }
+        val seg = File(tmp, "seg.m4a").apply { writeText("x") }
+        val bgm = File(tmp, "bgm.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.m4a")
+
+        val cmd = service.buildAudioConcatCommand(
+            segmentFiles = listOf(seg),
+            bgmAudioFiles = mapOf("bgm_0" to bgm),
+            bgmClips = listOf(BgmClip(audioFileKey = "bgm_0", startMs = 0, volume = 1.0f)),
+            totalDurationMs = 3_000,
+            outputFile = out,
+        )
+
+        val filter = cmd[cmd.indexOf("-filter_complex") + 1]
+        assertTrue(filter.contains("normalize=0"), "amix must specify normalize=0: $filter")
+        assertTrue(filter.contains("alimiter=limit="), "alimiter must follow amix: $filter")
+        // output map 은 limiter 출력을 가리켜야 함 (intermediate label 이 -map 으로 새지 않게).
+        assertTrue(cmd.containsAll(listOf("-map", "[aout]")), "-map must point to [aout]: $cmd")
+    }
+
+    @Test
     fun `buildAudioConcatCommand throws on unknown bgm key`() {
         val tmp = File(System.getProperty("java.io.tmpdir"), "vibi-test-rsac-bad").apply { mkdirs() }
         val seg = File(tmp, "seg.m4a").apply { writeText("x") }
