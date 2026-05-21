@@ -125,6 +125,17 @@ class AuthService(
         val email = verified.getClaim("email").asString()
             ?: throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_email_missing")
 
+        // Google 의 emailVerified 와 동일 패턴 — Apple ID Token 의 email_verified 는 사실상
+        // 항상 true 지만 (이메일 공유 / 사설 릴레이 모두 verified), defense-in-depth 차원에서
+        // 명시 거부. boolean 외 string ("true"/"false") 으로 오는 케이스도 흡수.
+        val emailVerifiedClaim = verified.getClaim("email_verified")
+        val emailVerified = emailVerifiedClaim.asBoolean()
+            ?: emailVerifiedClaim.asString()?.equals("true", ignoreCase = true)
+            ?: true // claim 자체가 없으면 boundary 신뢰 (Apple 이 항상 채워 보내지만 누락 시 reject 하지 않음)
+        if (!emailVerified) {
+            throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_email_unverified")
+        }
+
         return completeSignIn(
             provider = AuthProvider.APPLE,
             providerSub = sub,
