@@ -118,7 +118,6 @@ data class SeparationDirectiveDto(
     val id: String,
     val rangeStartMs: Long,
     val rangeEndMs: Long,
-    val numberOfSpeakers: Int,
     val muteOriginalSegmentAudio: Boolean,
     /** stem 별 (URL + 볼륨). BFF 자체 HMAC-signed URL 만 허용 — 외부 URL 은 reject. */
     val selections: List<SeparationStemSelectionDto> = emptyList(),
@@ -191,7 +190,6 @@ data class RenderInputCacheResponse(
 @Serializable
 data class SeparationSpec(
     val mediaType: String,                  // "VIDEO" | "AUDIO"
-    val numberOfSpeakers: Int,
     val sourceLanguageCode: String = "auto",
     val trimStartMs: Long? = null,
     val trimEndMs: Long? = null,
@@ -203,9 +201,6 @@ data class SeparationSpec(
     init {
         require(mediaType == "VIDEO" || mediaType == "AUDIO") {
             "mediaType must be VIDEO or AUDIO (got $mediaType)"
-        }
-        require(numberOfSpeakers in 1..10) {
-            "numberOfSpeakers must be in 1..10 (got $numberOfSpeakers)"
         }
         // Trim is optional; both must be present together. File-duration
         // check lives in the route where ffprobe is available.

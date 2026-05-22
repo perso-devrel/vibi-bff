@@ -287,7 +287,7 @@ internal fun buildSeparationDedupKey(spec: SeparationSpec): String? {
     val editedId = spec.editedRenderJobId ?: return null
     val start = spec.trimStartMs ?: 0L
     val end = spec.trimEndMs ?: 0L
-    return "edited=$editedId|trim=$start-$end|spk=${spec.numberOfSpeakers}|" +
+    return "edited=$editedId|trim=$start-$end|" +
         "lang=${spec.sourceLanguageCode}|type=${spec.mediaType}"
 }
 

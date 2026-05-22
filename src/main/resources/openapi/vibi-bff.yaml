@@ -784,12 +784,11 @@ components:
 
     SeparationDirectiveDto:
       type: object
-      required: [id, rangeStartMs, rangeEndMs, numberOfSpeakers, muteOriginalSegmentAudio]
+      required: [id, rangeStartMs, rangeEndMs, muteOriginalSegmentAudio]
       properties:
         id: { type: string }
         rangeStartMs: { type: integer, format: int64 }
         rangeEndMs: { type: integer, format: int64 }
-        numberOfSpeakers: { type: integer }
         muteOriginalSegmentAudio: { type: boolean }
         selections:
           type: array
@@ -879,15 +878,11 @@ components:
     # -------------------------- Separation
     SeparationSpec:
       type: object
-      required: [mediaType, numberOfSpeakers]
+      required: [mediaType]
       properties:
         mediaType:
           type: string
           enum: [VIDEO, AUDIO]
-        numberOfSpeakers:
-          type: integer
-          minimum: 1
-          maximum: 10
         sourceLanguageCode:
           type: string
           default: auto

@@ -132,20 +132,9 @@ class SeparationRoutesTest {
     @Test
     fun `SeparationSpec rejects invalid mediaType`() {
         val ex = assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(mediaType = "AUDIOVIDEO", numberOfSpeakers = 1)
+            com.vibi.bff.model.SeparationSpec(mediaType = "AUDIOVIDEO")
         }
         assertTrue(ex.message!!.contains("mediaType"))
-    }
-
-    // SeparationSpec 생성자 검증 — numberOfSpeakers 범위
-    @Test
-    fun `SeparationSpec rejects out-of-range numberOfSpeakers`() {
-        assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(mediaType = "VIDEO", numberOfSpeakers = 0)
-        }
-        assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(mediaType = "VIDEO", numberOfSpeakers = 11)
-        }
     }
 
     // StemMixRequest 검증 — volume 음수
@@ -171,7 +160,7 @@ class SeparationRoutesTest {
     fun `SeparationSpec rejects partial trim (only start)`() {
         val ex = assertFailsWith<IllegalArgumentException> {
             com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO", numberOfSpeakers = 1, trimStartMs = 1000
+                mediaType = "VIDEO", trimStartMs = 1000
             )
         }
         assertEquals("partial_trim_range", ex.message)
@@ -181,7 +170,7 @@ class SeparationRoutesTest {
     fun `SeparationSpec rejects partial trim (only end)`() {
         val ex = assertFailsWith<IllegalArgumentException> {
             com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO", numberOfSpeakers = 1, trimEndMs = 1000
+                mediaType = "VIDEO", trimEndMs = 1000
             )
         }
         assertEquals("partial_trim_range", ex.message)
@@ -192,7 +181,7 @@ class SeparationRoutesTest {
     fun `SeparationSpec rejects reversed trim range`() {
         val ex = assertFailsWith<IllegalArgumentException> {
             com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO", numberOfSpeakers = 1,
+                mediaType = "VIDEO",
                 trimStartMs = 5000, trimEndMs = 2000,
             )
         }
@@ -203,7 +192,7 @@ class SeparationRoutesTest {
     fun `SeparationSpec rejects trim range shorter than 500ms`() {
         val ex = assertFailsWith<IllegalArgumentException> {
             com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO", numberOfSpeakers = 1,
+                mediaType = "VIDEO",
                 trimStartMs = 1000, trimEndMs = 1200,
             )
         }
@@ -214,7 +203,7 @@ class SeparationRoutesTest {
     fun `SeparationSpec rejects negative trimStartMs`() {
         val ex = assertFailsWith<IllegalArgumentException> {
             com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO", numberOfSpeakers = 1,
+                mediaType = "VIDEO",
                 trimStartMs = -1, trimEndMs = 1000,
             )
         }
@@ -224,7 +213,7 @@ class SeparationRoutesTest {
     @Test
     fun `SeparationSpec accepts valid trim range`() {
         val spec = com.vibi.bff.model.SeparationSpec(
-            mediaType = "VIDEO", numberOfSpeakers = 2,
+            mediaType = "VIDEO",
             trimStartMs = 2000, trimEndMs = 8500,
         )
         assertEquals(2000L, spec.trimStartMs)
@@ -235,7 +224,7 @@ class SeparationRoutesTest {
     @Test
     fun `SeparationSpec without trim fields is valid`() {
         val spec = com.vibi.bff.model.SeparationSpec(
-            mediaType = "VIDEO", numberOfSpeakers = 1,
+            mediaType = "VIDEO",
         )
         assertNull(spec.trimStartMs)
         assertNull(spec.trimEndMs)
@@ -264,7 +253,7 @@ class SeparationRoutesTest {
 
         val response = postSeparate(
             client,
-            """{"mediaType":"AUDIO","numberOfSpeakers":1,"trimStartMs":1000,"trimEndMs":10000}""",
+            """{"mediaType":"AUDIO","trimStartMs":1000,"trimEndMs":10000}""",
         )
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
@@ -284,7 +273,7 @@ class SeparationRoutesTest {
 
         val response = postSeparate(
             client,
-            """{"mediaType":"AUDIO","numberOfSpeakers":1,"trimStartMs":0,"trimEndMs":2000}""",
+            """{"mediaType":"AUDIO","trimStartMs":0,"trimEndMs":2000}""",
         )
 
         assertEquals(HttpStatusCode.InternalServerError, response.status)
@@ -302,7 +291,7 @@ class SeparationRoutesTest {
 
         val response = postSeparate(
             client,
-            """{"mediaType":"AUDIO","numberOfSpeakers":1,"trimStartMs":1000,"trimEndMs":3000}""",
+            """{"mediaType":"AUDIO","trimStartMs":1000,"trimEndMs":3000}""",
         )
 
         assertEquals(HttpStatusCode.InternalServerError, response.status)
@@ -322,7 +311,7 @@ class SeparationRoutesTest {
 
         val response = postSeparate(
             client,
-            """{"mediaType":"AUDIO","numberOfSpeakers":1}""",
+            """{"mediaType":"AUDIO"}""",
         )
 
         assertEquals(HttpStatusCode.Accepted, response.status)
@@ -339,7 +328,7 @@ class SeparationRoutesTest {
 
         val response = client.post("/api/v2/separate") {
             setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO","numberOfSpeakers":1,"editedRenderJobId":"render-missing"}""")
+                append("spec", """{"mediaType":"VIDEO","editedRenderJobId":"render-missing"}""")
             }))
         }
 
@@ -360,7 +349,7 @@ class SeparationRoutesTest {
 
         val response = client.post("/api/v2/separate") {
             setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO","numberOfSpeakers":1,"editedRenderJobId":"render-ok"}""")
+                append("spec", """{"mediaType":"VIDEO","editedRenderJobId":"render-ok"}""")
             }))
         }
 
@@ -382,7 +371,7 @@ class SeparationRoutesTest {
             setBody(MultiPartFormDataContent(formData {
                 append(
                     "spec",
-                    """{"mediaType":"VIDEO","numberOfSpeakers":1,"editedRenderJobId":"render-x","trimStartMs":1000,"trimEndMs":3000}""",
+                    """{"mediaType":"VIDEO","editedRenderJobId":"render-x","trimStartMs":1000,"trimEndMs":3000}""",
                 )
             }))
         }
@@ -401,7 +390,7 @@ class SeparationRoutesTest {
         mockkObject(MediaTrimmer)
         every { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-upload"
 
-        val response = postSeparate(client, """{"mediaType":"AUDIO","numberOfSpeakers":1}""")
+        val response = postSeparate(client, """{"mediaType":"AUDIO"}""")
         assertEquals(HttpStatusCode.Accepted, response.status)
         // upload path 는 spec.editedRenderJobId==null → buildSeparationDedupKey returns null
         // → findActiveJob 호출 자체가 일어나면 안 됨 (그리고 submit 호출은 dedupKey=null
@@ -415,7 +404,7 @@ class SeparationRoutesTest {
     fun `POST separate without file or editedRenderJobId returns 400`() = testApp {
         val response = client.post("/api/v2/separate") {
             setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO","numberOfSpeakers":1}""")
+                append("spec", """{"mediaType":"VIDEO"}""")
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
@@ -469,7 +458,7 @@ class SeparationRoutesTest {
         val response = client.post("/api/v2/separate") {
             header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
             setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO","numberOfSpeakers":1,"editedRenderJobId":"render-owned-by-A"}""")
+                append("spec", """{"mediaType":"VIDEO","editedRenderJobId":"render-owned-by-A"}""")
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)

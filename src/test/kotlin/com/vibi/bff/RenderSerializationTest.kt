@@ -128,7 +128,7 @@ class RenderSerializationTest {
                   "id":"d1",
                   "rangeStartMs":1000,
                   "rangeEndMs":4000,
-                  "numberOfSpeakers":2,
+                  
                   "muteOriginalSegmentAudio":true,
                   "selections":[
                     {"stemId":"speaker_0","audioUrl":"/api/v2/separate/sep-x/stem/speaker_0?token=t.s","volume":0.8},
@@ -169,7 +169,7 @@ class RenderSerializationTest {
                   "id":"d1-back",
                   "rangeStartMs":4000,
                   "rangeEndMs":7000,
-                  "numberOfSpeakers":2,
+                  
                   "muteOriginalSegmentAudio":true,
                   "selections":[],
                   "sourceOffsetMs":10000
@@ -178,7 +178,7 @@ class RenderSerializationTest {
                   "id":"d2-original",
                   "rangeStartMs":0,
                   "rangeEndMs":3000,
-                  "numberOfSpeakers":1,
+                  
                   "muteOriginalSegmentAudio":false,
                   "selections":[]
                 }
