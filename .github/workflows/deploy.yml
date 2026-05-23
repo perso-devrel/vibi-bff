@@ -32,6 +32,22 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # admin-ui (Vite) 빌드 산출물은 .gitignore 됨 — 매 배포마다 fresh build 해서
+      # src/main/resources/admin/ 로 떨어뜨려야 Ktor staticResources 가 마운트한다.
+      # 빠뜨리면 ADMIN_SLUG 가 박혀도 부팅 로그에 WARN + admin URL 404.
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: admin-ui/package-lock.json
+
+      - name: Build admin-ui (vite)
+        working-directory: admin-ui
+        run: |
+          npm ci --silent
+          npm run build
+
       - name: Authenticate to Google Cloud (WIF)
         uses: google-github-actions/auth@v2
         with:
@@ -57,7 +73,7 @@ jobs:
             --min-instances 0 --max-instances 2 \
             --session-affinity \
             --allow-unauthenticated \
-            --set-env-vars "^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${GEMINI_LOCATION}@PERSO_BASE_URL=${PERSO_BASE_URL}@PERSO_STORAGE_BASE_URL=${PERSO_STORAGE_BASE_URL}@STORAGE_PATH=${STORAGE_PATH}@GOOGLE_OAUTH_CLIENT_IDS=${{ secrets.GOOGLE_OAUTH_CLIENT_IDS }}@APPLE_OAUTH_CLIENT_IDS=${{ secrets.APPLE_OAUTH_CLIENT_IDS }}@CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}@R2_BUCKET=${{ vars.R2_BUCKET }}@R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}" \
+            --set-env-vars "^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${GEMINI_LOCATION}@PERSO_BASE_URL=${PERSO_BASE_URL}@PERSO_STORAGE_BASE_URL=${PERSO_STORAGE_BASE_URL}@STORAGE_PATH=${STORAGE_PATH}@GOOGLE_OAUTH_CLIENT_IDS=${{ secrets.GOOGLE_OAUTH_CLIENT_IDS }}@APPLE_OAUTH_CLIENT_IDS=${{ secrets.APPLE_OAUTH_CLIENT_IDS }}@CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}@R2_BUCKET=${{ vars.R2_BUCKET }}@R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}@ADMIN_SLUG=${{ secrets.ADMIN_SLUG }}" \
             --set-secrets "PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest,DATABASE_URL=DATABASE_URL:latest,DB_USER=DB_USER:latest,DB_PASSWORD=DB_PASSWORD:latest,R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest" \
             --quiet
 
