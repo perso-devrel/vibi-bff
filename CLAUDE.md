@@ -77,6 +77,14 @@ GET  /api/v2/testdata/separation/*      # (dev mock)
 
 **해결 패턴**: `SeparationService.downloadBackgroundStem` 이 `getProjectInfo(projectSeq).downloadPathInfo.originalBackgroundPath` 우선 시도, 누락 시 `originalSubBackground` fallback.
 
+### Perso audio-separation — 업로드 codec 은 **PCM WAV / MP3**, FLAC 은 거부
+
+**증상**: trim 출력을 `.flac` 으로 업로드하면 `getSasToken` → `uploadToBlob` → `registerMedia` → `submitAudioSeparation` 까지 전부 OK 인데 잡 폴링이 `progress=20% Uploading → 100% Failed (hasFailed=false)` 로 종료. BFF `PersoPolling` 이 `progressReason == "Failed"` 를 `PersoApiException(500)` 으로 변환 → 502 응답.
+
+**원인**: Perso 분리 파이프라인이 FLAC 파일은 받아 두기만 하고 실제 처리 단계에서 거절. `hasFailed` 플래그가 false 라 단순 status 만 봐서는 안 잡힘. WAV PCM / MP3 는 정상 처리 (`Transcribing → Completed`).
+
+**해결 패턴**: `MediaTrimmer.OUTPUT_EXTENSION = "wav"` + `-c:a pcm_s16le`. sample-accurate 유지 + Perso 호환. 회귀 가드는 `PersoLiveSeparationIT` (env opt-in, fixture 부재 시 skip). 한때 FLAC 으로 통일 시도했다가 (`997c683`) 본 회귀로 되돌림.
+
 ### Perso API path prefix — `/video-translator` 통일 (단, 일부 endpoint 만 `/file`)
 
 **해결 패턴**: 새 PersoClient method 추가 시 endpoint group 확인 — 영상 lifecycle 은 `/video-translator/api/v1/projects/.../spaces/<spaceSeq>/...`, blob 업로드는 `/file/api/upload/...`.

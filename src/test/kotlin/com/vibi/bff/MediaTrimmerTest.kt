@@ -53,23 +53,22 @@ class MediaTrimmerTest {
     }
 
     @Test
-    fun `trim produces a sample-accurate flac cut whose duration matches window size`() = runBlocking {
-        val out = File(tmpDir, "trimmed.flac")
+    fun `trim produces a sample-accurate wav cut whose duration matches window size`() = runBlocking {
+        val out = File(tmpDir, "trimmed.${MediaTrimmer.OUTPUT_EXTENSION}")
         val ok = MediaTrimmer.trim(sourceMp3, 1000, 3500, out)
         assertTrue(ok)
         assertTrue(out.exists() && out.length() > 0)
         val dur = MediaTrimmer.probeDurationMs(out)
         assertNotNull(dur)
-        // Target 2500ms. FLAC + output-side -ss/-t 는 sample-accurate (≤ 1 sample @ source rate).
+        // Target 2500ms. PCM WAV + output-side -ss/-t 는 sample-accurate (≤ 1 sample @ source rate).
         // 다만 source 가 MP3 라 입력 측 디코드에서 LAME encoder delay (~26ms) 가 흡수되며 정수
-        // ms 환산 반올림이 약간 더해질 수 있어 ±50ms 정도로 잡는다 — 기존 ±500ms slack 대비
-        // ~10x 개선.
+        // ms 환산 반올림이 약간 더해질 수 있어 ±50ms 정도로 잡는다.
         assertTrue(dur!! in 2450..2550, "expected ~2500ms, got $dur")
     }
 
     @Test
     fun `trim rejects non-positive window`(): Unit = runBlocking {
-        val out = File(tmpDir, "invalid.flac")
+        val out = File(tmpDir, "invalid.${MediaTrimmer.OUTPUT_EXTENSION}")
         assertFailsWith<IllegalArgumentException> {
             MediaTrimmer.trim(sourceMp3, 3000, 1000, out)
         }

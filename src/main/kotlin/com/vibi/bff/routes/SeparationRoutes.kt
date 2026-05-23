@@ -385,7 +385,7 @@ internal fun buildSeparationDedupKey(spec: SeparationSpec, userId: UUID?): Strin
  */
 /**
  * maybeTrim 결과 — file 은 다운스트림 파이프라인 입력, audioPreExtracted 는
- * MediaTrimmer 가 FLAC 으로 audio 추출 했는지 여부. SeparationService.runPipeline 이
+ * MediaTrimmer 가 PCM WAV 로 audio 추출 했는지 여부. SeparationService.runPipeline 이
  * 이 flag 로 MP3 추출 단계 skip 결정. reference equality 가 아닌 명시 Boolean 으로
  * 캡슐화.
  */
@@ -422,8 +422,8 @@ internal suspend fun maybeTrim(
         )
     } else rawEnd
 
-    // MediaTrimmer.trim 출력은 sample-accurate FLAC (lossless, audio-only). 다운스트림은
-    // audioPreExtracted=true 로 별도 MP3 추출 단계 skip.
+    // MediaTrimmer.trim 출력은 sample-accurate PCM WAV (lossless, audio-only, Perso 호환).
+    // 다운스트림은 audioPreExtracted=true 로 별도 MP3 추출 단계 skip.
     val trimmed = File(file.parentFile, "${file.nameWithoutExtension}.trimmed.${MediaTrimmer.OUTPUT_EXTENSION}")
     val ok = MediaTrimmer.trim(file, start, end, trimmed)
     if (!ok) {
