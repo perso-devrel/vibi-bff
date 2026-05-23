@@ -46,6 +46,7 @@ set -a; source "$ENV_FILE"; set +a
 : "${R2_ACCOUNT_ID:?R2_ACCOUNT_ID missing in .env (Cloudflare dashboard URL 의 32자 hex)}"
 : "${R2_ACCESS_KEY_ID:?R2_ACCESS_KEY_ID missing in .env (R2 API token)}"
 : "${R2_SECRET_ACCESS_KEY:?R2_SECRET_ACCESS_KEY missing in .env (R2 API token)}"
+: "${ADMIN_SLUG:?ADMIN_SLUG missing in .env (운영자 admin SPA prefix — blank 이면 마운트 안 됨)}"
 : "${CORS_ALLOWED_ORIGINS:=}"  # optional — 없으면 빈 값
 # Vertex AI 가 활성화된 프로젝트가 Cloud Run 배포 프로젝트와 다를 수 있어 (cross-project) 별도 변수.
 # .env 의 GEMINI_PROJECT_ID 가 있으면 그 값, 없으면 PROJECT_ID fallback.
@@ -102,6 +103,19 @@ create_or_update_secret DB_PASSWORD               "$DB_PASSWORD"
 create_or_update_secret R2_ACCESS_KEY_ID          "$R2_ACCESS_KEY_ID"
 create_or_update_secret R2_SECRET_ACCESS_KEY      "$R2_SECRET_ACCESS_KEY"
 
+# admin-ui (Vite) 빌드 산출물은 .gitignore 됨 — deploy 시점에 항상 fresh build.
+# 빠뜨리면 ADMIN_SLUG 가 박혀도 classpath:/admin/index.html 부재로 마운트 skip + 부팅 로그 WARN.
+echo "▶ Building admin-ui (vite)…"
+(
+  cd "$(dirname "$0")/../admin-ui"
+  if [[ -f package-lock.json ]]; then
+    npm ci --silent
+  else
+    npm install --silent
+  fi
+  npm run build
+)
+
 echo "▶ Deploying to Cloud Run (first build can take ~5min)…"
 gcloud run deploy "$SERVICE_NAME" \
   --source "$(dirname "$0")/.." \
@@ -114,7 +128,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --min-instances 0 --max-instances 2 \
   --session-affinity \
   --allow-unauthenticated \
-  --set-env-vars="^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${REGION}@PERSO_BASE_URL=https://api.perso.ai@PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai@STORAGE_PATH=/tmp/storage@GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS}@APPLE_OAUTH_CLIENT_IDS=${APPLE_OAUTH_CLIENT_IDS}@CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}@R2_BUCKET=${R2_BUCKET}@R2_ACCOUNT_ID=${R2_ACCOUNT_ID}@SIGNED_URL_TTL_SEC=${SIGNED_URL_TTL_SEC}" \
+  --set-env-vars="^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${REGION}@PERSO_BASE_URL=https://api.perso.ai@PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai@STORAGE_PATH=/tmp/storage@GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS}@APPLE_OAUTH_CLIENT_IDS=${APPLE_OAUTH_CLIENT_IDS}@CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}@R2_BUCKET=${R2_BUCKET}@R2_ACCOUNT_ID=${R2_ACCOUNT_ID}@SIGNED_URL_TTL_SEC=${SIGNED_URL_TTL_SEC}@ADMIN_SLUG=${ADMIN_SLUG}" \
   --set-secrets="PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest,DATABASE_URL=DATABASE_URL:latest,DB_USER=DB_USER:latest,DB_PASSWORD=DB_PASSWORD:latest,R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest"
 
 URL=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)')
