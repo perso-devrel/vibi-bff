@@ -6,14 +6,157 @@ data class AppConfig(
     val storage: StorageConfig,
     val baseUrl: String,
     val perso: PersoConfig,
-    val gemini: GeminiConfig,
     val separation: SeparationConfig,
     val auth: AuthConfig,
+    val db: DbConfig,
+    val admin: AdminConfig,
+    val iap: IapConfig,
 )
+
+/**
+ * IAP receipt 검증 설정. Apple / Google 각각 nullable — 미설정 (모든 자격증명 blank) 이면
+ * 해당 platform 의 `POST /credits/purchase` 요청은 [com.vibi.bff.routes.creditRoutes] 에서
+ * `iap_unconfigured` 400 으로 명시 거부된다. dev 빌드도 stub 통과시키지 않는다 — 출시 코드와
+ * 동일 경로를 타게 해 "stub 으로 통과 → 잔액 가산" 보안 구멍 차단.
+ *
+ * - [apple] — App Store Server API 자격증명. 셋 중 하나라도 blank 면 통째 null.
+ * - [google] — Android Publisher API service account JSON. blank 면 null.
+ */
+data class IapConfig(
+    val apple: AppleIapConfig?,
+    val google: GoogleIapConfig?,
+)
+
+/**
+ * Apple App Store Server API (`/inApps/v1/transactions/{transactionId}`) 호출용. ES256 JWT
+ * 로 인증 ([com.vibi.bff.service.iap.AppleReceiptVerifier]). 본 config 가 null 이면 Apple
+ * 영수증 검증 자체가 비활성 — 라우트가 명시적으로 400 거부.
+ *
+ * - [issuerId] — App Store Connect → Users and Access → Keys 페이지 상단 Issuer ID (UUID).
+ * - [keyId] — 발급한 In-App Purchase 키의 Key ID (10자 alphanumeric).
+ * - [privateKeyPem] — `.p8` 파일 본문. env var 로 주입할 때 줄바꿈은 `\n` literal 로 박은 뒤
+ *   본 클래스가 실제 newline 으로 복원. PEM header/footer 포함.
+ * - [bundleId] — iOS 앱 bundle id (e.g. `com.vibi.ios`). 검증 시 응답 payload 의 bundleId 가
+ *   이 값과 일치해야 통과.
+ * - [environment] — `production` (앱스토어 정식) 또는 `sandbox` (TestFlight / sandbox tester).
+ *   환경별로 host 가 갈리므로 명시 필요. 기본 `production`.
+ */
+data class AppleIapConfig(
+    val issuerId: String,
+    val keyId: String,
+    val privateKeyPem: String,
+    val bundleId: String,
+    val environment: String,
+) {
+    init {
+        require(issuerId.isNotBlank()) { "IAP_APPLE_ISSUER_ID must not be blank" }
+        require(keyId.isNotBlank()) { "IAP_APPLE_KEY_ID must not be blank" }
+        require(privateKeyPem.contains("BEGIN PRIVATE KEY")) {
+            "IAP_APPLE_PRIVATE_KEY must contain PEM '-----BEGIN PRIVATE KEY-----' header"
+        }
+        require(bundleId.isNotBlank()) { "IAP_APPLE_BUNDLE_ID must not be blank" }
+        require(environment in setOf("production", "sandbox")) {
+            "IAP_APPLE_ENV must be 'production' or 'sandbox' (got '$environment')"
+        }
+    }
+
+    /** Apple 의 host 결정. App Store Server API 는 prod/sandbox 가 다른 호스트. */
+    val apiHost: String get() = when (environment) {
+        "sandbox" -> "https://api.storekit-sandbox.itunes.apple.com"
+        else -> "https://api.storekit.itunes.apple.com"
+    }
+}
+
+/**
+ * Google Android Publisher API 의 `purchases.products.get` 호출용. Service account JSON 으로
+ * OAuth2 access token 발급 → `androidpublisher` scope 로 호출
+ * ([com.vibi.bff.service.iap.GoogleReceiptVerifier]).
+ *
+ * - [packageName] — 안드로이드 앱 패키지명 (e.g. `com.vibi.android`).
+ * - [serviceAccountJson] — Google Cloud Console 에서 다운로드한 service account JSON **본문**.
+ *   Play Console 의 "재무 데이터 보기 + 주문 및 구독 관리" 권한 부여 필요. env var 로 본문을
+ *   직접 주입하거나 파일 경로 운영도 고려 가능 — 본 v1 은 본문만 받음.
+ */
+data class GoogleIapConfig(
+    val packageName: String,
+    val serviceAccountJson: String,
+) {
+    init {
+        require(packageName.isNotBlank()) { "IAP_GOOGLE_PACKAGE_NAME must not be blank" }
+        require(serviceAccountJson.contains("\"client_email\"")) {
+            "IAP_GOOGLE_SERVICE_ACCOUNT_JSON must look like a service account JSON " +
+                "(missing 'client_email' field)"
+        }
+    }
+}
+
+/**
+ * 운영자 admin SPA 마운트 경로 + 빌드 산출물 경로.
+ *
+ * - [slug] — 추측 불가능한 prefix (env ADMIN_SLUG). blank 면 admin UI 자체를 마운트 안 함
+ *   (= staticResources 호출 자체 skip). 운영자만 알아야 하는 값이라 코드 상수 0.
+ * - [resourcePath] — classpath 안 SPA 빌드 산출물 디렉터리. Vite build outDir 와 1:1
+ *   (`src/main/resources/admin/`). 별도 path 로 바꿀 일 거의 없음.
+ */
+data class AdminConfig(
+    val slug: String,
+    val resourcePath: String = "admin",
+) {
+    init {
+        if (slug.isNotBlank()) {
+            require(slug.matches(Regex("^[a-zA-Z0-9_-]+$"))) {
+                "ADMIN_SLUG must be alphanumeric / dash / underscore only (got '$slug')"
+            }
+            require(slug.length in 6..64) {
+                "ADMIN_SLUG length must be 6..64 (got ${slug.length})"
+            }
+        }
+    }
+}
 
 data class StorageConfig(
     val basePath: String,
-)
+    /**
+     * Cloudflare R2 bucket — 설정 시 download 엔드포인트가 산출물을 R2 에 업로드 후
+     * SigV4 presigned URL 로 302 redirect. blank 면 respondFile streaming 으로 fallback
+     * (로컬 dev / R2 미사용 환경). R2 egress 무료라 Cloud Run egress 비용 0.
+     */
+    val r2Bucket: String,
+    /** R2 credentials. r2Bucket blank 면 null — 백엔드 미사용. */
+    val r2: R2Credentials?,
+    /**
+     * Presigned URL TTL. 60..86400 범위. 모바일이 status 응답 받자마자 다운로드한다는 가정.
+     */
+    val signedUrlTtlSec: Long,
+) {
+    init {
+        if (r2Bucket.isNotBlank()) {
+            requireNotNull(r2) { "R2 credentials required when R2_BUCKET set" }
+            require(signedUrlTtlSec in 60..86_400) {
+                "SIGNED_URL_TTL_SEC must be in 60..86400 (got $signedUrlTtlSec)"
+            }
+        }
+    }
+}
+
+/**
+ * R2 backend 가 활성일 때만 의미 있는 자격증명 묶음. StorageConfig 의 R2-specific 필드를
+ * 분리해 backend 비활성 경로 (`r2 == null`) 와 단일 if 으로 분기 가능.
+ */
+data class R2Credentials(
+    /** Cloudflare 계정 ID (dashboard URL 의 32자 hex). endpoint host 결정. */
+    val accountId: String,
+    /** R2 API token access key (Object Read & Write 권한). */
+    val accessKeyId: String,
+    /** R2 API token secret. */
+    val secretAccessKey: String,
+) {
+    init {
+        require(accountId.isNotBlank()) { "R2_ACCOUNT_ID must not be blank" }
+        require(accessKeyId.isNotBlank()) { "R2_ACCESS_KEY_ID must not be blank" }
+        require(secretAccessKey.isNotBlank()) { "R2_SECRET_ACCESS_KEY must not be blank" }
+    }
+}
 
 data class PersoConfig(
     val apiKey: String,
@@ -57,52 +200,58 @@ data class PersoConfig(
 }
 
 /**
- * Vertex AI configuration.
- *
- * Auth 우선순위 ([com.vibi.bff.service.GeminiClient.loadOrRefreshCredentials] 참고):
- * 1. [credentialsPath] 가 비어있지 않으면 그 파일을 service account JSON 으로 사용 (로컬 dev).
- * 2. 비어있으면 Application Default Credentials — Cloud Run / GCE 의 attached service
- *    account, 또는 로컬의 `gcloud auth application-default login` 캐시 / env
- *    `GOOGLE_APPLICATION_CREDENTIALS` 자동 탐색.
- *
- * Validation 은 [GeminiClient] 의 첫 호출 시점까지 지연돼, 자막 번역 비활성 dev 환경에서도
- * 서버 부팅이 가능.
- */
-data class GeminiConfig(
-    val projectId: String,
-    val location: String,
-    val credentialsPath: String,
-    val model: String,
-) {
-    init {
-        require(model.isNotBlank()) { "GEMINI_MODEL must not be blank" }
-        require(location.isNotBlank()) { "GEMINI_LOCATION must not be blank" }
-    }
-}
-
-/**
- * Google OAuth + 자체 JWT 발급 설정.
+ * Google OAuth + Apple Sign In + 자체 JWT 발급 설정.
  *
  * - [googleClientIds] — `tokeninfo` 응답의 `aud` 가 이 중 하나와 일치해야 통과.
  *   콤마 분리 문자열로 env 주입 (iOS / Android / Web client id 모두 허용).
+ * - [appleClientIds] — Apple JWKS 검증된 ID Token 의 `aud` 가 이 중 하나와 일치해야 통과.
+ *   보통 iOS bundle id (`com.vibi.ios`). blank list 면 Apple 로그인 비활성 — 라우트
+ *   진입 시 명시적으로 거부.
  * - [jwtSecret] — HMAC-SHA256 서명 키. 32+ chars (`openssl rand -hex 32`).
  * - [jwtExpirySeconds] — 발급된 access token 의 만료까지 초.
  */
 data class AuthConfig(
     val googleClientIds: List<String>,
+    val appleClientIds: List<String>,
     val jwtSecret: String,
     val jwtExpirySeconds: Long,
 ) {
     init {
         require(googleClientIds.isNotEmpty()) { "GOOGLE_OAUTH_CLIENT_IDS must not be empty (comma-separated)" }
         require(googleClientIds.all { it.isNotBlank() }) { "GOOGLE_OAUTH_CLIENT_IDS contains blank entry" }
+        require(appleClientIds.all { it.isNotBlank() }) { "APPLE_OAUTH_CLIENT_IDS contains blank entry" }
         require(jwtSecret.length >= 32) {
             "AUTH_JWT_SECRET must be at least 32 chars (got ${jwtSecret.length}). " +
                 "Generate with: openssl rand -hex 32"
         }
-        require(jwtExpirySeconds in 60..(90L * 24 * 3600)) {
-            "AUTH_JWT_EXPIRY_SECONDS must be in 60..7776000 (got $jwtExpirySeconds)"
+        // 상한선 30일 — refresh token 미구현 상태에서 access token 만으로 90일 살리면
+        // 탈취 시 노출 창이 과대. 운영 default 는 application.conf 에서 7일 (604800).
+        // refresh token 도입 시 access token 은 1h 이하로 더 짧게.
+        require(jwtExpirySeconds in 60..(30L * 24 * 3600)) {
+            "AUTH_JWT_EXPIRY_SECONDS must be in 60..2592000 (got $jwtExpirySeconds)"
         }
+    }
+}
+
+/**
+ * User 영속화 + IAP 도입 대비용 Postgres 설정. Cloud Run / Cloudflare Containers 어디서든
+ * Neon (managed Postgres) JDBC URL 로 동일 동작 — vendor 종속성 없음.
+ *
+ * - [jdbcUrl] — `jdbc:postgresql://<host>/<db>?sslmode=require` 형식. blank 면 부팅 시 fail.
+ * - [maxPoolSize] — Neon free tier 100 connection 한도. 인스턴스당 5 가 default.
+ */
+data class DbConfig(
+    val jdbcUrl: String,
+    val user: String,
+    val password: String,
+    val maxPoolSize: Int,
+) {
+    init {
+        require(jdbcUrl.isNotBlank()) { "DATABASE_URL must not be blank" }
+        require(jdbcUrl.startsWith("jdbc:postgresql://") || jdbcUrl.startsWith("jdbc:h2:")) {
+            "DATABASE_URL must be a Postgres or H2 JDBC URL (got: ${jdbcUrl.take(20)}...)"
+        }
+        require(maxPoolSize in 1..50) { "DB_MAX_POOL must be in 1..50 (got $maxPoolSize)" }
     }
 }
 
@@ -120,8 +269,8 @@ data class SeparationConfig(
         }
         require(abandonTtlMs >= 60_000) { "SEPARATION_ABANDON_TTL_MS must be >= 60000 (got $abandonTtlMs)" }
         require(mixTtlMs >= 60_000) { "SEPARATION_MIX_TTL_MS must be >= 60000 (got $mixTtlMs)" }
-        require(urlTtlSec in 60..86_400) { "SEPARATION_URL_TTL_SEC must be in 60..86400 (got $urlTtlSec)" }
-        require(mixUrlTtlSec in 60..86_400) { "SEPARATION_MIX_URL_TTL_SEC must be in 60..86400 (got $mixUrlTtlSec)" }
+        require(urlTtlSec in 60..604_800) { "SEPARATION_URL_TTL_SEC must be in 60..604800 (got $urlTtlSec)" }
+        require(mixUrlTtlSec in 60..604_800) { "SEPARATION_MIX_URL_TTL_SEC must be in 60..604800 (got $mixUrlTtlSec)" }
     }
 }
 
@@ -129,14 +278,26 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val vibi = config.config("vibi")
     val storage = vibi.config("storage")
     val perso = vibi.config("perso")
-    val gemini = vibi.config("gemini")
     val separation = vibi.config("separation")
     val auth = vibi.config("auth")
+    val db = vibi.config("db")
+    val admin = vibi.config("admin")
+    val iap = vibi.config("iap")
 
     return AppConfig(
-        storage = StorageConfig(
-            basePath = storage.property("basePath").getString(),
-        ),
+        storage = run {
+            val r2Bucket = storage.propertyOrNull("r2Bucket")?.getString()?.trim().orEmpty()
+            StorageConfig(
+                basePath = storage.property("basePath").getString(),
+                r2Bucket = r2Bucket,
+                r2 = if (r2Bucket.isNotBlank()) R2Credentials(
+                    accountId = storage.propertyOrNull("r2AccountId")?.getString()?.trim().orEmpty(),
+                    accessKeyId = storage.propertyOrNull("r2AccessKeyId")?.getString()?.trim().orEmpty(),
+                    secretAccessKey = storage.propertyOrNull("r2SecretAccessKey")?.getString()?.trim().orEmpty(),
+                ) else null,
+                signedUrlTtlSec = storage.propertyOrNull("signedUrlTtlSec")?.getString()?.toLong() ?: 900L,
+            )
+        },
         baseUrl = vibi.property("baseUrl").getString(),
         perso = PersoConfig(
             apiKey = perso.property("apiKey").getString(),
@@ -152,12 +313,6 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
                 ?.toSet()
                 ?: setOf("portal-media.perso.ai"),
         ),
-        gemini = GeminiConfig(
-            projectId = gemini.property("projectId").getString(),
-            location = gemini.property("location").getString(),
-            credentialsPath = gemini.property("credentialsPath").getString(),
-            model = gemini.property("model").getString(),
-        ),
         separation = SeparationConfig(
             abandonTtlMs = separation.property("abandonTtlMs").getString().toLong(),
             mixTtlMs = separation.property("mixTtlMs").getString().toLong(),
@@ -170,8 +325,54 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
                 .split(',')
                 .map { it.trim() }
                 .filter { it.isNotEmpty() },
+            appleClientIds = auth.propertyOrNull("appleClientIds")?.getString().orEmpty()
+                .split(',')
+                .map { it.trim() }
+                .filter { it.isNotEmpty() },
             jwtSecret = auth.property("jwtSecret").getString(),
             jwtExpirySeconds = auth.property("jwtExpirySeconds").getString().toLong(),
         ),
+        db = DbConfig(
+            jdbcUrl = db.property("jdbcUrl").getString(),
+            user = db.property("user").getString(),
+            password = db.property("password").getString(),
+            maxPoolSize = db.property("maxPoolSize").getString().toInt(),
+        ),
+        admin = AdminConfig(
+            slug = admin.propertyOrNull("slug")?.getString().orEmpty().trim(),
+        ),
+        iap = run {
+            val appleConfig = iap.config("apple")
+            val googleConfig = iap.config("google")
+            // Apple 자격증명. 셋 중 하나라도 blank 면 전체 비활성. env var 의 `\n` literal 을
+            // 실제 newline 으로 복원 — `.p8` PEM 줄바꿈을 한 줄 env 로 주입할 수 있게.
+            val appleIssuer = appleConfig.propertyOrNull("issuerId")?.getString()?.trim().orEmpty()
+            val appleKeyId = appleConfig.propertyOrNull("keyId")?.getString()?.trim().orEmpty()
+            val applePem = appleConfig.propertyOrNull("privateKeyPem")?.getString().orEmpty()
+                .replace("\\n", "\n")
+            val appleBundleId = appleConfig.propertyOrNull("bundleId")?.getString()?.trim().orEmpty()
+            val appleEnv = appleConfig.propertyOrNull("environment")?.getString()?.trim()?.lowercase()
+                ?.takeIf { it.isNotBlank() } ?: "production"
+            val apple = if (
+                appleIssuer.isNotBlank() && appleKeyId.isNotBlank() &&
+                applePem.isNotBlank() && appleBundleId.isNotBlank()
+            ) {
+                AppleIapConfig(
+                    issuerId = appleIssuer,
+                    keyId = appleKeyId,
+                    privateKeyPem = applePem,
+                    bundleId = appleBundleId,
+                    environment = appleEnv,
+                )
+            } else null
+
+            val googlePackage = googleConfig.propertyOrNull("packageName")?.getString()?.trim().orEmpty()
+            val googleSa = googleConfig.propertyOrNull("serviceAccountJson")?.getString().orEmpty()
+            val google = if (googlePackage.isNotBlank() && googleSa.isNotBlank()) {
+                GoogleIapConfig(packageName = googlePackage, serviceAccountJson = googleSa)
+            } else null
+
+            IapConfig(apple = apple, google = google)
+        },
     )
 }

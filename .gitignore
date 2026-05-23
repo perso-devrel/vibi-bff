@@ -8,3 +8,9 @@ credentials/
 .kotlin/
 bin/
 .DS_Store
+
+# admin-ui Vite 빌드 산출물 — 운영자 admin SPA. node_modules 와 함께 추적 안 함.
+src/main/resources/admin/
+admin-ui/node_modules/
+admin-ui/dist/
+admin-ui/*.tsbuildinfo

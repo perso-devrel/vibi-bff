@@ -2,6 +2,8 @@ package com.vibi.bff.service
 
 import com.vibi.bff.FAILED_JOB_TTL_MS
 import com.vibi.bff.config.SeparationConfig
+import com.vibi.bff.model.PersoDownloadInfo
+import com.vibi.bff.model.PersoProjectInfo
 import com.vibi.bff.model.SeparationSpec
 import com.vibi.bff.plugins.PersoApiException
 import kotlinx.coroutines.CoroutineScope
@@ -25,6 +27,9 @@ import java.util.concurrent.TimeUnit
 // COMPLETED mix triggers dispose(jobId); FAILED is kept briefly so clients
 // can read the error before the cleanup task reaps it.
 
+/** speaker stem id = "$SPEAKER_STEM_PREFIX$idx" (idx 0-based). 모바일 Stem.SPEAKER_PREFIX 와 일치. */
+internal const val SPEAKER_STEM_PREFIX = "speaker_"
+
 data class SeparationJob(
     val jobId: String,
     @Volatile var status: String = "PENDING",
@@ -35,6 +40,17 @@ data class SeparationJob(
     @Volatile var stems: List<LocalStem> = emptyList(),
     @Volatile var consumedByMixJobId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
+    /** SeparationService.dedupIndex 와 1:1 — 버튼 연타로 동일 (source+spec) 가
+     * 다시 들어와도 같은 jobId 를 돌려주기 위한 키. null 이면 dedup 대상 외
+     * (legacy upload path). dispose() 가 이 키로 index 정리. */
+    val dedupKey: String? = null,
+    /** READY 시 ffprobe 로 잰 stem FLAC 의 실측 길이 (ms). 클라이언트가 timeline 막대 길이를
+     * 사용자 선택값 대신 이 값으로 보정해 stem 파일과 1:1 매칭. null = 측정 실패 또는 미-READY. */
+    @Volatile var actualDurationMs: Long? = null,
+    /** submit 의 principal.userId 가 그대로 보존. null 이면 미인증 잡 (테스트 / jwtSecret
+     * 미주입 분기). 라우트가 status/mix 호출 시 caller principal 과 매칭 — mismatch 면
+     * 다른 사용자가 남의 잡을 mix command 로 소비/dispose 시키는 IDOR 차단. */
+    val ownerUserId: UUID? = null,
 )
 
 data class LocalStem(
@@ -50,9 +66,18 @@ class SeparationService(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     private val pollIntervalMs: Long,
     private val maxPollMinutes: Int,
+    /** admin 대시보드용 Postgres 영속화. null 이면 분석 write skip (테스트). */
+    private val analytics: JobAnalyticsRepository? = null,
+    /** Perso API 호출 instrumentation. null 이면 외부 호출 추적 skip. */
+    private val externalCalls: ExternalApiCallsRepository? = null,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
+    /** dedupKey → jobId. submit 의 atomic check-and-claim 으로 같은 키 중복 submit
+     * 차단 (버튼 연타 방어). 키는 SeparationRoutes.buildSeparationDedupKey 가 계산.
+     * dispose() 가 SeparationJob.dedupKey 로 entry 정리. FAILED 잡은 dedup 대상
+     * 아님 (재시도 허용). */
+    private val dedupIndex = ConcurrentHashMap<String, String>()
     private val cleanup = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "separation-cleanup").apply { isDaemon = true }
     }
@@ -69,18 +94,91 @@ class SeparationService(
 
     fun getJob(jobId: String): SeparationJob? = jobs[jobId]
 
-    fun submit(sourceFile: File, spec: SeparationSpec): String {
+    /**
+     * 주어진 [dedupKey] 로 등록된 jobId 중 still-active 한 것을 반환. active 는
+     * READY 직전까지의 진행 상태 + READY-but-not-yet-consumed-by-mix. FAILED 나
+     * 이미 mix 에 소비된 READY 잡은 active 가 아니므로 null 반환 → caller 는 새
+     * 잡을 만들면 됨. SeparationRoutes 의 pre-check 가 disk 낭비 회피 용도로 사용.
+     */
+    fun findActiveJob(dedupKey: String): String? {
+        val jobId = dedupIndex[dedupKey] ?: return null
+        val job = jobs[jobId] ?: return null
+        val active = job.status != "FAILED" &&
+            !(job.status == "READY" && job.consumedByMixJobId != null)
+        return if (active) jobId else null
+    }
+
+    /**
+     * [dedupKey] 가 non-null 이면 atomic check-and-claim — 같은 키의 active 잡이
+     * 있으면 [sourceFile] 을 삭제하고 기존 jobId 를 반환한다. dispose() 가 같은
+     * 키 entry 를 정리하므로 disposed 잡의 키는 자유롭게 재사용된다.
+     *
+     * [userId] / [sourceDurationMs] / [renderJobId] 는 admin 대시보드 분석 row 용.
+     * userId == null 이면 분석 write skip (테스트 등). renderJobId 는 spec.editedRenderJobId
+     * 경유 시 RenderJobsTable 의 PK 와 동일 텍스트, legacy 업로드 경로면 null.
+     */
+    fun submit(
+        sourceFile: File,
+        spec: SeparationSpec,
+        audioPreExtracted: Boolean,
+        dedupKey: String? = null,
+        userId: UUID? = null,
+        sourceDurationMs: Long = 0L,
+        renderJobId: String? = null,
+    ): String {
+        if (dedupKey != null) {
+            // synchronized(dedupIndex) 로 (check, claim) 을 원자화 — 두 동시 호출이
+            // 동일 키로 들어와도 한 쪽만 새 잡 생성, 다른 쪽은 기존 jobId 반환.
+            // findActiveJob 자체는 비-원자이지만 critical section 안에서 호출하므로 OK.
+            synchronized(dedupIndex) {
+                findActiveJob(dedupKey)?.let { existing ->
+                    sourceFile.delete()
+                    log.info("Separation dedup hit: key={} → existing jobId={}", dedupKey, existing)
+                    return existing
+                }
+                val jobId = createAndLaunch(sourceFile, spec, audioPreExtracted, dedupKey, userId, sourceDurationMs, renderJobId)
+                dedupIndex[dedupKey] = jobId
+                return jobId
+            }
+        }
+        return createAndLaunch(sourceFile, spec, audioPreExtracted, dedupKey = null, userId, sourceDurationMs, renderJobId)
+    }
+
+    private fun createAndLaunch(
+        sourceFile: File,
+        spec: SeparationSpec,
+        audioPreExtracted: Boolean,
+        dedupKey: String?,
+        userId: UUID? = null,
+        sourceDurationMs: Long = 0L,
+        renderJobId: String? = null,
+    ): String {
         val jobId = "sep-${UUID.randomUUID()}"
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
-        val job = SeparationJob(jobId = jobId, outputDir = outputDir)
+        val job = SeparationJob(jobId = jobId, outputDir = outputDir, dedupKey = dedupKey, ownerUserId = userId)
         jobs[jobId] = job
 
         scope.launch {
+            if (userId != null) {
+                analytics?.insertSeparationJob(jobId, userId, renderJobId, sourceDurationMs, "PROCESSING")
+            }
             try {
-                runPipeline(job, sourceFile, spec)
+                externalCalls.withExternalCall("perso", "audio-separation") {
+                    runPipeline(job, sourceFile, spec, audioPreExtracted)
+                }
+                if (userId != null && job.status == "READY") {
+                    analytics?.updateSeparationJobStatus(jobId, "READY")
+                }
             } catch (e: Exception) {
                 job.status = "FAILED"
                 job.error = e.message
+                // FAILED 상태에선 같은 키 재submit 이 새 잡을 만들어야 하므로 즉시
+                // dedup entry 정리 (cleanupAbandoned 의 FAILED_JOB_TTL 까지 기다리면
+                // 그동안 mobile 이 재시도해도 실패한 잡 ID 만 받게 됨).
+                dedupKey?.let { dedupIndex.remove(it, jobId) }
+                if (userId != null) {
+                    analytics?.updateSeparationJobStatus(jobId, "FAILED")
+                }
                 // Leave sourceFile on disk — caller can retry; cleanupAbandoned
                 // reaps it via dispose() once FAILED_JOB_TTL_MS passes.
                 log.error("Separation pipeline failed: jobId={}", jobId, e)
@@ -110,32 +208,61 @@ class SeparationService(
 
     fun dispose(jobId: String) {
         val job = jobs.remove(jobId) ?: return
+        // remove(key, expectedValue) 로 stale entry (이미 다른 잡이 같은 키로 교체된 경우)
+        // 는 건드리지 않음. FAILED 경로에서도 동일 정리가 일어나지만 멱등 안전.
+        job.dedupKey?.let { dedupIndex.remove(it, jobId) }
         job.outputDir.deleteRecursively()
         log.info("Disposed separation job: {}", jobId)
     }
 
     // ── Pipeline ─────────────────────────────────────────────────────────────
 
-    private suspend fun runPipeline(job: SeparationJob, sourceFile: File, spec: SeparationSpec) {
+    private suspend fun runPipeline(
+        job: SeparationJob,
+        sourceFile: File,
+        spec: SeparationSpec,
+        audioPreExtracted: Boolean,
+    ) {
         val isVideo = spec.mediaType == "VIDEO"
 
-        // 영상 → mp3 추출 후 audio project 로 업로드 — audio-separation 결과는 audio 트랙만으로
-        // 동일하게 나오므로 video 트랙 통째로 보내는 건 낭비.
+        // Perso 는 audio-only 업로드만 받음. MediaTrimmer.trim 을 거친 입력은 이미 sample-accurate
+        // FLAC 이라 그대로 보내고, no-trim 영상 fallback 만 MP3 추출이 필요.
+        // audioPreExtracted 는 caller 가 명시한 신호 (라우트의 maybeTrim 결과 추론).
+        // 이전엔 sourceFile.extension 으로 sniff 했으나, 멀티파트 originalFileName 이
+        // attacker-controlled 라 video 를 ".flac" 으로 박아 MP3 추출 단계를 우회 가능했음 — 명시 flag 로 단절.
         job.status = "PROCESSING"
-        val uploadFile = if (isVideo) {
-            job.progressReason = "Extracting audio"
-            val mp3 = File(job.outputDir, "audio.mp3")
-            extractAudioForUpload(sourceFile, mp3)
-            sourceFile.delete()
-            mp3
-        } else {
-            sourceFile
+        val uploadFile = when {
+            audioPreExtracted -> sourceFile
+            isVideo -> {
+                job.progressReason = "Extracting audio"
+                val mp3 = File(job.outputDir, "audio.mp3")
+                extractAudioForUpload(sourceFile, mp3)
+                sourceFile.delete()
+                mp3
+            }
+            else -> sourceFile
         }
 
         job.status = "UPLOADING_UPSTREAM"
         job.progressReason = "Uploading"
-        val registration = persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
-        uploadFile.delete()
+        // uploadFile cleanup 정책:
+        //  - audioPreExtracted=true → uploadFile = editedSourceDir/*.trimmed.flac (caller-owned
+        //    FLAC). 실패해도 무조건 정리 — dispose() 는 outputDir 만 reap 하므로 finally 필요.
+        //    원본 mp4 는 maybeTrim 이 이미 삭제했으므로 retry 도 불가, 누수 방지가 옳음.
+        //  - 그 외 (legacy AUDIO upload, video→MP3 extract) → 성공 시에만 delete.
+        //    실패 시 sourceFile (legacy: caller-owned 업로드 / video: outputDir 안 mp3) 을
+        //    보존해 caller 가 동일 잡으로 retry 가능 ("Leave sourceFile on disk — caller can retry").
+        val registration = if (audioPreExtracted) {
+            try {
+                persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
+            } finally {
+                uploadFile.delete()
+            }
+        } else {
+            val r = persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
+            uploadFile.delete()
+            r
+        }
 
         // Perso 전용 audio-separation 프로젝트 생성. audio-only 업로드라 isVideoProject=false.
         job.status = "SUBMITTED"
@@ -174,7 +301,7 @@ class SeparationService(
         // 아직 끝나지 않은 케이스가 있어 첫 다운로드 시 404 발생. download-info 폴링으로 readiness 확정.
         job.status = "DOWNLOADING"
         job.progressReason = "Waiting for storage upload"
-        waitForDownloadInfoReady(projectSeq)
+        val readyInfo = waitForDownloadInfoReady(projectSeq)
 
         job.progressReason = "Fetching speaker stems"
         val speakerFiles = downloadAndExtractSpeakerCollection(projectSeq, job.outputDir)
@@ -183,34 +310,44 @@ class SeparationService(
         }
 
         job.progressReason = "Fetching background"
-        val backgroundFile = downloadBackgroundStem(projectSeq, job.outputDir)
+        val backgroundFile = downloadBackgroundStem(projectSeq, job.outputDir, readyInfo)
 
+        // Perso 가 내려주는 stem 은 PCM wav (비압축) — egress 비용의 큰 부분. FLAC 으로 transcode
+        // 해 lossless 유지하면서 ~50% 절감. 모바일 (Android MediaPlayer / iOS AVAudioFile) 모두
+        // native 디코드 지원. content-type 은 SeparationRoutes 가 stem.file.extension 으로 자동 매핑.
         val local = mutableListOf<LocalStem>()
         speakerFiles.forEachIndexed { idx, file ->
-            val stemId = "speaker_$idx"
-            val finalFile = File(job.outputDir, "$stemId.${file.extension.ifEmpty { "audio" }}")
-            // renameTo 는 cross-FS / target-exists / Windows file lock 등에서 silently
-            // false 반환 — fallback 으로 copy + delete. 둘 다 실패하면 stem 자체가 없는
-            // 셈이라 skip 하지 않고 explicit throw (downstream amix 에서 NPE 보다 명확).
-            if (!file.renameTo(finalFile)) {
-                file.copyTo(finalFile, overwrite = true)
-                file.delete()
-            }
+            val stemId = "$SPEAKER_STEM_PREFIX$idx"
+            val finalFile = File(job.outputDir, "$stemId.flac")
+            transcodeToFlac(file, finalFile)
+            file.delete()
             local.add(LocalStem(stemId, "화자 ${idx + 1}", finalFile))
             log.info("Speaker stem ready: stemId={} file={} size={}B", stemId, finalFile.name, finalFile.length())
         }
 
         // voice_all = 모든 화자 mix. 화자가 1명이면 speaker_0 와 동일하므로 skip.
         if (local.size >= 2) {
-            val voiceAllFile = File(job.outputDir, "voice_all.mp3")
+            val voiceAllFile = File(job.outputDir, "voice_all.flac")
             ffmpegMixFiles(local.map { it.file }, voiceAllFile)
             local.add(0, LocalStem("voice_all", "모든 화자", voiceAllFile))
         }
 
-        backgroundFile?.let {
-            local.add(LocalStem("background", "배경음", it))
-            log.info("Background stem ready: file={} size={}B", it.name, it.length())
+        backgroundFile?.let { wav ->
+            val flacBg = File(job.outputDir, "background.flac")
+            transcodeToFlac(wav, flacBg)
+            wav.delete()
+            local.add(LocalStem("background", "배경음", flacBg))
+            log.info("Background stem ready: file={} size={}B", flacBg.name, flacBg.length())
         }
+
+        // speaker stem 들은 모두 같은 trim 입력에서 분리돼 동일 길이라 1개만 측정.
+        job.actualDurationMs = runCatching {
+            MediaTrimmer.probeDurationMs(local.first { it.stemId.startsWith(SPEAKER_STEM_PREFIX) }.file)
+        }.getOrNull()
+        log.info(
+            "Stem actual duration probed: jobId={} actualDurationMs={}",
+            job.jobId, job.actualDurationMs,
+        )
 
         job.stems = local
         job.progress = 100
@@ -262,33 +399,28 @@ class SeparationService(
     }
 
     // ── Background (.wav) 다운로드 ──────────────────────────────────────────
-    // 우선 project info endpoint 의 originalBackgroundPath (file 명 OriginalBaseBackground) 시도 —
-    // 진짜 BGM only 라 화자 수 무관하게 분리. 누락 시 originalSubBackground 로 fallback.
-    private suspend fun downloadBackgroundStem(projectSeq: Long, outputDir: File): File? {
+    // 정책 (사용자 피드백): 화자 수와 무관하게 항상 **순수 BGM** 만 노출. originalBackgroundPath
+    // (OriginalBaseBackground) 만 사용 — Perso 가 화자 수 무관하게 분리해 주는 진짜 BGM only.
+    // 과거 1명 화자에서 SubBackground 로 폴백하던 path 는 풀믹스(리액션 포함) 가 섞여 들어와
+    // "순수 배경음" 약속을 깨므로 영구 제거. 진짜 BGM 이 누락된 케이스는 stem 자체를 누락시키는
+    // 쪽이 안전 — 클라이언트 UI 는 background stem 부재를 graceful 하게 처리한다.
+    private suspend fun downloadBackgroundStem(
+        projectSeq: Long,
+        outputDir: File,
+        projectInfo: PersoProjectInfo,
+    ): File? {
+        val baseBgPath = projectInfo.downloadPathInfo?.originalBackgroundPath
+        if (baseBgPath == null) {
+            log.warn("originalBackgroundPath absent — no pure BGM stem emitted (project {})", projectSeq)
+            return null
+        }
         return try {
             val wavFile = File(outputDir, "background.wav")
-            // 1. project info 의 originalBackgroundPath 시도.
-            val info = runCatching { persoClient.getProjectInfo(projectSeq) }.getOrNull()
-            val baseBgPath = info?.downloadPathInfo?.originalBackgroundPath
-            if (baseBgPath != null) {
-                downloadFreshLinkWithRetry(
-                    label = "background base wav (project $projectSeq)",
-                    target = wavFile,
-                ) { baseBgPath }
-                log.info("Downloaded background (Base) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
-                return wavFile
-            }
-            // 2. fallback — getSeparationDownloadLinks 의 originalSubBackground.
-            log.warn("originalBackgroundPath absent; falling back to originalSubBackground (project {})", projectSeq)
             downloadFreshLinkWithRetry(
-                label = "background sub wav (project $projectSeq)",
+                label = "background base wav (project $projectSeq)",
                 target = wavFile,
-            ) {
-                persoClient.getSeparationDownloadLinks(projectSeq, "originalSubBackground")
-                    .audioFile?.originalSubBackgroundDownloadLink
-                    ?: throw PersoApiException(404, "Perso originalSubBackground link absent")
-            }
-            log.info("Downloaded background (Sub) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
+            ) { baseBgPath }
+            log.info("Downloaded background (Base) wav: projectSeq={} size={}B", projectSeq, wavFile.length())
             wavFile
         } catch (e: Exception) {
             log.warn("Failed to download background stem (project {}): {}", projectSeq, e.message)
@@ -299,41 +431,48 @@ class SeparationService(
     /**
      * download-info 의 가용성 플래그가 모두 true 가 될 때까지 폴링 — Perso 가 storage upload 를
      * 끝낸 readiness 신호로 사용. speakers (`hasOriginalSpeakerAudioCollection`) 가 핵심,
-     * background (`hasOriginalSubBackground`) 는 best-effort 라 timeout 까지만 기다리고 누락 허용.
+     * background (`hasOriginalBackground` — pure BGM, OriginalBaseBackground) 는 best-effort.
+     * 과거에는 `hasOriginalSubBackground` 를 기다렸으나, 실제로 fetch 하는 것은 BaseBackground
+     * (`originalBackgroundPath`) 라 flag mismatch — wait 가 일찍 풀려 baseBgPath 가 미생성 상태로
+     * null 회수되는 사고가 1명 화자 케이스에서 자주 관측됐다. 같은 pure BGM flag 를 본다.
      */
     private suspend fun waitForDownloadInfoReady(
         projectSeq: Long,
         intervalMs: Long = 3_000,
         timeoutMs: Long = 60_000,
-    ) {
+    ): PersoProjectInfo {
         val deadline = System.currentTimeMillis() + timeoutMs
         var attempt = 0
         while (true) {
-            val info = persoClient.getDownloadInfo(projectSeq)
+            // getProjectInfo 는 downloadInfo 와 downloadPathInfo 를 한 응답에 묶어 돌려주므로
+            // 마지막 응답을 호출자에게 반환 — downloadBackgroundStem 이 originalBackgroundPath
+            // 를 다시 fetch 하지 않게 한다.
+            val full = persoClient.getProjectInfo(projectSeq)
+            val info = full.downloadInfo ?: PersoDownloadInfo()
             attempt += 1
-            if (info.hasOriginalSpeakerAudioCollection && info.hasOriginalSubBackground) {
-                log.info("download-info ready (speakers + background): projectSeq={} attempts={}", projectSeq, attempt)
-                return
+            if (info.hasOriginalSpeakerAudioCollection && info.hasOriginalBackground) {
+                log.info("download-info ready (speakers + pure BGM): projectSeq={} attempts={}", projectSeq, attempt)
+                return full
             }
             if (System.currentTimeMillis() >= deadline) {
-                // speakers 가 ready 면 진행 — background 만 누락이면 best-effort 로 통과.
+                // speakers 가 ready 면 진행 — pure BGM 만 누락이면 best-effort 로 통과.
                 if (info.hasOriginalSpeakerAudioCollection) {
-                    log.warn("download-info partial ready: projectSeq={} speakers=true background={} (timeout — proceed)",
-                        projectSeq, info.hasOriginalSubBackground)
-                    return
+                    log.warn("download-info partial ready: projectSeq={} speakers=true pureBGM={} (timeout — proceed)",
+                        projectSeq, info.hasOriginalBackground)
+                    return full
                 }
                 throw PersoApiException(500,
                     "Perso storage not ready after ${timeoutMs}ms: speakers=${info.hasOriginalSpeakerAudioCollection}")
             }
-            log.info("download-info not ready: projectSeq={} speakers={} background={} attempt={} — sleeping {}ms",
-                projectSeq, info.hasOriginalSpeakerAudioCollection, info.hasOriginalSubBackground, attempt, intervalMs)
+            log.info("download-info not ready: projectSeq={} speakers={} pureBGM={} attempt={} — sleeping {}ms",
+                projectSeq, info.hasOriginalSpeakerAudioCollection, info.hasOriginalBackground, attempt, intervalMs)
             kotlinx.coroutines.delay(intervalMs)
         }
     }
 
     /**
-     * Perso storage 다운로드 backoff retry — **매 시도마다 getDownloadLinks 를 다시 호출**해 fresh
-     * path 를 받는다. 단순 retry 가 안 되는 이유:
+     * Perso storage 다운로드 backoff retry — **매 시도마다 getSeparationDownloadLinks 를 다시
+     * 호출**해 fresh path 를 받는다. 단순 retry 가 안 되는 이유:
      *   1) Perso 응답 path 의 timestamp 가 호출 시점에 임베드 (`..._OriginalVoiceSpeakers_<ts>.tar`).
      *      매 호출마다 unique path → cache key 도 다름.
      *   2) 첫 GET 의 404 응답이 `Cache-Control: public, max-age=14400` 로 Cloudflare 에 4시간 캐시.
@@ -386,13 +525,38 @@ class SeparationService(
         val cmd = mutableListOf("ffmpeg", "-y")
         inputs.forEach { cmd += listOf("-i", it.absolutePath) }
         val labels = inputs.indices.joinToString("") { "[$it:a]" }
+        // normalize=0: voice_all 은 화자 stem 들을 원본 발화 bus 로 재조립하는 것 →
+        // 원본 = sum(speaker stems) 이므로 평균(default normalize=1) 이 아니라 합산이
+        // 맞음. 평균을 내면 voice_all 자체가 -6dB(2 화자) 이상 작아지고, 그걸 또
+        // StemMixService 가 다시 amix 하면 누적 -12dB ~ 까지 떨어짐.
         cmd += listOf(
             "-filter_complex",
-            "${labels}amix=inputs=${inputs.size}:duration=longest:dropout_transition=0[out]"
+            "${labels}amix=inputs=${inputs.size}:duration=longest:dropout_transition=0:normalize=0[out]"
         )
-        cmd += listOf("-map", "[out]", "-q:a", "4", output.absolutePath)
+        // FLAC lossless — voice_all 은 downstream StemMixService 가 다시 amix 의 입력으로 쓰므로
+        // mp3 같은 lossy 단계가 끼면 음질 손실 누적. compression_level 5 는 ffmpeg default,
+        // encode 시간/크기 균형.
+        cmd += listOf("-map", "[out]", "-c:a", "flac", "-compression_level", "5", output.absolutePath)
         val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
         drainAndAwait(process, "ffmpeg mix files (${inputs.size})")
+    }
+
+    /**
+     * Single-stream FLAC transcode. Perso wav stem 을 FLAC 으로 무손실 압축해 egress 절반.
+     * compression_level 5 (ffmpeg default) — 더 높은 level 은 encode 시간만 늘고 size 차이 미미.
+     */
+    private suspend fun transcodeToFlac(input: File, output: File) {
+        require(input.absolutePath != output.absolutePath) { "transcodeToFlac: input == output" }
+        val cmd = listOf(
+            "ffmpeg", "-y",
+            "-i", input.absolutePath,
+            "-c:a", "flac",
+            "-compression_level", "5",
+            output.absolutePath,
+        )
+        val process = ProcessBuilder(cmd).redirectErrorStream(true).start()
+        drainAndAwait(process, "ffmpeg flac transcode ${input.name}")
+        if (!output.exists()) throw RuntimeException("ffmpeg flac transcode produced no output: ${input.name}")
     }
 
     /**

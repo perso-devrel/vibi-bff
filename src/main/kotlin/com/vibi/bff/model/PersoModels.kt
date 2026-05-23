@@ -14,8 +14,6 @@ data class PersoLanguage(
     val code: String,
     val name: String,
     @SerialName("native_name") val nativeName: String? = null,
-    @SerialName("supports_dubbing") val supportsDubbing: Boolean = true,
-    @SerialName("supports_subtitles") val supportsSubtitles: Boolean = true,
 )
 
 @Serializable
@@ -49,64 +47,13 @@ data class PersoMediaRegistration(
     val durationMs: Long? = null,
 )
 
-// --- STT / Audio-separation submit (전용 endpoint) ---
-// `POST /video-translator/api/v1/projects/spaces/{spaceSeq}/stt`
+// --- Audio-separation submit ---
 // `POST /video-translator/api/v1/projects/spaces/{spaceSeq}/audio-separation`
-// 두 endpoint 가 request body 형식이 동일.
-@Serializable
-data class PersoSttRequest(
-    val mediaSeq: Long,
-    val isVideoProject: Boolean,
-    val title: String? = null,
-)
-
 @Serializable
 data class PersoAudioSeparationRequest(
     val mediaSeq: Long,
     val isVideoProject: Boolean,
     val title: String? = null,
-)
-
-// STT/audio-separation script — sentences + speakers (paginated by nextCursorId).
-// `audioUrl` 은 audio-separation 응답에만 존재 (STT 는 null).
-@Serializable
-data class PersoScriptResponse(
-    val hasNext: Boolean = false,
-    val nextCursorId: Long? = null,
-    val sentences: List<PersoScriptSentence> = emptyList(),
-    val speakers: List<PersoScriptSpeaker> = emptyList(),
-)
-
-@Serializable
-data class PersoScriptSentence(
-    val seq: Long,
-    val externalScriptSeq: String? = null,
-    val speakerOrderIndex: Int = 1,
-    val offsetMs: Long = 0,
-    val durationMs: Long = 0,
-    val originalDraftText: String? = null,
-    val originalText: String? = null,
-    val audioUrl: String? = null,
-)
-
-@Serializable
-data class PersoScriptSpeaker(
-    val speakerOrderIndex: Int,
-    val externalSpeakerSeq: String? = null,
-)
-
-// --- Translate submit ---
-@Serializable
-data class PersoTranslateRequest(
-    val mediaSeq: Long,
-    val isVideoProject: Boolean,
-    val sourceLanguageCode: String,
-    val targetLanguageCodes: List<String>,
-    val numberOfSpeakers: Int,
-    val preferredSpeedType: String = "GREEN",
-    val withLipSync: Boolean = false,
-    val title: String? = null,
-    val ttsModel: String? = null,
 )
 
 @Serializable
@@ -127,23 +74,12 @@ data class PersoProgressResult(
 )
 
 // --- Download info (availability flags) ---
+// audio-separation 컨텍스트에서만 사용 — translation 관련 플래그는 제거됨.
 @Serializable
 data class PersoDownloadInfo(
-    val hasPreviousProjectVideo: Boolean = false,
-    val hasTranslatedVideo: Boolean = false,
-    val hasLipSyncVideo: Boolean = false,
-    val hasOriginalSubtitle: Boolean = false,
-    val hasTranslatedSubtitle: Boolean = false,
     val hasOriginalVoiceOnly: Boolean = false,
-    val hasTranslatedVoice: Boolean = false,
     val hasOriginalBackground: Boolean = false,
-    val hasTranslatedBackground: Boolean = false,
-    val hasTranslateAudio: Boolean? = null,
-    val hasTranslatedVoiceWithBackground: Boolean? = null,
-    val hasZipDownload: Boolean = false,
     val hasOriginalSpeakerAudioCollection: Boolean = false,
-    val hasSpeakerSegmentExcel: Boolean = false,
-    val hasSpeakerSegmentWithTranslationExcel: Boolean = false,
     /** audio-separation 결과의 background (.wav) 가용 여부. `target=originalSubBackground` 응답과 align. */
     val hasOriginalSubBackground: Boolean = false,
 )
@@ -166,45 +102,7 @@ data class PersoDownloadPathInfo(
     val originalSubBackgroundPath: String? = null,
 )
 
-// --- Download links ---
-@Serializable
-data class PersoDownloadLinksResult(
-    val videoFile: PersoVideoFileLinks? = null,
-    val audioFile: PersoAudioFileLinks? = null,
-    val srtFile: PersoSrtFileLinks? = null,
-    val zippedFileDownloadLink: String? = null,
-)
-
-@Serializable
-data class PersoVideoFileLinks(
-    val videoDownloadLink: String? = null,
-)
-
-/** Translation 프로젝트 (`/download?target=dubbingVideo|translatedAudio` 등) 의 audio file 링크.
- *
- * NOTE: `originalVoiceAudioDownloadLink`, `backgroundAudioDownloadLink`,
- * `voiceWithBackgroundAudioDownloadLink`, `voiceAudioDownloadLink` 는 historic Perso
- * 응답에서 가끔 나타나던 legacy 필드 — 현 endpoint 명세 (translatedAudio / dubbingVideo)
- * 에선 거의 비어 옴. 호환성 위해 유지하지만 신규 사용처는 추가하지 말 것 (audio-separation
- * 컨텍스트는 [PersoSeparationDownloadLinks] 사용).
- */
-@Serializable
-data class PersoAudioFileLinks(
-    /** legacy translation field — 현 응답에선 거의 빈 값. 신규 사용 금지. */
-    val originalVoiceAudioDownloadLink: String? = null,
-    /** legacy translation field — 현 응답에선 거의 빈 값. 신규 사용 금지. */
-    val backgroundAudioDownloadLink: String? = null,
-    /** legacy translation field — 현 응답에선 거의 빈 값. 신규 사용 금지. */
-    val voiceWithBackgroundAudioDownloadLink: String? = null,
-    val translatedAudioDownloadLink: String? = null,
-    /** target=translatedVoice 응답의 더빙 오디오 링크. */
-    val translatedVoiceDownloadLink: String? = null,
-    /** translation 컨텍스트 legacy fallback — AutoDubService 의 dubbed audio 추론 chain
-     *  마지막 후보. 신규 사용 금지 (audio-separation 은 [PersoSeparationDownloadLinks]). */
-    val voiceAudioDownloadLink: String? = null,
-)
-
-/** Audio-separation 프로젝트의 `/download?target=...` 응답 — translation 응답과 필드 의미 다름. */
+/** Audio-separation 프로젝트의 `/download?target=...` 응답. */
 @Serializable
 data class PersoSeparationDownloadLinks(
     val audioFile: PersoSeparationAudioFile? = null,
@@ -216,10 +114,4 @@ data class PersoSeparationAudioFile(
     val voiceAudioDownloadLink: String? = null,
     /** target=originalSubBackground 응답의 .wav background. */
     val originalSubBackgroundDownloadLink: String? = null,
-)
-
-@Serializable
-data class PersoSrtFileLinks(
-    val originalSubtitleDownloadLink: String? = null,
-    val translatedSubtitleDownloadLink: String? = null,
 )

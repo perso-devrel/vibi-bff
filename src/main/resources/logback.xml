@@ -1,14 +1,26 @@
 <configuration>
     <appender name="STDOUT" class="ch.qos.logback.core.ConsoleAppender">
         <encoder>
-            <pattern>%d{ISO8601} [%thread] %-5level %logger{36} - %msg%n</pattern>
+            <pattern>%d{HH:mm:ss} %-5level %logger{24} - %msg%n</pattern>
         </encoder>
     </appender>
 
-    <logger name="com.vibi" level="DEBUG"/>
-    <logger name="io.ktor" level="INFO"/>
+    <!--
+      앱 코드는 INFO — DbBootstrap / BootCheck / AuthService 등의 의도된 info/warn 만 출력.
+      디버깅 시 한시적으로 DEBUG 로 올려 사용.
+    -->
+    <logger name="com.vibi" level="INFO"/>
 
-    <root level="INFO">
+    <!--
+      부팅 chatter 다운. 문제 발생 시 (pool 고갈 / 마이그레이션 실패 등) 만 WARN 으로 노출.
+      DbBootstrap 자체가 Flyway 결과를 1줄 요약 (migrationsExecuted=N) 하므로 손실 없음.
+    -->
+    <logger name="com.zaxxer.hikari" level="WARN"/>
+    <logger name="org.flywaydb" level="WARN"/>
+    <logger name="io.ktor" level="INFO"/>
+    <logger name="io.netty" level="WARN"/>
+
+    <root level="WARN">
         <appender-ref ref="STDOUT"/>
     </root>
 </configuration>

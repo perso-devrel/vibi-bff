@@ -18,6 +18,10 @@ data class StemMixJob(
     @Volatile var error: String? = null,
     val outputFile: File,
     val createdAt: Long = System.currentTimeMillis(),
+    /** /mix 요청을 submit 한 사용자. 라우트가 status/download 호출 시 caller 와
+     * 매칭해 다른 사용자가 mixJobId 만으로 fresh download token 을 발급받는 IDOR
+     * 차단. null 이면 미인증 잡 (테스트 / jwtSecret 미주입). */
+    val ownerUserId: UUID? = null,
 )
 
 class StemMixService(
@@ -48,13 +52,14 @@ class StemMixService(
     fun submit(
         mixJobId: String,
         stemFiles: List<Pair<StemMixSelection, File>>,
+        ownerUserId: UUID? = null,
         onCompleted: (StemMixJob) -> Unit = {},
     ): String {
         require(stemFiles.isNotEmpty()) { "stemFiles must not be empty" }
         for ((_, f) in stemFiles) require(f.exists()) { "Stem file missing: ${f.absolutePath}" }
 
         val outputFile = File(mixDir, "$mixJobId.mp3")
-        val job = StemMixJob(mixJobId = mixJobId, outputFile = outputFile)
+        val job = StemMixJob(mixJobId = mixJobId, outputFile = outputFile, ownerUserId = ownerUserId)
         jobs[mixJobId] = job
 
         scope.launch {
@@ -115,14 +120,25 @@ class StemMixService(
             for ((_, f) in stemFiles) {
                 cmd.addAll(listOf("-i", f.absolutePath))
             }
+            // 단일 stem 케이스: amix=inputs=1 은 일부 ffmpeg 빌드에서 'Cannot allocate
+            // memory' / silence 출력 회귀가 알려져 있어 anull passthrough 로 우회
+            // (RenderService.buildAudioConcatCommand 와 동일 패턴). alimiter 는 그대로
+            // 적용해 사용자가 volume boost 했을 때 clipping 안전망 유지.
             val filters = stemFiles.mapIndexed { i, (sel, _) ->
                 "[$i:a]volume=${sel.volume}[a$i]"
             } + run {
-                val amixInputs = stemFiles.indices.joinToString("") { "[a$it]" }
-                // duration=longest so shorter stems get padded with silence
-                // instead of truncating the full mix.
-                "${amixInputs}amix=inputs=${stemFiles.size}:duration=longest:dropout_transition=0[aout]"
-            }
+                if (stemFiles.size == 1) {
+                    "[a0]anull[amix_out]"
+                } else {
+                    val amixInputs = stemFiles.indices.joinToString("") { "[a$it]" }
+                    // normalize=0: 입력을 1/N 로 나누지 않고 그대로 합산. Perso 의 stem 들은
+                    // 원본 = sum(stems) 관계라 normalize=1 (default) 로 두면 N 개 합쳐도
+                    // 평균이 되어 원본 대비 -6dB(N=2) ~ -9.5dB(N=3) 만큼 작아짐.
+                    // duration=longest so shorter stems get padded with silence
+                    // instead of truncating the full mix.
+                    "${amixInputs}amix=inputs=${stemFiles.size}:duration=longest:dropout_transition=0:normalize=0[amix_out]"
+                }
+            } + "[amix_out]alimiter=limit=0.95:attack=5:release=50[aout]"
             cmd.addAll(listOf("-filter_complex", filters.joinToString(";")))
             cmd.addAll(listOf(
                 "-map", "[aout]",

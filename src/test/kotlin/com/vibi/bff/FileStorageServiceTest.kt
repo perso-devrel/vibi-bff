@@ -9,7 +9,12 @@ import kotlin.test.*
 class FileStorageServiceTest {
 
     private val testDir = File(System.getProperty("java.io.tmpdir"), "vibi-test-storage-unit").apply { mkdirs() }
-    private val config = StorageConfig(basePath = testDir.path)
+    private val config = StorageConfig(
+        basePath = testDir.path,
+        r2Bucket = "",
+        r2 = null,
+        signedUrlTtlSec = 900,
+    )
     private lateinit var service: FileStorageService
 
     @BeforeTest
@@ -30,8 +35,7 @@ class FileStorageServiceTest {
         assertTrue(File(testDir, "separation").exists())
         assertTrue(File(testDir, "separation/mix").exists())
         // Phase 1 follow-up: holds caller-owned copies of render outputs that
-        // downstream pipelines (auto-subtitle / auto-dub / separation) consume
-        // and may mutate.
+        // downstream pipelines (separation) consume and may mutate.
         assertTrue(File(testDir, "edited-source").exists())
     }
 

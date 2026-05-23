@@ -1,6 +1,5 @@
 package com.vibi.bff
 
-import com.vibi.bff.service.AudioPart
 import com.vibi.bff.service.RenderInputCacheService
 import java.io.ByteArrayInputStream
 import java.io.File
@@ -32,7 +31,6 @@ class RenderInputCacheServiceTest {
         val saved = cache.save(
             videoFileName = "movie.mp4",
             videoStream = ByteArrayInputStream(bytes),
-            audios = emptyList(),
             maxVideoBytes = 10_000,
         )
         assertEquals(expected, saved.inputId)
@@ -44,29 +42,12 @@ class RenderInputCacheServiceTest {
     fun `save returns same inputId for identical bytes (cache hit)`() {
         val bytes = "hello world".toByteArray() + ByteArray(100)
 
-        val a = cache.save("a.mp4", ByteArrayInputStream(bytes), emptyList(), 10_000)
-        val b = cache.save("b.mp4", ByteArrayInputStream(bytes), emptyList(), 10_000)
+        val a = cache.save("a.mp4", ByteArrayInputStream(bytes), 10_000)
+        val b = cache.save("b.mp4", ByteArrayInputStream(bytes), 10_000)
         assertEquals(a.inputId, b.inputId)
         // The video file path on second save should reuse the original entry —
         // ensure the existing entry's videoFileName ('a.mp4') is preserved.
         assertEquals(a.videoFile.absolutePath, b.videoFile.absolutePath)
-    }
-
-    @Test
-    fun `save accepts and indexes audios by form-field name`() {
-        val bytes = ByteArray(64) { 7 }
-        val saved = cache.save(
-            videoFileName = "v.mp4",
-            videoStream = ByteArrayInputStream(bytes),
-            audios = listOf(
-                AudioPart("audio_0", "first.mp3", ByteArrayInputStream("ONE".toByteArray())),
-                AudioPart("audio_1", "second.mp3", ByteArrayInputStream("TWO".toByteArray())),
-            ),
-            maxVideoBytes = 10_000,
-        )
-        assertEquals(2, saved.audioFilesByFormField.size)
-        assertEquals("ONE", saved.audioFilesByFormField["audio_0"]!!.readText())
-        assertEquals("TWO", saved.audioFilesByFormField["audio_1"]!!.readText())
     }
 
     @Test
@@ -86,7 +67,6 @@ class RenderInputCacheServiceTest {
         val saved = cache.save(
             videoFileName = "v.mp4",
             videoStream = ByteArrayInputStream(ByteArray(32)),
-            audios = emptyList(),
             maxVideoBytes = 10_000,
         )
         Thread.sleep(5)
@@ -104,7 +84,6 @@ class RenderInputCacheServiceTest {
         val saved = shortTtl.save(
             videoFileName = "v.mp4",
             videoStream = ByteArrayInputStream(ByteArray(16)),
-            audios = emptyList(),
             maxVideoBytes = 10_000,
         )
         assertTrue(saved.videoFile.exists())
@@ -120,29 +99,9 @@ class RenderInputCacheServiceTest {
             cache.save(
                 videoFileName = "big.mp4",
                 videoStream = ByteArrayInputStream(ByteArray(2048)),
-                audios = emptyList(),
                 maxVideoBytes = 1024,
             )
         }
         assertTrue(ex.message!!.contains("exceeds"))
-    }
-
-    @Test
-    fun `save sanitizes form-field name to prevent path traversal`() {
-        val saved = cache.save(
-            videoFileName = "v.mp4",
-            videoStream = ByteArrayInputStream(ByteArray(8)),
-            audios = listOf(
-                AudioPart("../evil", "x.mp3", ByteArrayInputStream("X".toByteArray())),
-            ),
-            maxVideoBytes = 10_000,
-        )
-        // None of the resolved files should escape the entry directory.
-        for ((_, file) in saved.audioFilesByFormField) {
-            assertTrue(
-                file.canonicalPath.startsWith(testDir.canonicalPath),
-                "audio file ${file.canonicalPath} escaped cache root ${testDir.canonicalPath}",
-            )
-        }
     }
 }

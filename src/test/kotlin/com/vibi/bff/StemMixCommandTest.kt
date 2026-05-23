@@ -17,14 +17,19 @@ class StemMixCommandTest {
         StemMixService.buildStemMixCommand(pairs.toList(), outFile)
 
     @Test
-    fun `single stem builds volume + amix graph`() {
+    fun `single stem uses anull passthrough not amix=inputs=1`() {
+        // amix=inputs=1 은 일부 ffmpeg 빌드에서 'Cannot allocate memory'/silence 회귀가
+        // 알려져 있어 anull passthrough 로 우회 (RenderService 와 동일 패턴).
+        // alimiter 는 그대로 적용해 volume boost 시 clipping 안전망 유지.
         val cmd = cmdOf(
             StemMixSelection("background", 0.6f) to aFile,
         )
         assertTrue(cmd.containsAll(listOf("-i", aFile.absolutePath)))
         val filters = cmd[cmd.indexOf("-filter_complex") + 1]
         assertTrue(filters.contains("[0:a]volume=0.6[a0]"))
-        assertTrue(filters.contains("[a0]amix=inputs=1:duration=longest"))
+        assertTrue(filters.contains("[a0]anull[amix_out]"), "single-stem path must use anull, got: $filters")
+        assertFalse(filters.contains("amix=inputs=1"), "single-stem path must NOT use amix=inputs=1, got: $filters")
+        assertTrue(filters.contains("[amix_out]alimiter="), "alimiter safety net required: $filters")
     }
 
     @Test
@@ -52,5 +57,18 @@ class StemMixCommandTest {
     fun `output is mapped to aout label`() {
         val cmd = cmdOf(StemMixSelection("background", 1f) to aFile)
         assertTrue(cmd.containsAll(listOf("-map", "[aout]")))
+    }
+
+    @Test
+    fun `amix uses normalize=0 so summed stems preserve original loudness`() {
+        // Regression guard: default amix normalize=1 divides each input by N,
+        // dropping the mix ~6dB for 2 stems / ~9.5dB for 3. Perso 의 stem 들은
+        // 원본 = sum(stems) 라 normalize=0 (직접 합산) 이 맞다.
+        val cmd = cmdOf(
+            StemMixSelection("background", 1f) to aFile,
+            StemMixSelection("speaker_0", 1f) to bFile,
+        )
+        val filters = cmd[cmd.indexOf("-filter_complex") + 1]
+        assertTrue(filters.contains("normalize=0"), "amix must specify normalize=0: $filters")
     }
 }

@@ -1,8 +1,6 @@
 package com.vibi.bff
 
 import com.vibi.bff.model.BgmClip
-import com.vibi.bff.model.DubClip
-import com.vibi.bff.model.FrameConfig
 import com.vibi.bff.model.RenderConfig
 import com.vibi.bff.model.RenderInputCacheResponse
 import com.vibi.bff.model.Segment
@@ -19,6 +17,8 @@ class RenderSerializationTest {
 
     @Test
     fun `Segment defaults volumeScale and speedScale to 1_0`() {
+        // 옛 클라이언트가 보내는 type/width/height/imageWidthPct 같은 절단된 필드는
+        // ignoreUnknownKeys=true 로 묵시 무시 (AppJson 정책 — RenderRoutes.kt 주석 참고).
         val decoded: Segment = json.decodeFromString(
             """{"sourceFileKey":"video_0","type":"VIDEO","order":0,"durationMs":5000}"""
         )
@@ -29,7 +29,7 @@ class RenderSerializationTest {
     @Test
     fun `Segment accepts custom volumeScale and speedScale`() {
         val decoded: Segment = json.decodeFromString(
-            """{"sourceFileKey":"video_0","type":"VIDEO","order":0,"durationMs":5000,"volumeScale":0.5,"speedScale":2.0}"""
+            """{"sourceFileKey":"video_0","order":0,"durationMs":5000,"volumeScale":0.5,"speedScale":2.0}"""
         )
         assertEquals(0.5f, decoded.volumeScale)
         assertEquals(2.0f, decoded.speedScale)
@@ -39,7 +39,6 @@ class RenderSerializationTest {
     fun `Segment round-trips through JSON`() {
         val original = Segment(
             sourceFileKey = "video_0",
-            type = "VIDEO",
             order = 0,
             durationMs = 5000,
             volumeScale = 0.8f,
@@ -53,12 +52,12 @@ class RenderSerializationTest {
     fun `Segment rejects non-positive speedScale`() {
         assertFailsWith<IllegalArgumentException> {
             json.decodeFromString<Segment>(
-                """{"sourceFileKey":"v","type":"VIDEO","order":0,"durationMs":1000,"speedScale":0}"""
+                """{"sourceFileKey":"v","order":0,"durationMs":1000,"speedScale":0}"""
             )
         }
         assertFailsWith<IllegalArgumentException> {
             json.decodeFromString<Segment>(
-                """{"sourceFileKey":"v","type":"VIDEO","order":0,"durationMs":1000,"speedScale":-1}"""
+                """{"sourceFileKey":"v","order":0,"durationMs":1000,"speedScale":-1}"""
             )
         }
     }
@@ -67,33 +66,8 @@ class RenderSerializationTest {
     fun `Segment rejects negative volumeScale`() {
         assertFailsWith<IllegalArgumentException> {
             json.decodeFromString<Segment>(
-                """{"sourceFileKey":"v","type":"VIDEO","order":0,"durationMs":1000,"volumeScale":-0.1}"""
+                """{"sourceFileKey":"v","order":0,"durationMs":1000,"volumeScale":-0.1}"""
             )
-        }
-    }
-
-    // ── FrameConfig ───────────────────────────────────────────────────────────
-
-    @Test
-    fun `FrameConfig defaults backgroundColorHex`() {
-        val decoded: FrameConfig = json.decodeFromString("""{"width":1920,"height":1080}""")
-        assertEquals("#000000", decoded.backgroundColorHex)
-    }
-
-    @Test
-    fun `FrameConfig round-trips`() {
-        val original = FrameConfig(width = 1080, height = 1920, backgroundColorHex = "#ff00aa")
-        val restored: FrameConfig = json.decodeFromString(json.encodeToString(original))
-        assertEquals(original, restored)
-    }
-
-    @Test
-    fun `FrameConfig rejects non-positive dimensions`() {
-        assertFailsWith<IllegalArgumentException> {
-            json.decodeFromString<FrameConfig>("""{"width":0,"height":1080}""")
-        }
-        assertFailsWith<IllegalArgumentException> {
-            json.decodeFromString<FrameConfig>("""{"width":1920,"height":-1}""")
         }
     }
 
@@ -115,7 +89,9 @@ class RenderSerializationTest {
     // ── RenderConfig composition ──────────────────────────────────────────────
 
     @Test
-    fun `RenderConfig decodes frame and bgmClips alongside existing fields`() {
+    fun `RenderConfig decodes bgmClips alongside existing fields`() {
+        // 구버전 클라이언트 호환: dubClips/imageClips/audioOverrideKey/frame/segment.type 같은
+        // 제거된 필드는 ignoreUnknownKeys=true 로 묵시 무시.
         val raw = """
             {
               "dubClips":[{"audioFileKey":"audio_0","startMs":0,"durationMs":3000,"volume":1.0}],
@@ -128,20 +104,16 @@ class RenderSerializationTest {
 
         val cfg: RenderConfig = json.decodeFromString(raw)
 
-        assertEquals(1, cfg.dubClips.size)
         assertEquals(1.5f, cfg.segments!!.first().speedScale)
-        assertEquals(1080, cfg.frame!!.width)
-        assertEquals("#123456", cfg.frame!!.backgroundColorHex)
         assertEquals(1, cfg.bgmClips.size)
         assertEquals("bgm_0", cfg.bgmClips.first().audioFileKey)
     }
 
     @Test
-    fun `RenderConfig defaults frame and bgmClips for backwards compat`() {
-        val raw = """{"dubClips":[],"imageClips":[]}"""
+    fun `RenderConfig defaults bgmClips empty for backwards compat`() {
+        val raw = """{}"""
         val cfg: RenderConfig = json.decodeFromString(raw)
 
-        assertNull(cfg.frame)
         assertTrue(cfg.bgmClips.isEmpty())
     }
 
@@ -151,13 +123,12 @@ class RenderSerializationTest {
     fun `RenderConfig decodes separationDirectives with selections from mobile`() {
         val raw = """
             {
-              "dubClips":[],
               "separationDirectives":[
                 {
                   "id":"d1",
                   "rangeStartMs":1000,
                   "rangeEndMs":4000,
-                  "numberOfSpeakers":2,
+                  
                   "muteOriginalSegmentAudio":true,
                   "selections":[
                     {"stemId":"speaker_0","audioUrl":"/api/v2/separate/sep-x/stem/speaker_0?token=t.s","volume":0.8},
@@ -183,23 +154,54 @@ class RenderSerializationTest {
 
     @Test
     fun `RenderConfig separationDirectives defaults to empty`() {
-        val raw = """{"dubClips":[]}"""
+        val raw = """{}"""
         val cfg: RenderConfig = json.decodeFromString(raw)
         assertTrue(cfg.separationDirectives.isEmpty())
+    }
+
+    @Test
+    fun `RenderConfig decodes separationDirective sourceOffsetMs (split piece)`() {
+        // 모바일 클라이언트가 directive 를 split 했을 때 보내는 추가 필드. 기본 0 = 신규 분리.
+        val raw = """
+            {
+              "separationDirectives":[
+                {
+                  "id":"d1-back",
+                  "rangeStartMs":4000,
+                  "rangeEndMs":7000,
+                  
+                  "muteOriginalSegmentAudio":true,
+                  "selections":[],
+                  "sourceOffsetMs":10000
+                },
+                {
+                  "id":"d2-original",
+                  "rangeStartMs":0,
+                  "rangeEndMs":3000,
+                  
+                  "muteOriginalSegmentAudio":false,
+                  "selections":[]
+                }
+              ]
+            }
+        """.trimIndent()
+        val cfg: RenderConfig = json.decodeFromString(raw)
+        assertEquals(10_000L, cfg.separationDirectives[0].sourceOffsetMs)
+        assertEquals(0L, cfg.separationDirectives[1].sourceOffsetMs)  // default
     }
 
     // ── outputKind — Phase 1.5 audio render path opt-in ─────────────────────
 
     @Test
     fun `RenderConfig defaults outputKind to video`() {
-        val raw = """{"dubClips":[]}"""
+        val raw = """{}"""
         val cfg: RenderConfig = json.decodeFromString(raw)
         assertEquals("video", cfg.outputKind)
     }
 
     @Test
     fun `RenderConfig accepts outputKind audio`() {
-        val raw = """{"dubClips":[],"outputKind":"audio"}"""
+        val raw = """{"outputKind":"audio"}"""
         val cfg: RenderConfig = json.decodeFromString(raw)
         assertEquals("audio", cfg.outputKind)
     }
@@ -207,26 +209,24 @@ class RenderSerializationTest {
     @Test
     fun `RenderConfig rejects invalid outputKind`() {
         assertFailsWith<IllegalArgumentException> {
-            json.decodeFromString<RenderConfig>("""{"dubClips":[],"outputKind":"banana"}""")
+            json.decodeFromString<RenderConfig>("""{"outputKind":"banana"}""")
         }
     }
 
     // ── RenderInputCacheResponse — multipart-cache wire shape ────────────────
 
     @Test
-    fun `RenderInputCacheResponse encodes all fields with snake-cased equivalents`() {
+    fun `RenderInputCacheResponse encodes all fields with camelCase`() {
         val original = RenderInputCacheResponse(
             inputId = "0123456789abcdef0123456789abcdef",
             expiresAt = 1714502400000L,
             videoSizeBytes = 12_345_678L,
-            audioCount = 3,
         )
         val encoded = json.encodeToString(original)
         // Mobile parses by camelCase field names — snake/camel mix would break it.
         assertTrue(encoded.contains("\"inputId\""), "inputId should be camelCase: $encoded")
         assertTrue(encoded.contains("\"expiresAt\""), "expiresAt should be camelCase: $encoded")
         assertTrue(encoded.contains("\"videoSizeBytes\""), "videoSizeBytes should be camelCase: $encoded")
-        assertTrue(encoded.contains("\"audioCount\""), "audioCount should be camelCase: $encoded")
         val restored: RenderInputCacheResponse = json.decodeFromString(encoded)
         assertEquals(original, restored)
     }

@@ -4,15 +4,12 @@ import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.configureErrorHandling
 import com.vibi.bff.plugins.configureSerialization
 import com.vibi.bff.routes.renderRoutes
-import com.vibi.bff.service.AudioPart
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.RenderInputCacheService
+import com.vibi.bff.service.RenderJob
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
-import io.ktor.client.HttpClient
-import io.ktor.client.engine.cio.CIO
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
@@ -24,6 +21,7 @@ import kotlinx.serialization.json.*
 import java.io.ByteArrayInputStream
 import java.io.File
 import java.security.MessageDigest
+import java.util.UUID
 import kotlin.test.*
 
 /**
@@ -38,35 +36,33 @@ class RenderRoutesTest {
     private val appConfig = testAppConfig(storagePath = testDir.path)
     private lateinit var fileStorage: FileStorageService
     private lateinit var renderService: RenderService
-    private lateinit var stemMixService: StemMixService
     private lateinit var separationService: SeparationService
     private lateinit var signer: SignedUrlService
     private lateinit var inputCache: RenderInputCacheService
-    private lateinit var httpClient: HttpClient
 
     @BeforeTest
     fun setup() {
         testDir.deleteRecursively()
         fileStorage = FileStorageService(appConfig.storage)
         renderService = mockk(relaxed = true)
-        stemMixService = mockk(relaxed = true)
         separationService = mockk(relaxed = true)
         signer = SignedUrlService(appConfig.separation.signingSecret)
         inputCache = RenderInputCacheService(
             baseDir = File(testDir, "render-input-cache"),
             ttlMs = 24 * 60 * 60 * 1000L,
         )
-        httpClient = HttpClient(CIO)
     }
 
     @AfterTest
     fun cleanup() {
         testDir.deleteRecursively()
         unmockkAll()
-        httpClient.close()
     }
 
-    private fun testApp(block: suspend ApplicationTestBuilder.() -> Unit) = testApplication {
+    private fun testApp(
+        jwtSecret: String? = null,
+        block: suspend ApplicationTestBuilder.() -> Unit,
+    ) = testApplication {
         application {
             configureSerialization()
             configureErrorHandling()
@@ -74,8 +70,10 @@ class RenderRoutesTest {
         routing {
             route("/api/v2") {
                 renderRoutes(
-                    renderService, fileStorage, stemMixService,
-                    separationService, signer, httpClient, inputCache,
+                    renderService, fileStorage,
+                    separationService, signer, inputCache,
+                    objectStore = null,
+                    jwtSecret = jwtSecret,
                 )
             }
         }
@@ -102,7 +100,6 @@ class RenderRoutesTest {
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
         assertEquals(expected, body["inputId"]!!.jsonPrimitive.content)
         assertEquals(1024L, body["videoSizeBytes"]!!.jsonPrimitive.long)
-        assertEquals(0, body["audioCount"]!!.jsonPrimitive.int)
         assertTrue(body["expiresAt"]!!.jsonPrimitive.long > System.currentTimeMillis())
     }
 
@@ -138,43 +135,59 @@ class RenderRoutesTest {
     }
 
     @Test
+    fun `POST inputs requires Authorization when jwtSecret is set`() = testApp(jwtSecret = testJwtSecret) {
+        // 인증 강제 회귀 가드: jwtSecret 주입 + Authorization 헤더 누락 → 401.
+        val response = client.post("/api/v2/render/inputs") {
+            setBody(MultiPartFormDataContent(formData {
+                append("video", ByteArray(64) { it.toByte() }, Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"x.mp4\"")
+                })
+            }))
+        }
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `POST inputs cache is owner-bound — resolve from a different user returns 400`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        val otherId = UUID.randomUUID()
+        val videoBytes = ByteArray(512) { (it % 31).toByte() }
+
+        val first = client.post("/api/v2/render/inputs") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(ownerId, testJwtSecret)}")
+            setBody(MultiPartFormDataContent(formData {
+                append("video", videoBytes, Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"a.mp4\"")
+                })
+            }))
+        }
+        assertEquals(HttpStatusCode.OK, first.status)
+        val inputId = AppJson.parseToJsonElement(first.bodyAsText()).jsonObject["inputId"]!!.jsonPrimitive.content
+
+        // 두 번째 user 가 같은 inputId 로 /render 호출 → resolve null → 400.
+        val second = client.post("/api/v2/render") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
+            setBody(MultiPartFormDataContent(formData {
+                append("inputId", inputId)
+                append("config", """{"videoDurationMs":3000}""")
+            }))
+        }
+        assertEquals(HttpStatusCode.BadRequest, second.status)
+    }
+
+    @Test
     fun `POST inputs without video part returns 400`() = testApp {
         val response = client.post("/api/v2/render/inputs") {
             setBody(MultiPartFormDataContent(formData {
-                append("audio_0", "fake".toByteArray(), Headers.build {
+                append("bgm_0", "fake".toByteArray(), Headers.build {
                     append(HttpHeaders.ContentType, "audio/mpeg")
-                    append(HttpHeaders.ContentDisposition, "filename=\"a.mp3\"")
+                    append(HttpHeaders.ContentDisposition, "filename=\"b.mp3\"")
                 })
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
-    }
-
-    @Test
-    fun `POST inputs persists segment audios under form-field name`() = testApp {
-        val videoBytes = ByteArray(512) { 1 }
-        val audioBytes = "audio-bytes".toByteArray()
-        val response = client.post("/api/v2/render/inputs") {
-            setBody(MultiPartFormDataContent(formData {
-                append("video", videoBytes, Headers.build {
-                    append(HttpHeaders.ContentType, "video/mp4")
-                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
-                })
-                append("audio_0", audioBytes, Headers.build {
-                    append(HttpHeaders.ContentType, "audio/mpeg")
-                    append(HttpHeaders.ContentDisposition, "filename=\"voice.mp3\"")
-                })
-            }))
-        }
-        assertEquals(HttpStatusCode.OK, response.status)
-        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        val inputId = body["inputId"]!!.jsonPrimitive.content
-        assertEquals(1, body["audioCount"]!!.jsonPrimitive.int)
-
-        val cached = inputCache.resolve(inputId)
-        assertNotNull(cached)
-        assertTrue(cached!!.audioFilesByFormField.containsKey("audio_0"))
-        assertEquals("audio-bytes", cached.audioFilesByFormField["audio_0"]!!.readText())
     }
 
     // ── /render with inputId form field ──────────────────────────────────────
@@ -184,7 +197,7 @@ class RenderRoutesTest {
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("inputId", "deadbeef".repeat(4)) // 32 hex chars but not in cache
-                append("config", """{"dubClips":[],"videoDurationMs":3000}""")
+                append("config", """{"videoDurationMs":3000}""")
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
@@ -202,7 +215,6 @@ class RenderRoutesTest {
         val cached = inputCache.save(
             videoFileName = "test.mp4",
             videoStream = ByteArrayInputStream(videoBytes),
-            audios = emptyList(),
             maxVideoBytes = 10_000,
         )
 
@@ -210,27 +222,23 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = any(),
                 videoFiles = any(),
-                segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
+                outputKind = any(),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         } returns "render-cached-1"
 
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("inputId", cached.inputId)
-                append("config", """{"dubClips":[],"videoDurationMs":3000}""")
+                append("config", """{"videoDurationMs":3000}""")
             }))
         }
         assertEquals(HttpStatusCode.OK, response.status)
@@ -242,123 +250,22 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = matchNullable<File> { it != null && it.absolutePath == cached.videoFile.absolutePath },
                 videoFiles = any(),
-                segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 // Cache-resident files must NOT be in cleanup list — other variants
                 // are still using them.
                 inputFilesToCleanup = match { list ->
                     list.none { f -> f.absolutePath == cached.videoFile.absolutePath }
                 },
+                outputKind = any(),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         }
-    }
-
-    @Test
-    fun `POST render with inputId resolves cached audio for dubClip`() = testApp {
-        val cached = inputCache.save(
-            videoFileName = "v.mp4",
-            videoStream = ByteArrayInputStream(ByteArray(32)),
-            audios = listOf(
-                AudioPart(
-                    formFieldName = "audio_0",
-                    originalFileName = "vo.mp3",
-                    stream = ByteArrayInputStream("voice".toByteArray()),
-                ),
-            ),
-            maxVideoBytes = 10_000,
-        )
-
-        every {
-            renderService.submitRender(
-                any(), any(), any(), any(), any(), any(),
-                any(), any(), any(), any(), any(), any(), any(), any(), any(), any(),
-                any(),
-            )
-        } returns "render-cached-2"
-
-        val cfg = """
-            {
-              "dubClips":[{"audioFileKey":"audio_0","startMs":0,"durationMs":2000,"volume":1.0}],
-              "videoDurationMs":3000
-            }
-        """.trimIndent()
-
-        val response = client.post("/api/v2/render") {
-            setBody(MultiPartFormDataContent(formData {
-                append("inputId", cached.inputId)
-                append("config", cfg)
-            }))
-        }
-
-        // Validation passes only if the cached audio_0 was injected. A 200
-        // here proves audio key resolution went through the cache.
-        assertEquals(HttpStatusCode.OK, response.status)
-    }
-
-    /**
-     * audio_override 멀티파트 파일은 audio_ prefix 분기에 먼저 매치되면 안 됨.
-     * 이전 버그: audio_ 분기가 먼저 → audio_override 가 audioFiles 슬롯으로 들어가
-     *           audioOverrideKey 검증에서 항상 IllegalArgumentException → autodub→render 항상 fail.
-     */
-    @Test
-    fun `POST render routes audio_override file to override slot, not audio slot`() = testApp {
-        val capturedOverride = slot<File?>()
-        val capturedAudios = slot<Map<String, File>>()
-        every {
-            renderService.submitRender(
-                legacyVideoFile = any(),
-                videoFiles = any(),
-                segmentImageFiles = any(),
-                audioFiles = capture(capturedAudios),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
-                videoDurationMs = any(),
-                segments = any(),
-                bgmAudioFiles = any(),
-                bgmClips = any(),
-                frame = any(),
-                audioOverrideFile = captureNullable(capturedOverride),
-                separationDirectives = any(),
-                inputFilesToCleanup = any(),
-            )
-        } returns "render-override-1"
-
-        val cfg = """
-            {"dubClips":[],"videoDurationMs":3000,"audioOverrideKey":"audio_override"}
-        """.trimIndent()
-        val response = client.post("/api/v2/render") {
-            setBody(MultiPartFormDataContent(formData {
-                append("video", ByteArray(64), Headers.build {
-                    append(HttpHeaders.ContentType, "video/mp4")
-                    append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
-                })
-                append("audio_override", "override-bytes".toByteArray(), Headers.build {
-                    append(HttpHeaders.ContentType, "audio/mpeg")
-                    append(HttpHeaders.ContentDisposition, "filename=\"o.mp3\"")
-                })
-                append("config", cfg)
-            }))
-        }
-        assertEquals(HttpStatusCode.OK, response.status)
-        // audio_override 가 override slot 으로 — 분기 순서 정합성 보장.
-        assertNotNull(capturedOverride.captured, "audio_override file must reach the override slot")
-        assertTrue(
-            capturedAudios.captured.keys.none { it.startsWith("audio_override") },
-            "audio_override must NOT leak into audioFiles map",
-        )
     }
 
     // ── outputKind ────────────────────────────────────────────────────────────
@@ -373,21 +280,16 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = any(),
                 videoFiles = any(),
-                segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         } returns "render-defaultkind-1"
 
@@ -397,7 +299,7 @@ class RenderRoutesTest {
                     append(HttpHeaders.ContentType, "video/mp4")
                     append(HttpHeaders.ContentDisposition, "filename=\"v.mp4\"")
                 })
-                append("config", """{"dubClips":[],"videoDurationMs":3000}""")
+                append("config", """{"videoDurationMs":3000}""")
             }))
         }
         assertEquals(HttpStatusCode.OK, response.status)
@@ -405,7 +307,7 @@ class RenderRoutesTest {
     }
 
     /**
-     * outputKind="audio" 가 RenderService 까지 그대로 전달되어야 자막/분리 source 용
+     * outputKind="audio" 가 RenderService 까지 그대로 전달되어야 분리 source 용
      * audio-only 렌더가 트리거됨.
      */
     @Test
@@ -415,25 +317,20 @@ class RenderRoutesTest {
             renderService.submitRender(
                 legacyVideoFile = any(),
                 videoFiles = any(),
-                segmentImageFiles = any(),
-                audioFiles = any(),
-                imageFiles = any(),
-                subtitlesFile = any(),
-                dubClips = any(),
-                imageClips = any(),
                 videoDurationMs = any(),
                 segments = any(),
                 bgmAudioFiles = any(),
                 bgmClips = any(),
-                frame = any(),
-                audioOverrideFile = any(),
                 separationDirectives = any(),
                 inputFilesToCleanup = any(),
                 outputKind = capture(capturedKind),
+                quality = any(),
+                userId = anyNullable(),
+                sourceDurationMs = any(),
             )
         } returns "render-audiokind-1"
 
-        val cfg = """{"dubClips":[],"videoDurationMs":3000,"outputKind":"audio"}"""
+        val cfg = """{"videoDurationMs":3000,"outputKind":"audio"}"""
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("video", ByteArray(64), Headers.build {
@@ -453,7 +350,7 @@ class RenderRoutesTest {
      */
     @Test
     fun `POST render rejects invalid outputKind`() = testApp {
-        val cfg = """{"dubClips":[],"videoDurationMs":3000,"outputKind":"weird"}"""
+        val cfg = """{"videoDurationMs":3000,"outputKind":"weird"}"""
         val response = client.post("/api/v2/render") {
             setBody(MultiPartFormDataContent(formData {
                 append("video", ByteArray(64), Headers.build {
@@ -464,5 +361,69 @@ class RenderRoutesTest {
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
+    }
+
+    // ── 자원 소유권 검증 ────────────────────────────────────────────────────────
+    //
+    // RenderJob.ownerUserId 가 set 된 잡을 다른 user 의 JWT 로 status/download 호출 시 404.
+    // 같은 owner 면 통과. jwtSecret null 분기 (라우트가 인증 강제 안 함) 는 backward compat 로
+    // owner 무관하게 통과 — 테스트 시드 (RenderService unit test) 코드가 그대로 살아있게.
+
+    private val testJwtSecret = "a".repeat(64)
+
+    private fun completedJob(jobId: String, ownerUserId: UUID?): RenderJob {
+        val outFile = File(testDir, "$jobId.mp4").apply {
+            parentFile?.mkdirs()
+            writeBytes(ByteArray(8))
+        }
+        return RenderJob(
+            jobId = jobId,
+            status = "COMPLETED",
+            outputFile = outFile,
+            ownerUserId = ownerUserId,
+        )
+    }
+
+    @Test
+    fun `GET render status returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        val otherId = UUID.randomUUID()
+        every { renderService.getJob("render-a") } returns completedJob("render-a", ownerId)
+
+        val response = client.get("/api/v2/render/render-a/status") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
+        }
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `GET render status returns 200 when caller is owner`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        every { renderService.getJob("render-b") } returns completedJob("render-b", ownerId)
+
+        val response = client.get("/api/v2/render/render-b/status") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(ownerId, testJwtSecret)}")
+        }
+        assertEquals(HttpStatusCode.OK, response.status)
+    }
+
+    @Test
+    fun `GET render download returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        val otherId = UUID.randomUUID()
+        every { renderService.getJob("render-c") } returns completedJob("render-c", ownerId)
+
+        val response = client.get("/api/v2/render/render-c/download") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
+        }
+        assertEquals(HttpStatusCode.NotFound, response.status)
+    }
+
+    @Test
+    fun `GET render status without ownership check when jwtSecret null (backward compat)`() = testApp {
+        // jwtSecret 미주입 분기 — 헤더 없이도 통과. owner null 잡 + 미인증.
+        every { renderService.getJob("render-d") } returns completedJob("render-d", ownerUserId = null)
+        val response = client.get("/api/v2/render/render-d/status")
+        assertEquals(HttpStatusCode.OK, response.status)
     }
 }

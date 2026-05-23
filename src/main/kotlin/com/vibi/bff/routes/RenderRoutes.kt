@@ -6,23 +6,22 @@ import com.vibi.bff.model.RenderInputCacheResponse
 import com.vibi.bff.model.RenderResponse
 import com.vibi.bff.model.RenderStatusResponse
 import com.vibi.bff.plugins.ApiErrorException
+import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
-import com.vibi.bff.service.AudioPart
+import com.vibi.bff.plugins.requireUser
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.RenderInputCacheService
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
-import io.ktor.client.HttpClient
 import io.ktor.http.*
 import io.ktor.http.content.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import kotlinx.serialization.json.Json
 import java.io.File
 import java.util.UUID
 
@@ -34,28 +33,26 @@ private val SEP_URL_REGEX = Regex("""(?:.*?)/api/v2/separate/([^/?#]+)/stem/([^/
 fun Route.renderRoutes(
     renderService: RenderService,
     fileStorage: FileStorageService,
-    @Suppress("UNUSED_PARAMETER") stemMixService: StemMixService,
     separationService: SeparationService,
     signedUrlService: SignedUrlService,
-    @Suppress("UNUSED_PARAMETER") httpClient: HttpClient,
     inputCacheService: RenderInputCacheService,
+    objectStore: ObjectStore?,
+    /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
+    jwtSecret: String? = null,
 ) {
     route("/render") {
         // POST /api/v2/render/inputs — shared input cache. Mobile uploads the
-        // source video (and optional segment audios) once; the response's
-        // inputId can be reused across N variant renders without re-sending
-        // the bytes. inputId is sha256(video)[:16 bytes hex] so the same
-        // video resolves to the same slot on retry.
-        //
-        // multipart 는 single-pass stream 이라 video 가 먼저/뒤 어디 오든 모든 part 가
-        // 디스크에 떨어진 후에야 cache.save 가 호출 가능. video/audio 둘 다 임시 파일로
-        // buffer → forEachPart 종료 후 cache.save 한 번 호출 (하나라도 throw 시 finally
-        // 에서 모든 temp 정리). audio temp 는 cache.save 가 stream 으로 consume.
+        // source video once; the response's inputId can be reused across N
+        // variant renders without re-sending the bytes. inputId is
+        // sha256(video)[:16 bytes hex] so the same video resolves to the same
+        // slot on retry.
         post("/inputs") {
+            // 인증 강제 + cache entry 의 ownerUserId 바인딩 — 같은 sha256 의 슬롯을
+            // 다른 user 가 resolve 해 cross-account content IDOR 으로 이어지는 회귀 차단.
+            // legacy (ownerUserId null) entry 는 다음 인증 caller hit 시 박힘 — 점진 마이그레이션.
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
-            val tempAudioFiles = mutableListOf<File>()
-            val audioParts = mutableListOf<AudioPart>()
             var videoFileName: String? = null
             var videoTempFile: File? = null
 
@@ -63,43 +60,22 @@ fun Route.renderRoutes(
                 multipart.forEachPart { part ->
                     when (part) {
                         is PartData.FileItem -> {
-                            val name = part.name ?: ""
-                            when {
-                                name == "video" -> {
-                                    if (videoTempFile != null) {
-                                        throw IllegalArgumentException(
-                                            "Multiple 'video' parts in /render/inputs"
-                                        )
-                                    }
-                                    videoFileName = part.originalFileName ?: "video.mp4"
-                                    val tmp = File(
-                                        inputCacheService.baseDir,
-                                        "incoming-video-${UUID.randomUUID()}.tmp"
-                                    )
-                                    @Suppress("DEPRECATION")
-                                    part.streamProvider().use { input ->
-                                        tmp.outputStream().use { input.copyTo(it) }
-                                    }
-                                    videoTempFile = tmp
-                                }
-                                name.startsWith("audio") || name.startsWith("audio_") -> {
-                                    val tmp = File(
-                                        inputCacheService.baseDir,
-                                        "incoming-audio-${UUID.randomUUID()}.tmp"
-                                    )
-                                    @Suppress("DEPRECATION")
-                                    part.streamProvider().use { input ->
-                                        tmp.outputStream().use { input.copyTo(it) }
-                                    }
-                                    tempAudioFiles.add(tmp)
-                                    audioParts.add(
-                                        AudioPart(
-                                            formFieldName = name,
-                                            originalFileName = part.originalFileName ?: "$name.mp3",
-                                            stream = tmp.inputStream(),
-                                        )
+                            if (part.name == "video") {
+                                if (videoTempFile != null) {
+                                    throw IllegalArgumentException(
+                                        "Multiple 'video' parts in /render/inputs"
                                     )
                                 }
+                                videoFileName = part.originalFileName ?: "video.mp4"
+                                val tmp = File(
+                                    inputCacheService.baseDir,
+                                    "incoming-video-${UUID.randomUUID()}.tmp"
+                                )
+                                @Suppress("DEPRECATION")
+                                part.streamProvider().use { input ->
+                                    tmp.outputStream().use { input.copyTo(it) }
+                                }
+                                videoTempFile = tmp
                             }
                         }
                         else -> {}
@@ -114,8 +90,8 @@ fun Route.renderRoutes(
                 val cached = inputCacheService.save(
                     videoFileName = vName,
                     videoStream = vTemp.inputStream(),
-                    audios = audioParts,
                     maxVideoBytes = MAX_UPLOAD_FILE_SIZE,
+                    ownerUserId = principal?.userId,
                 )
 
                 call.respond(
@@ -124,30 +100,24 @@ fun Route.renderRoutes(
                         inputId = cached.inputId,
                         expiresAt = cached.metadata.lastAccessAt + inputCacheService.ttlMillis,
                         videoSizeBytes = cached.videoFile.length(),
-                        audioCount = cached.audioFilesByFormField.size,
                     ),
                 )
             } finally {
-                // cache.save 가 audio stream 을 consume 후 close. video temp 도 더 이상
-                // 필요 없음 (cache.save 안에서 별도 final 위치로 이동/복사). throw 발생
-                // 시에도 동일하게 정리해야 누수 없음.
-                tempAudioFiles.forEach { runCatching { it.delete() } }
+                // cache.save 가 이미 video temp 를 final 위치로 이동/복사하지만,
+                // throw 시 leftover 방지 위해 finally 에서도 한 번 정리.
                 runCatching { videoTempFile?.delete() }
             }
         }
 
         post {
+            // 사용자 귀속 — admin 대시보드의 "사용자별 사용량" 집계 source. jwtSecret null 이면 분석 skip.
+            val principal = jwtSecret?.let { call.requireUser(it) }
             // Ktor 3.x default formFieldLimit 50MB → 70MB+ 영상 multipart 거부됨. 500MB 까지 허용.
             val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
             var legacyVideoFile: File? = null
             val videoFiles = mutableMapOf<String, File>()
-            val audioFiles = mutableMapOf<String, File>()
             val bgmAudioFiles = mutableMapOf<String, File>()
-            val imageFiles = mutableMapOf<String, File>()
-            val segmentImageFiles = mutableMapOf<String, File>()
-            val overrideAudioFiles = mutableMapOf<String, File>()
-            var subtitlesFile: File? = null
             var renderConfig: RenderConfig? = null
             var inputId: String? = null
 
@@ -170,23 +140,16 @@ fun Route.renderRoutes(
                                 legacyVideoFile = saveFile(part, "video.mp4")
                             name.startsWith("video_") ->
                                 videoFiles[name] = saveFile(part, "$name.mp4")
-                            name.startsWith("audio_override") ->
-                                overrideAudioFiles[name] = saveFile(part, "$name.mp3")
-                            name.startsWith("audio_") ->
-                                audioFiles[name] = saveFile(part, "$name.mp3")
                             name.startsWith("bgm_") ->
                                 bgmAudioFiles[name] = saveFile(part, "$name.mp3")
-                            name.startsWith("segment_image_") ->
-                                segmentImageFiles[name] = saveFile(part, "$name.jpg")
-                            name.startsWith("image_") ->
-                                imageFiles[name] = saveFile(part, "$name.jpg")
-                            name == "subtitles" ->
-                                subtitlesFile = saveFile(part, "subtitles.ass")
                         }
                     }
                     is PartData.FormItem -> {
                         when (part.name) {
-                            "config" -> renderConfig = Json.decodeFromString<RenderConfig>(part.value)
+                            // AppJson — ignoreUnknownKeys=true. 모바일이 절단된 옛 필드
+                            // (dubClips/imageClips/audioOverrideKey/outputLanguageCode 등) 를
+                            // 계속 보내도 strict Json 처럼 SerializationException 으로 폭사하지 않게.
+                            "config" -> renderConfig = AppJson.decodeFromString<RenderConfig>(part.value)
                             "inputId" -> inputId = part.value.trim().ifBlank { null }
                         }
                     }
@@ -197,51 +160,27 @@ fun Route.renderRoutes(
 
             val config = renderConfig ?: throw IllegalArgumentException("config is required")
 
-            // Resolve inputId BEFORE validating audio keys — when present, the
-            // cache contributes the video and any segment audios. Per spec,
-            // inputId + multipart video together = inputId wins (multipart
-            // video bytes were already consumed but we discard the resolved
-            // upload by not adding it to the legacy slot).
+            // Resolve inputId BEFORE other validation — when present, the cache
+            // contributes the video. Per spec, inputId + multipart video together
+            // = inputId wins (multipart video bytes were already consumed but we
+            // discard the resolved upload by not adding it to the legacy slot).
             //
             // Cache miss / expired must throw — silent fallback would let the
             // mobile think it's saving bytes when really the server can't
             // find anything.
             if (inputId != null) {
-                val cached = inputCacheService.resolve(inputId!!)
+                // resolve 가 principal.userId 와 entry.ownerUserId 매칭 — 다른 user 의
+                // cache 슬롯에 대한 hit 은 null 반환으로 not-found (existence oracle 차단).
+                val cached = inputCacheService.resolve(inputId!!, principal?.userId)
                     ?: throw IllegalArgumentException("inputId expired or not found")
                 // Cache video → legacy slot (single-video render path).
                 legacyVideoFile = cached.videoFile
-                // Merge audios — cache audios fill any audio_* keys NOT already
-                // sent inline (multipart inline takes priority for per-variant
-                // overrides). audioFiles map uses form-field name as key.
-                for ((field, file) in cached.audioFilesByFormField) {
-                    if (field !in audioFiles) {
-                        audioFiles[field] = file
-                    }
-                }
             }
 
-            // Validate audio keys
-            for (clip in config.dubClips) {
-                require(audioFiles.containsKey(clip.audioFileKey)) {
-                    "Audio file missing for key: ${clip.audioFileKey}"
-                }
-            }
             for (clip in config.bgmClips) {
                 require(bgmAudioFiles.containsKey(clip.audioFileKey)) {
                     "BGM audio file missing for key: ${clip.audioFileKey}"
                 }
-            }
-            // Validate image keys
-            for (clip in config.imageClips) {
-                require(imageFiles.containsKey(clip.imageFileKey)) {
-                    "Image file missing for key: ${clip.imageFileKey}"
-                }
-            }
-
-            val audioOverrideFile = config.audioOverrideKey?.let { key ->
-                overrideAudioFiles[key]
-                    ?: throw IllegalArgumentException("audio_override file missing for key: $key")
             }
 
             // separationDirectives: 각 stem 의 audioUrl 은 BFF 자체 HMAC URL 만 허용.
@@ -255,6 +194,7 @@ fun Route.renderRoutes(
                         audioUrl = selection.audioUrl,
                         separationService = separationService,
                         signedUrlService = signedUrlService,
+                        callerUserId = principal?.userId,
                     )
                     resolvedStems.add(DirectiveStem(file = file, volume = selection.volume))
                 }
@@ -265,62 +205,58 @@ fun Route.renderRoutes(
                             rangeEndMs = directive.rangeEndMs,
                             muteOriginalSegmentAudio = directive.muteOriginalSegmentAudio,
                             stems = resolvedStems,
+                            sourceOffsetMs = directive.sourceOffsetMs,
                         )
                     )
                 }
             }
 
             // inputFilesToCleanup tracks PER-REQUEST temp uploads. Cache-resident
-            // files (videoFile + cached.audioFilesByFormField) live under the
-            // shared cache directory and MUST NOT be deleted on job completion
-            // — other variants are still using them.
+            // files (videoFile from inputCache) live under the shared cache
+            // directory and MUST NOT be deleted on job completion — other
+            // variants are still using them.
             val cacheResidentFiles: Set<File> = if (inputId != null) {
-                buildSet {
-                    legacyVideoFile?.let { add(it) }
-                    addAll(audioFiles.values.filter { it.parentFile?.name == "audios" })
-                }
+                buildSet { legacyVideoFile?.let { add(it) } }
             } else emptySet()
 
             val inputFiles = mutableListOf<File>()
             legacyVideoFile?.let { if (it !in cacheResidentFiles) inputFiles.add(it) }
             inputFiles.addAll(videoFiles.values)
-            inputFiles.addAll(audioFiles.values.filter { it !in cacheResidentFiles })
             inputFiles.addAll(bgmAudioFiles.values)
-            inputFiles.addAll(imageFiles.values)
-            inputFiles.addAll(segmentImageFiles.values)
-            inputFiles.addAll(overrideAudioFiles.values)
-            subtitlesFile?.let { inputFiles.add(it) }
             // SeparationService 가 stem 파일의 owner — 자체 TTL 로 관리하므로 여기 cleanup
             // 대상에 포함하지 않음 (다른 동시 render job 이 같은 stem 사용 가능).
 
             val jobId = renderService.submitRender(
                 legacyVideoFile = legacyVideoFile,
                 videoFiles = videoFiles,
-                segmentImageFiles = segmentImageFiles,
-                audioFiles = audioFiles,
                 bgmAudioFiles = bgmAudioFiles,
-                imageFiles = imageFiles,
-                subtitlesFile = subtitlesFile,
-                dubClips = config.dubClips,
                 bgmClips = config.bgmClips,
-                imageClips = config.imageClips,
                 videoDurationMs = config.videoDurationMs,
                 segments = config.segments,
-                frame = config.frame,
-                audioOverrideFile = audioOverrideFile,
                 separationDirectives = resolvedDirectives,
                 inputFilesToCleanup = inputFiles,
                 outputKind = config.outputKind,
+                quality = config.quality,
+                userId = principal?.userId,
+                sourceDurationMs = computeRenderSourceDurationMs(config),
             )
 
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
         }
 
         get("/{jobId}/status") {
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("Render jobId required")
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
+
+            // owner 가 set 된 잡은 caller 도 반드시 매칭. caller null 이어도 reject —
+            // jwtSecret 미주입 분기에서 owned-job 으로 fall-through 되는 회귀 차단.
+            // owner null (boot/테스트 시드) 인 잡만 caller 무관 통과.
+            if (job.ownerUserId != null && job.ownerUserId != principal?.userId) {
+                throw NotFoundException("Render job not found: $jobId")
+            }
 
             call.respond(HttpStatusCode.OK, RenderStatusResponse(
                 jobId = job.jobId,
@@ -332,34 +268,33 @@ fun Route.renderRoutes(
         }
 
         get("/{jobId}/download") {
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("Render jobId required")
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
 
+            // 자원 소유권 — owner 가 set 된 잡은 caller 도 반드시 매칭. caller null 이어도
+            // reject 해 jwtSecret 미주입 분기에서 owned-job 으로 fall-through 되는 회귀 차단.
+            // owner null (boot/테스트 시드) 인 잡만 caller 무관 통과. mismatch 는 not-found
+            // 와 동일 메시지로 응답해 IDOR existence oracle 차단.
+            if (job.ownerUserId != null && job.ownerUserId != principal?.userId) {
+                throw NotFoundException("Render job not found: $jobId")
+            }
+
             if (job.status != "COMPLETED" || !job.outputFile.exists()) {
                 throw NotFoundException("Render not ready: status=${job.status}")
             }
 
-            // outputFile 의 실제 확장자에 따라 Content-Disposition 의 filename
-            // 과 Content-Type 결정. audio 모드 (.m4a) / video 모드 (.mp4) 모두 커버.
-            // respondFile 호출 직후엔 이미 응답이 시작되므로 모든 헤더는 그 전에.
-            val fileName = "$jobId.${job.outputFile.extension.ifBlank { "mp4" }}"
-            val contentType = when (job.outputFile.extension.lowercase()) {
-                "m4a", "mp4a" -> ContentType("audio", "mp4")
-                "mp3" -> ContentType("audio", "mpeg")
-                "wav" -> ContentType("audio", "wav")
-                "mp4" -> ContentType("video", "mp4")
-                else -> ContentType.Application.OctetStream
-            }
-            call.response.header(
-                HttpHeaders.ContentDisposition,
-                ContentDisposition.Attachment.withParameter(
-                    ContentDisposition.Parameters.FileName, fileName
-                ).toString()
+            val ext = job.outputFile.extension.ifBlank { "mp4" }
+            val fileName = "$jobId.$ext"
+            call.respondDownload(
+                file = job.outputFile,
+                objectKey = ObjectKey.renderOutput(jobId, fileName),
+                contentType = contentTypeForExtension(ext, ContentType.Application.OctetStream),
+                downloadFilename = fileName,
+                store = objectStore,
             )
-            call.response.header(HttpHeaders.ContentType, contentType.toString())
-            call.respondFile(job.outputFile)
         }
     }
 }
@@ -379,6 +314,7 @@ private fun resolveStemUrlToFile(
     audioUrl: String,
     separationService: SeparationService,
     signedUrlService: SignedUrlService,
+    callerUserId: UUID? = null,
 ): File {
     val match = SEP_URL_REGEX.matchEntire(audioUrl)
         ?: throw ApiErrorException(
@@ -408,6 +344,17 @@ private fun resolveStemUrlToFile(
             errorCode = "invalid_stem_url",
             detail = "separation job not found: $jobId",
         )
+    // capability(HMAC token) + identity(render caller) 이중. owner 가 set 된 stem
+    // 잡은 caller 도 반드시 매칭 — caller null (jwtSecret 미주입 분기) 도 reject 해
+    // sibling status/download 와 동일 패턴 (`owner != null && owner != caller`). leaked
+    // HMAC URL 이 다른 user 의 render 에 끼워지는 IDOR 차단.
+    if (job.ownerUserId != null && job.ownerUserId != callerUserId) {
+        throw ApiErrorException(
+            HttpStatusCode.BadRequest,
+            errorCode = "invalid_stem_url",
+            detail = "stem job ownership mismatch",
+        )
+    }
     val stem = job.stems.firstOrNull { it.stemId == stemId }
         ?: throw ApiErrorException(
             HttpStatusCode.BadRequest,
@@ -433,4 +380,21 @@ private fun parseQueryParam(query: String, key: String): String? {
         if (pair.substring(0, eq) == key) return pair.substring(eq + 1)
     }
     return null
+}
+
+/**
+ * admin 대시보드의 "영상 길이" KPI 원본. 사용자가 올린 입력 영상의 총 길이 ms.
+ * segments 있으면 각 segment 의 trim 윈도우 합산, 없으면 legacy videoDurationMs.
+ * speedScale 은 입력 길이와 무관하므로 적용 안 함 (사용자가 올린 raw 분량 기준).
+ */
+internal fun computeRenderSourceDurationMs(config: com.vibi.bff.model.RenderConfig): Long {
+    val segs = config.segments
+    if (!segs.isNullOrEmpty()) {
+        return segs.sumOf { seg ->
+            val ts = seg.trimStartMs ?: 0L
+            val te = seg.trimEndMs?.takeIf { it > 0L } ?: seg.durationMs
+            (te - ts).coerceAtLeast(0L)
+        }
+    }
+    return (config.videoDurationMs ?: 0L).coerceAtLeast(0L)
 }

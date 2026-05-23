@@ -1,0 +1,10 @@
+{
+  "Rules": [
+    {
+      "ID": "delete-after-7d",
+      "Status": "Enabled",
+      "Filter": { "Prefix": "" },
+      "Expiration": { "Days": 7 }
+    }
+  ]
+}

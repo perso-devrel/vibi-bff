@@ -17,6 +17,7 @@
 | `unauthorized_client — repository not allowed` | provider `attribute-condition` 이 이 repo 를 허용하지 않음 |
 | `Permission 'iam.serviceAccounts.getAccessToken' denied` | SA 에 `roles/iam.workloadIdentityUser` binding 누락 |
 | `gcloud run deploy: Permission denied` | SA 에 Cloud Run / Cloud Build / Artifact Registry 권한 누락 (배포 권한은 runtime 권한과 별개) |
+| 배포 성공 후 다운로드 endpoint 만 500 | `vars.R2_BUCKET` / `vars.R2_ACCOUNT_ID` 오타, R2 bucket 미존재, `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` secret 만료·권한 부족 |
 
 ---
 
@@ -85,6 +86,46 @@ repo → **Settings → Secrets and variables → Actions → New repository sec
 | `GCP_SA_EMAIL` | `vibi-bff-sa@<PROJECT_ID>.iam.gserviceaccount.com` | |
 | `GCP_PROJECT_ID` | `<PROJECT_ID>` | project ID (문자열) |
 
+또한 secrets 탭에서 추가:
+
+| Secret | 값 |
+|---|---|
+| `GOOGLE_OAUTH_CLIENT_IDS` | 콤마 분리 Google OAuth client ID (iOS / Android / Web) |
+| `APPLE_OAUTH_CLIENT_IDS` | 콤마 분리 Apple Sign In client ID — 보통 iOS bundle id (`com.vibi.ios`). 비워두면 Apple 로그인 비활성. |
+
+### Secret Manager (Postgres / Neon) — `cloud-run.sh` 가 1회 시드
+
+DB credential 은 GitHub Secret 이 아닌 **Secret Manager** 에 저장된다 (Cloud Run runtime SA 만 read).
+첫 부트스트랩 시 `.env` 에 채운 값을 `cloud-run.sh` 가 자동으로 Secret Manager 에 시드한다 —
+이후 회전은 `.env` 갱신 후 `cloud-run.sh` 재실행 또는 `gcloud secrets versions add ...`.
+
+| Secret 이름 | 형식 | 비고 |
+|---|---|---|
+| `DATABASE_URL` | `jdbc:postgresql://<host>/<db>?sslmode=require` | **`jdbc:` 접두사 필수** — Neon UI 가 주는 원본 URL 에는 없음 |
+| `DB_USER` | Neon role 이름 | |
+| `DB_PASSWORD` | Neon role 비밀번호 | |
+
+---
+
+## 2.5) GitHub Variables (선택)
+
+같은 화면의 **Variables** 탭. 설정 안 해도 워크플로우는 돌지만, 기능별 활성화 여부에
+영향. R2 egress 분리를 쓰려면 `R2_BUCKET` + `R2_ACCOUNT_ID` 필수 (credentials 는 Secret Manager).
+
+| Variable | 값 예시 | 미설정 시 동작 |
+|---|---|---|
+| `BFF_BASE_URL` | `https://api.vibi.fm` | Cloud Run 자동 발급 URL self-reference |
+| `CORS_ALLOWED_ORIGINS` | 콤마 분리 origin | 빈 값 (CORS 비활성) |
+| `R2_BUCKET` | `vibi-bff-artifacts` | **빈 값 → 다운로드가 Cloud Run streaming 으로 fallback**. R2 egress 분리 효과 없음. |
+| `R2_ACCOUNT_ID` | 32자 hex (dashboard URL 에서 복사) | R2_BUCKET 셋업 시 필수 — endpoint host 결정 |
+
+> Presigned URL TTL 은 application.conf 의 `signedUrlTtlSec = "900"` (15분) default 사용.
+> 바꿔야 하면 그때 `SIGNED_URL_TTL_SEC` var 추가.
+
+R2 bucket / API token 은 Cloudflare dashboard 에서 미리 만들어두고 (Object Read & Write 권한),
+`deploy/cloud-run.sh` 가 access key / secret 을 Secret Manager 로 옮긴다. lifecycle (7일 자동 삭제) 도
+dashboard → R2 → bucket → Settings → Object lifecycle rules 에서 1회 설정.
+
 ---
 
 ## 3) 검증
@@ -147,6 +188,18 @@ gcloud iam workload-identity-pools providers update-oidc github-provider \
 
 위 부트스트랩의 `for ROLE in ...` 블록 다시 실행. `roles/iam.serviceAccountUser` 가 빠지면
 Cloud Run 이 runtime SA 를 attach 못 함.
+
+### 다운로드 endpoint 가 500 / presigned URL 발급 실패
+
+배포는 성공했는데 `/api/v2/render/{jobId}/download` 등이 500 반환:
+
+1. **`vars.R2_BUCKET` / `vars.R2_ACCOUNT_ID` 값이 실제와 다름** — Cloudflare dashboard 에서 정확한
+   이름 / 32자 hex 확인.
+2. **`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` secret 만료·삭제** — Cloudflare dashboard 에서 token
+   재발급 후 cloud-run.sh 재실행 (Secret Manager 새 version 추가).
+3. **token 권한 부족** — R2 API token 이 Object Read & Write 권한이어야 함. Read-only 면 upload 실패.
+
+`vars.R2_BUCKET` 를 빈 값으로 두면 위 모두 불필요 — 다운로드가 Cloud Run streaming 으로 fallback.
 
 ### `Cloud Build` 빌드 실패
 

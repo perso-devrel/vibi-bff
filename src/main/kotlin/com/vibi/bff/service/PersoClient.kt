@@ -2,6 +2,7 @@ package com.vibi.bff.service
 
 import com.vibi.bff.config.PersoConfig
 import com.vibi.bff.model.*
+import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.PersoApiException
 import io.ktor.client.*
 import io.ktor.client.call.*
@@ -112,50 +113,19 @@ class PersoClient(
     }
 
     // Convenience: SAS + blob upload + register in one call.
+    //
+    // 디버깅: 단계별 시작/끝 로그를 박아두면 실패 시 어느 단계에서 죽었는지 즉시 분간된다.
+    // (실패는 보통 submitAudioSeparation 이전 어딘가에서 발생하는데, 성공 로그는 submit
+    // 직후에만 찍혀 사이가 깜깜했음.)
     suspend fun uploadMedia(mediaType: PersoMediaType, file: File): PersoMediaRegistration {
-        log.info("Uploading to Perso: {} ({} bytes)", file.name, file.length())
+        log.info("Uploading to Perso: {} ({} bytes, type={})", file.name, file.length(), mediaType)
         val sas = getSasToken(file.name)
+        log.info("Perso SAS issued: file={} expires={}", file.name, sas.expirationDatetime)
         uploadToBlob(sas.blobSasUrl, file)
-        return registerMedia(mediaType, sas.blobSasUrl, file.name)
-    }
-
-    // ── STT (전용) ───────────────────────────────────────────────────────────
-    // 자막 생성 전용. `submitTranslate` source==target 트릭 폐기 — Perso 가 정식 STT API 제공.
-    suspend fun submitStt(
-        mediaSeq: Long,
-        isVideoProject: Boolean,
-        title: String? = null,
-    ): Long {
-        val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/stt")) {
-            authHeader()
-            contentType(ContentType.Application.Json)
-            setBody(PersoSttRequest(mediaSeq, isVideoProject, title))
-        }
-        checkResponse(response)
-        val env: PersoEnvelope<PersoTranslateResult> = response.body()
-        val first = env.result.startGenerateProjectIdList.firstOrNull()
-            ?: throw PersoApiException(500, "Perso STT returned empty startGenerateProjectIdList")
-        log.info("Perso STT project submitted: projectSeq={}, mediaSeq={}", first, mediaSeq)
-        return first
-    }
-
-    suspend fun applySttChanges(projectSeq: Long) {
-        val response = httpClient.post(url(
-            "/video-translator/api/v1/project/$projectSeq/space/${config.spaceSeq}/stt/apply-changes"
-        )) { authHeader() }
-        checkResponse(response)
-    }
-
-    // STT script — paginated. `cursorId` null=처음부터, 응답의 `nextCursorId` 를 다음 호출에 전달.
-    suspend fun getSttScript(projectSeq: Long, cursorId: Long? = null): PersoScriptResponse {
-        val response = httpClient.get(url(
-            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/stt/script"
-        )) {
-            authHeader()
-            if (cursorId != null) parameter("cursorId", cursorId)
-        }
-        checkResponse(response)
-        return response.body()
+        log.info("Perso blob upload OK: file={} ({}B)", file.name, file.length())
+        val reg = registerMedia(mediaType, sas.blobSasUrl, file.name)
+        log.info("Perso registerMedia OK: file={} seq={}", file.name, reg.seq)
+        return reg
     }
 
     // ── Audio Separation (전용) ─────────────────────────────────────────────
@@ -165,6 +135,8 @@ class PersoClient(
         isVideoProject: Boolean,
         title: String? = null,
     ): Long {
+        log.info("Perso submitAudioSeparation: mediaSeq={} isVideoProject={} title={}",
+            mediaSeq, isVideoProject, title)
         val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/audio-separation")) {
             authHeader()
             contentType(ContentType.Application.Json)
@@ -249,35 +221,6 @@ class PersoClient(
         }
     }
 
-    // ── Translate / submit ───────────────────────────────────────────────────
-    suspend fun submitTranslate(
-        mediaSeq: Long,
-        isVideoProject: Boolean,
-        sourceLanguageCode: String,
-        targetLanguageCodes: List<String>,
-        numberOfSpeakers: Int,
-        title: String? = null,
-    ): Long {
-        val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/translate")) {
-            authHeader()
-            contentType(ContentType.Application.Json)
-            setBody(PersoTranslateRequest(
-                mediaSeq = mediaSeq,
-                isVideoProject = isVideoProject,
-                sourceLanguageCode = sourceLanguageCode,
-                targetLanguageCodes = targetLanguageCodes,
-                numberOfSpeakers = numberOfSpeakers,
-                title = title,
-            ))
-        }
-        checkResponse(response)
-        val env: PersoEnvelope<PersoTranslateResult> = response.body()
-        val first = env.result.startGenerateProjectIdList.firstOrNull()
-            ?: throw PersoApiException(500, "Perso returned empty startGenerateProjectIdList")
-        log.info("Perso project submitted: projectSeq={}, mediaSeq={}", first, mediaSeq)
-        return first
-    }
-
     // ── Progress poll ────────────────────────────────────────────────────────
     suspend fun getProgress(projectSeq: Long): PersoProgressResult {
         val response = httpClient.get(url(
@@ -288,8 +231,7 @@ class PersoClient(
     }
 
     /**
-     * Audio-separation 프로젝트 전용 download links — translation 의 [getDownloadLinks] 와 응답
-     * 모델 다름. target 별 valid 한 응답 필드:
+     * Audio-separation 프로젝트 전용 download links. target 별 valid 한 응답 필드:
      *   - target=originalVoiceSpeakers → audioFile.voiceAudioDownloadLink (.tar)
      *   - target=originalSubBackground → audioFile.originalSubBackgroundDownloadLink (.wav)
      */
@@ -304,52 +246,23 @@ class PersoClient(
         return response.body<PersoEnvelope<PersoSeparationDownloadLinks>>().result
     }
 
-    /** project meta + downloadPathInfo (storage path 직접 노출). */
+    /**
+     * project meta + downloadPathInfo (storage path 직접 노출).
+     *
+     * Perso 의 다른 endpoint 들은 `{"result":{...}}` envelope 으로 오지만 이 endpoint 는
+     * envelope 없이 raw object 로 응답하는 케이스가 관측됨 (Perso 측 inconsistency).
+     * 두 형태 모두 받도록 JsonElement 로 먼저 받아서 envelope 이면 벗기고 아니면 그대로 파싱.
+     */
     suspend fun getProjectInfo(projectSeq: Long): PersoProjectInfo {
         val response = httpClient.get(url(
             "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}"
         )) { authHeader() }
         checkResponse(response)
-        return response.body<PersoEnvelope<PersoProjectInfo>>().result
-    }
-
-    // ── Download info / links ────────────────────────────────────────────────
-    suspend fun getDownloadInfo(projectSeq: Long): PersoDownloadInfo {
-        val targetPath = "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download-info"
-        log.info("Perso getDownloadInfo: GET {}{}", config.baseUrl, targetPath)
-        val response = httpClient.get(url(targetPath)) { authHeader() }
-        if (!response.status.isSuccess()) {
-            val body = response.bodyAsText()
-            log.error("Perso getDownloadInfo failed: status={} body={} url={}{}",
-                response.status.value, body, config.baseUrl, targetPath)
-            throw PersoApiException(response.status.value, body)
-        }
-        // Perso download-info 응답은 envelope `{"result":{...}}` — envelope 벗겨야 함.
-        return response.body<PersoEnvelope<PersoDownloadInfo>>().result
-    }
-
-    suspend fun getDownloadLinks(projectSeq: Long, target: String): PersoDownloadLinksResult {
-        // Perso download endpoint 일시 5xx 가 자주 발생 → registerMedia 와 동일 backoff retry. 4xx 즉시 throw.
-        var lastErr: PersoApiException? = null
-        repeat(3) { attempt ->
-            val response = httpClient.get(url(
-                "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download"
-            )) {
-                authHeader()
-                parameter("target", target)
-            }
-            if (response.status.isSuccess()) {
-                return response.body<PersoEnvelope<PersoDownloadLinksResult>>().result
-            }
-            val body = response.bodyAsText()
-            val err = PersoApiException(response.status.value, body)
-            lastErr = err
-            if (err.statusCode in 400..499) throw err
-            log.warn("getDownloadLinks {} (attempt {}/3) — retrying in 3s: target={} body={}",
-                err.statusCode, attempt + 1, target, body)
-            kotlinx.coroutines.delay(3000)
-        }
-        throw lastErr ?: RuntimeException("Perso getDownloadLinks failed after retries")
+        val element = response.body<kotlinx.serialization.json.JsonElement>()
+        val obj = element as? kotlinx.serialization.json.JsonObject
+            ?: throw PersoApiException(500, "getProjectInfo: expected JSON object, got $element")
+        val target = obj["result"] ?: obj
+        return AppJson.decodeFromJsonElement(PersoProjectInfo.serializer(), target)
     }
 
     /**
@@ -364,31 +277,4 @@ class PersoClient(
         return response.body()
     }
 
-    // Stream a pre-signed download URL to a local file (atomic: tmp → rename).
-    suspend fun streamDownload(downloadUrl: String, targetFile: File) {
-        val tempFile = File(targetFile.parentFile, "${targetFile.name}.tmp")
-        try {
-            httpClient.prepareGet(downloadUrl).execute { response ->
-                checkResponse(response)
-                val channel = response.bodyAsChannel()
-                tempFile.outputStream().use { output ->
-                    val buffer = ByteArray(8192)
-                    while (!channel.isClosedForRead) {
-                        val bytesRead = channel.readAvailable(buffer)
-                        if (bytesRead > 0) output.write(buffer, 0, bytesRead)
-                    }
-                }
-            }
-            if (!tempFile.renameTo(targetFile)) {
-                // renameTo returns false silently on cross-device, full disk,
-                // or target-exists — clean up ourselves instead of leaking the
-                // .tmp file on the happy-path exit.
-                tempFile.delete()
-                throw RuntimeException("Failed to rename download temp file to ${targetFile.absolutePath}")
-            }
-        } catch (e: Throwable) {
-            tempFile.delete()
-            throw e
-        }
-    }
 }

@@ -7,9 +7,8 @@ import java.io.File
 import java.util.concurrent.TimeUnit
 
 /**
- * 영상/오디오 입력에서 mp3 추출. STT, 음성분리 업로드, auto-dub 결과 mux 후 audio
- * 추출 등 BFF 안에서 동일 패턴이 여러 곳에 등장 — `-vn -c:a libmp3lame -q:a <quality>`
- * 만 파라미터로 받아 통합. timeout 도 caller 별로 다른 수치를 그대로 전달.
+ * 영상/오디오 입력에서 mp3 추출. 음성분리 업로드 등에서 동일 패턴 — `-vn -c:a libmp3lame
+ * -q:a <quality>` 만 파라미터로 받아 통합. timeout 도 caller 별로 다른 수치를 그대로 전달.
  */
 internal suspend fun extractMp3(
     input: File,
