@@ -262,7 +262,7 @@ class SeparationRoutesTest {
         val detail = body["detail"]!!.jsonPrimitive.content
         assertTrue(detail.contains("trimEndMs=10000"), "detail should echo trimEndMs")
         assertTrue(detail.contains("duration=5000"), "detail should echo probed duration")
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
     // probe returns null (ffprobe unavailable / corrupt file) → 500 ffmpeg_error
@@ -279,7 +279,7 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.InternalServerError, response.status)
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
         assertEquals("ffmpeg_error", body["error"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
     // ffmpeg trim itself fails → 500 ffmpeg_error
@@ -297,7 +297,7 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.InternalServerError, response.status)
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
         assertEquals("ffmpeg_error", body["error"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
     // No trim fields → trim() is not called (no cut needed). probeDurationMs 는 admin
@@ -307,7 +307,7 @@ class SeparationRoutesTest {
     fun `POST separate without trim skips MediaTrimmer trim but still probes for analytics`() = testApp {
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeDurationMs(any()) } returns 5_000L
-        every { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-ok"
+        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-ok"
 
         val response = postSeparate(
             client,
@@ -316,7 +316,7 @@ class SeparationRoutesTest {
 
         assertEquals(HttpStatusCode.Accepted, response.status)
         coVerify(exactly = 0) { MediaTrimmer.trim(any(), any(), any(), any()) }
-        verify(exactly = 1) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 1) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
     // ── Phase 1: editedRenderJobId branch ──────────────────────────────────────
@@ -333,7 +333,7 @@ class SeparationRoutesTest {
         }
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
     /** spec.editedRenderJobId 가 valid → owned copy 가 separationService 로 전달 */
@@ -345,7 +345,7 @@ class SeparationRoutesTest {
             writeText("fake-mp4-bytes")
         }
         every { renderService.acquireRenderOutputCopy("render-ok", any(), any()) } returns copy
-        every { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-from-render"
+        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-from-render"
 
         val response = client.post("/api/v2/separate") {
             setBody(MultiPartFormDataContent(formData {
@@ -357,17 +357,20 @@ class SeparationRoutesTest {
         verify(exactly = 1) {
             renderService.acquireRenderOutputCopy("render-ok", fileStorage.editedSourceDir, any())
         }
-        verify(exactly = 1) { separationService.submit(copy, any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 1) { separationService.submit(copy, any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
-    /** 버튼 연타 방어: 같은 (source+spec) 으로 두 번째 submit 이 들어오면
+    /** 버튼 연타 방어: 같은 (caller+source+spec) 으로 두 번째 submit 이 들어오면
      * findActiveJob 가 기존 jobId 를 반환 → 라우트는 resolve / submit 호출 없이
-     * 바로 그 jobId 를 돌려줘야 함. */
+     * 바로 그 jobId 를 돌려줘야 함. dedupKey 는 미인증 caller (userId=null) 면 null
+     * 이라 미인증 환경에선 dedup 비활성 — 본 테스트는 인증 caller 분기로 검증. */
     @Test
-    fun `POST separate dedup hit returns existing jobId without resolve or submit`() = testApp {
+    fun `POST separate dedup hit returns existing jobId without resolve or submit`() = testApp(jwtSecret = testJwtSecret) {
         every { separationService.findActiveJob(any()) } returns "sep-already-running"
+        val callerId = UUID.randomUUID()
 
         val response = client.post("/api/v2/separate") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
             setBody(MultiPartFormDataContent(formData {
                 append(
                     "spec",
@@ -379,8 +382,8 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.Accepted, response.status)
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
         assertEquals("sep-already-running", body["jobId"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { renderService.acquireRenderOutputCopy(any(), any()) }
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 0) { renderService.acquireRenderOutputCopy(any(), any(), any()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
     /** dedupKey 는 editedRenderJobId path 에서만 계산 — legacy multipart upload
@@ -388,7 +391,7 @@ class SeparationRoutesTest {
     @Test
     fun `POST separate upload path skips dedup index (no findActiveJob call)`() = testApp {
         mockkObject(MediaTrimmer)
-        every { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-upload"
+        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) } returns "sep-upload"
 
         val response = postSeparate(client, """{"mediaType":"AUDIO"}""")
         assertEquals(HttpStatusCode.Accepted, response.status)
@@ -396,7 +399,7 @@ class SeparationRoutesTest {
         // → findActiveJob 호출 자체가 일어나면 안 됨 (그리고 submit 호출은 dedupKey=null
         // 으로 들어가야 함).
         verify(exactly = 0) { separationService.findActiveJob(any()) }
-        verify(exactly = 1) { separationService.submit(any(), any(), null, anyNullable(), any(), anyNullable()) }
+        verify(exactly = 1) { separationService.submit(any(), any(), any(), null, anyNullable(), any(), anyNullable()) }
     }
 
     /** spec / file 둘 다 없으면 400 */
@@ -408,7 +411,7 @@ class SeparationRoutesTest {
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 
     // ── 자원 소유권 검증 ────────────────────────────────────────────────────────
@@ -462,6 +465,6 @@ class SeparationRoutesTest {
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable()) }
     }
 }

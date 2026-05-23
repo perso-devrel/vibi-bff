@@ -10,7 +10,7 @@ import org.jetbrains.exposed.sql.transactions.transaction
 import org.slf4j.LoggerFactory
 
 /**
- * 외부 API 호출 (Perso / Gemini / ...) instrumentation. 운영 admin 대시보드의 비용/안정성
+ * 외부 API 호출 (Perso 등) instrumentation. 운영 admin 대시보드의 비용/안정성
  * 가시성 source-of-truth.
  *
  * 모든 write 는 try/catch swallow — analytics 실패가 user-facing flow 깨뜨리지 않도록.

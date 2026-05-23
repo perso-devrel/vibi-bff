@@ -3,7 +3,6 @@ package com.vibi.bff.plugins
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.routes.adminRoutes
 import com.vibi.bff.routes.authRoutes
-import com.vibi.bff.routes.chatRoutes
 import com.vibi.bff.routes.creditRoutes
 import com.vibi.bff.routes.languageRoutes
 import com.vibi.bff.routes.renderRoutes
@@ -11,7 +10,6 @@ import com.vibi.bff.routes.separationRoutes
 import com.vibi.bff.service.AdminRepository
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.CreditRepository
-import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.MediaSourceResolver
@@ -24,8 +22,6 @@ import com.vibi.bff.service.StemMixService
 import com.vibi.bff.service.UserRepository
 import com.vibi.bff.service.iap.AppleReceiptVerifier
 import com.vibi.bff.service.iap.GoogleReceiptVerifier
-import com.vibi.bff.plugins.NotFoundException
-import io.ktor.client.HttpClient
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.http.content.*
@@ -42,8 +38,6 @@ fun Application.configureRouting(
     separationService: SeparationService,
     stemMixService: StemMixService,
     signedUrlService: SignedUrlService,
-    geminiClient: GeminiClient,
-    httpClient: HttpClient,
     renderInputCache: RenderInputCacheService,
     mediaSourceResolver: MediaSourceResolver,
     authService: AuthService,
@@ -100,7 +94,6 @@ fun Application.configureRouting(
                 appConfig, mediaSourceResolver, objectStore,
                 jwtSecret = appConfig.auth.jwtSecret,
             )
-            chatRoutes(geminiClient)
             adminRoutes(adminRepository, jwtSecret = appConfig.auth.jwtSecret)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.

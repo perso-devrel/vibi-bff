@@ -6,10 +6,6 @@ private fun requireValidVolume(name: String, v: Float) {
     require(v.isFinite() && v >= 0f) { "$name volume must be finite and >= 0" }
 }
 
-// --- Upload ---
-@Serializable
-data class UploadResponse(val blobPath: String)
-
 // --- Mock testdata (음성분리 폴더 구조 기반) ---
 @Serializable
 data class TestdataSeparationFolder(
@@ -99,7 +95,7 @@ data class RenderConfig(
      *   "medium" — CRF 23, preset fast, audio 192k. 기본값. 기존 동작과 동일.
      *   "low"    — CRF 28, preset fast, audio 128k. medium 대비 ~50% 작은 파일.
      * audio 모드 (outputKind="audio") 에선 quality 무시 — 오디오 비트레이트는
-     * 자막/분리 파이프라인 입력 품질 보장 위해 별도 유지.
+     * 분리 파이프라인 입력 품질 보장 위해 별도 유지.
      */
     val quality: String = "medium",
 ) {

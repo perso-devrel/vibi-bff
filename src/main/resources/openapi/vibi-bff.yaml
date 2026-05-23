@@ -5,7 +5,6 @@ info:
     vibi Backend-For-Frontend API.
 
     - Perso AI 프록시 — 음성분리
-    - Vertex AI Gemini 프록시 — 채팅 function calling
     - 로컬 ffmpeg 파이프라인 — segment concat / BGM mix / 음원분리 stem mix
     - Google / Apple Sign In 검증 + Postgres user upsert + HS256 access token 발급
 
@@ -36,8 +35,6 @@ tags:
     description: ffmpeg 기반 렌더 파이프라인 (segments / bgm / 음원분리 directive)
   - name: Separation
     description: Perso 음성분리 → stem 다운로드 + 사용자 mix 합성
-  - name: Chat
-    description: Vertex Gemini function-calling 기반 편집 어시스턴트
   - name: Testdata
     description: 개발/QA 용 mock 음원분리 데이터 — production 비활성 권장
 
@@ -531,38 +528,6 @@ paths:
         '404':
           description: mix 미완료 / 파일 없음
 
-  # ---------------------------------------------------------------- Chat
-  /api/v2/chat:
-    post:
-      tags: [Chat]
-      summary: Gemini function-calling 기반 편집 어시스턴트
-      description: |
-        모바일이 timeline 요약 (`ProjectContext`) + 대화 turns 를 보내면 Gemini 의
-        functionDeclarations 호출 결과를 `ChatResponse(kind=text|proposal)` 로 정규화.
-        proposal.steps 는 등록된 EDIT_TOOLS 의 functionDeclaration name 만 포함하며
-        최대 5개.
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/ChatRequest' }
-      responses:
-        '200':
-          description: 응답
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ChatResponse' }
-        '400':
-          description: messages 비어 있음
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-        '500':
-          description: Gemini 통신 실패
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-
   # ---------------------------------------------------------------- Testdata (mock)
   /api/v2/testdata/separation/list:
     get:
@@ -975,127 +940,6 @@ components:
           type: string
           nullable: true
           description: status=COMPLETED 일 때 signed BFF URL
-
-    # -------------------------- Chat
-    ChatMessage:
-      type: object
-      required: [role, content]
-      properties:
-        role:
-          type: string
-          enum: [user, model]
-        content: { type: string }
-
-    ContextSegment:
-      type: object
-      required: [id, startMs, endMs, sourceUri]
-      properties:
-        id: { type: string }
-        startMs: { type: integer, format: int64 }
-        endMs: { type: integer, format: int64 }
-        sourceUri: { type: string }
-        speedScale: { type: number, format: float, default: 1.0 }
-        volumeScale: { type: number, format: float, default: 1.0 }
-
-    ContextBgmClip:
-      type: object
-      required: [id, startMs, endMs]
-      properties:
-        id: { type: string }
-        startMs: { type: integer, format: int64 }
-        endMs: { type: integer, format: int64 }
-        volumeScale: { type: number, format: float, default: 1.0 }
-        speedScale: { type: number, format: float, default: 1.0 }
-
-    ContextStem:
-      type: object
-      required: [stemId, label, volume, selected]
-      properties:
-        stemId: { type: string }
-        label: { type: string }
-        volume: { type: number, format: float }
-        selected: { type: boolean }
-
-    ContextSeparationDirective:
-      type: object
-      required: [id, rangeStartMs, rangeEndMs, durationMs, numberOfSpeakers]
-      properties:
-        id: { type: string }
-        rangeStartMs: { type: integer, format: int64 }
-        rangeEndMs: { type: integer, format: int64 }
-        durationMs: { type: integer, format: int64 }
-        numberOfSpeakers: { type: integer }
-
-    ProjectContext:
-      type: object
-      properties:
-        segments:
-          type: array
-          items: { $ref: '#/components/schemas/ContextSegment' }
-        bgmClips:
-          type: array
-          items: { $ref: '#/components/schemas/ContextBgmClip' }
-        separationStems:
-          type: array
-          items: { $ref: '#/components/schemas/ContextStem' }
-        separationDirectives:
-          type: array
-          items: { $ref: '#/components/schemas/ContextSeparationDirective' }
-        currentPlayheadMs: { type: integer, format: int64, default: 0 }
-        selectedSegmentId: { type: string, nullable: true }
-        selectedClipId: { type: string, nullable: true }
-        isRangeSelecting: { type: boolean, default: false }
-        pendingRangeStartMs: { type: integer, format: int64, nullable: true }
-        pendingRangeEndMs: { type: integer, format: int64, nullable: true }
-        videoDurationMs: { type: integer, format: int64, default: 0 }
-
-    ChatRequest:
-      type: object
-      required: [messages, projectContext]
-      properties:
-        messages:
-          type: array
-          minItems: 1
-          items: { $ref: '#/components/schemas/ChatMessage' }
-        projectContext: { $ref: '#/components/schemas/ProjectContext' }
-        locale:
-          type: string
-          default: ko
-
-    ToolCall:
-      type: object
-      required: [name, args]
-      properties:
-        name:
-          type: string
-          description: 등록된 EDIT_TOOLS functionDeclaration name
-        args:
-          type: object
-          additionalProperties: true
-
-    Proposal:
-      type: object
-      required: [rationale, steps]
-      properties:
-        rationale: { type: string }
-        steps:
-          type: array
-          maxItems: 5
-          items: { $ref: '#/components/schemas/ToolCall' }
-
-    ChatResponse:
-      type: object
-      required: [kind]
-      properties:
-        kind:
-          type: string
-          enum: [text, proposal]
-        text:
-          type: string
-          nullable: true
-        proposal:
-          allOf: [{ $ref: '#/components/schemas/Proposal' }]
-          nullable: true
 
     # -------------------------- Testdata
     TestdataSeparationFolder:

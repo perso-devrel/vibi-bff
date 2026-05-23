@@ -5,7 +5,6 @@ Current surface:
 
 - Proxies **Perso AI** for audio source separation (background / all-voice /
   per-speaker stems, plus user-selected stem remix).
-- Proxies **Vertex AI Gemini** for the chat-assistant function-calling router.
 - Runs a local **ffmpeg** render pipeline (multi-segment concat, BGM
   `atrim`+`amix` sub-range mixing, audio override).
 - Gateways **Google Sign In** + **Apple Sign In** ID Token verification → upserts
@@ -30,8 +29,6 @@ Current surface:
 - **Postgres** (Neon free tier is fine) — required for user upsert
 - At least one **Google OAuth client id** (iOS / Android / Web) — required to boot
 - *(Optional)* **Apple Sign In** client ids (iOS bundle id) — blank disables Apple
-- *(Optional)* GCP service-account credentials for **Vertex AI Gemini** if the
-  chat assistant is exercised
 - *(Optional)* A **Cloudflare R2 bucket** — large render / mix downloads redirect to SigV4
   signed URLs instead of streaming through Cloud Run
 
@@ -88,15 +85,6 @@ Environment variables (also loadable from system env):
 | `SEPARATION_MIX_TTL_MS`      | `600000`                 | Keep mix outputs for this many ms after completion.  |
 | `SEPARATION_URL_TTL_SEC`     | `604800` (7 days)        | Stem download URL token lifetime. Must be ≤ abandonTtlMs so a token that outlives the reaped job never appears. |
 | `SEPARATION_MIX_URL_TTL_SEC` | `600`                    | Mix download URL token lifetime.                     |
-
-### Vertex AI (Gemini chat)
-
-| Key                          | Default                  | Description                                          |
-|------------------------------|--------------------------|------------------------------------------------------|
-| `GEMINI_PROJECT_ID`          | —                        | GCP project hosting Vertex AI (may differ from the runtime project). |
-| `GEMINI_LOCATION`            | `us-central1`            | Vertex AI region.                                    |
-| `GOOGLE_APPLICATION_CREDENTIALS` | *(blank = ADC)*      | Path to service-account JSON. Blank → Application Default Credentials (Cloud Run attached SA / local `gcloud auth application-default login`). |
-| `GEMINI_MODEL`               | `gemini-2.5-flash`       | Vertex AI model id.                                  |
 
 ### Auth & Postgres
 
@@ -158,7 +146,6 @@ v1 has been retired.
 | POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems with `amix normalize=0`; disposes source stems on success. |
 | GET    | `/api/v2/separate/mix/{mixJobId}`            | Mix status + signed download URL when `COMPLETED`.            |
 | GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`). With `R2_BUCKET`, `302` to an R2 presigned URL. |
-| POST   | `/api/v2/chat`                               | Gemini function-calling assistant — returns `{kind:"text"\|"proposal"}` (see [Chat](#chat-endpoint)). |
 | GET    | `/api/v2/testdata/separation/list`           | (dev mock) `testdata/<startSec>-<endSec>/` folder listing.    |
 | GET    | `/api/v2/testdata/separation/{folder}/{stem}` | (dev mock) Stem audio stream (no auth).                      |
 
@@ -167,27 +154,9 @@ v1 has been retired.
 > The mobile client still has historical `submitSubtitleJob` / `submitAutoDubJob` /
 > `requestLipSync` methods in `BffApi` — they will 404 if invoked. Re-introducing
 > the surface should be a fresh design, not a `git revert`.
-
-### Chat endpoint
-
-`POST /api/v2/chat` accepts JSON `{messages, projectContext, locale}`. The
-service forwards the conversation + a registered set of `EDIT_TOOLS`
-function declarations to Vertex AI Gemini (`generateContent`). Gemini either
-returns plain text (read-only / clarification) or one or more `functionCall`
-parts that the BFF relays as `proposal.steps` (max 5). The mobile dispatcher
-then maps each step name to the matching `TimelineViewModel.onXxx`.
-
-Tool registry (`service/ChatToolDefs.kt`): `delete_segment_range`,
-`duplicate_segment_range`, `update_segment_volume`, `update_segment_speed`,
-`separate_audio_range`, `update_stem_volume`, `update_subtitle_text`,
-`generate_subtitles`, `generate_dub`, `move_bgm_clip`, `update_bgm_volume`,
-`generate_subtitles_for_bgm`, `generate_dub_for_bgm`.
-
-System instruction enforces: respond in user's language, never invent IDs,
-single tool kind per response (`text` or `proposal`), confirmation gate on
-the mobile side. ProjectContext (segments / subtitles / dubs / BGM clips /
-stems / playhead / selectionId) is inlined as a system prefix on the first
-user turn.
+>
+> The Gemini-backed chat assistant (`/api/v2/chat`) was also removed; the
+> mobile `ChatRoutes` / `ChatToolDispatcher` paths now lead to 404.
 
 ### Render endpoint
 
@@ -202,31 +171,13 @@ assigns a `jobId` for polling.
 | `video`               | *(legacy)* Single source video                           |
 | `video_0`, `video_1`, … | Source videos referenced by `segments[].sourceFileKey` |
 | `segment_image_0`, …  | Still images used as IMAGE-type segments                 |
-| `image_0`, `image_1`, … | Sticker overlay images (referenced by `imageClips[]`)  |
-| `audio_0`, `audio_1`, … | Dub audio tracks (referenced by `dubClips[]`)          |
-| `subtitles`           | *(optional)* ASS subtitle file, burned in at the end     |
+| `bgm_0`, `bgm_1`, …   | BGM tracks (referenced by `bgmClips[]`)                  |
 | `config`              | JSON-encoded `RenderConfig` (form item, not a file)      |
 
 #### RenderConfig
 
-Two modes share the same DTO; pick one:
-
 ```jsonc
-// Legacy single-video mode
-{
-  "videoDurationMs": 60000,
-  "dubClips": [
-    { "audioFileKey": "audio_0", "startMs": 1000, "durationMs": 4000, "volume": 1.0 }
-  ],
-  "imageClips": [
-    { "imageFileKey": "image_0", "startMs": 2000, "endMs": 5000,
-      "xPct": 50, "yPct": 30, "widthPct": 25, "heightPct": 25 }
-  ]
-}
-```
-
-```jsonc
-// Multi-segment mode (replaces videoDurationMs)
+// Multi-segment mode
 {
   "segments": [
     { "sourceFileKey": "video_0", "type": "VIDEO", "order": 0,
@@ -239,20 +190,21 @@ Two modes share the same DTO; pick one:
       "durationMs": 20000, "trimStartMs": 0, "trimEndMs": 20000,
       "width": 1920, "height": 1080 }
   ],
-  "imageClips": [ /* stickers — global timeline, same as above */ ],
-  "dubClips":   [ /* dub tracks — global timeline */ ]
+  "bgmClips": [
+    { "audioFileKey": "bgm_0", "startMs": 0, "volume": 0.4,
+      "sourceTrimStartMs": 0, "sourceTrimEndMs": 30000 }
+  ]
 }
 ```
 
 Output resolution comes from `segments[0].width`/`height` (multi-segment) or
-ffprobe on the source (legacy). Sticker positions/sizes are percentages of
-that output resolution. `imageClips` are gated via ffmpeg `enable='between(t,…)'`.
+ffprobe on the source (legacy).
 
 #### Pipeline (multi-segment)
 
 1. **Per-segment normalization** — VIDEO: input-side seek + scale/pad to output resolution + silent AAC track. IMAGE: `-loop 1` + letterbox + silent AAC track.
 2. **Concat demuxer** (`-c copy`) — all normalized clips share codec, fps, resolution, and audio layout, so no re-encode here.
-3. **Final pass** — subtitle burn-in → chained sticker `overlay` filters → `adelay`+`volume` dub clips mixed with original audio via `amix`.
+3. **Final pass** (`-c:v copy`) — BGM clips `atrim`+`asetpts` sub-ranged then `amix` with original audio.
 
 ### Separation endpoints
 
@@ -376,7 +328,7 @@ To enable in production:
 src/main/kotlin/com/vibi/bff/
 ├── Application.kt              # Ktor entry, DI wiring, HttpClient timeouts, shutdown hooks
 ├── Constants.kt                # MAX_UPLOAD_FILE_SIZE, etc.
-├── config/AppConfig.kt         # HOCON + env var loading (Storage, Perso, Gemini, Separation, Auth, Db)
+├── config/AppConfig.kt         # HOCON + env var loading (Storage, Perso, Separation, Auth, Db)
 ├── db/
 │   ├── Database.kt             # HikariCP + Exposed bootstrap
 │   └── UsersTable.kt           # (provider, providerSub) unique
@@ -386,21 +338,17 @@ src/main/kotlin/com/vibi/bff/
 ├── model/
 │   ├── AuthModels.kt           # GoogleAuthRequest / AppleAuthRequest / AuthResponse
 │   ├── BffModels.kt            # Render / Separation / Mix / Language DTOs
-│   ├── ChatModels.kt           # Chat / Gemini DTOs (functionCall, proposal)
 │   └── PersoModels.kt          # Perso upstream DTOs
 ├── routes/
 │   ├── AuthRoutes.kt           # /auth/google · /auth/apple
 │   ├── LanguageRoutes.kt       # /languages
 │   ├── RenderRoutes.kt         # /render · /render/inputs · /render/{id}/{status,download}
 │   ├── SeparationRoutes.kt     # /separate · /separate/{id} · /stem · /mix · /mix/{id}{,/download}
-│   ├── ChatRoutes.kt           # /chat
 │   ├── DownloadResponder.kt    # respondFile / R2-redirect dispatcher
 │   └── MultipartUtils.kt       # parsing helpers
 └── service/
     ├── PersoClient.kt          # Perso upstream wrapper (SAS upload / separate / poll / download, SSRF allow-list, 5xx backoff)
     ├── PersoPolling.kt         # Job-status polling primitive
-    ├── GeminiClient.kt         # Vertex AI Gemini wrapper (function calling + tool_code fallback parser)
-    ├── ChatToolDefs.kt         # EDIT_TOOLS function declarations + SYSTEM_INSTRUCTION
     ├── AuthService.kt          # Google tokeninfo + Apple JWKS RS256 + JWT issuance
     ├── UserRepository.kt       # Exposed-backed user upsert
     ├── FileStorageService.kt   # Local blob storage (uploads/, render/, separation/, edited-source/)
@@ -427,7 +375,6 @@ and is exercised end-to-end against the mobile client.
 - **`PERSO_API_KEY must be set`** — populate `.env` or the env var; the boot fail-fast guards against missing credentials.
 - **`SEPARATION_SIGNING_SECRET must be at least 32 chars`** — the default template has a placeholder; generate one with `openssl rand -hex 32` and paste into `.env`.
 - **Render jobs stuck in `FAILED` with "ffmpeg exited with code …"** — check the server logs; the last 500 bytes of ffmpeg stderr are emitted on failure. The most common causes are missing `ffmpeg`/`ffprobe` on `PATH` or a segment referencing an unknown `sourceFileKey`.
-- **Subtitle burn-in silently fails on Windows** — `escapeFilterPath` preserves the drive-letter colon; if you see `No such file or directory` for a subtitle path in ffmpeg logs, verify the uploaded file exists under `STORAGE_PATH/uploads/`.
 - **Separation status returns 403 after a while** — stem tokens expire after `SEPARATION_URL_TTL_SEC`. Re-call `GET /api/v2/separate/{jobId}` to mint fresh signed URLs.
 - **`POST /api/v2/separate/{jobId}/mix` returns 409** — the separation is no longer `READY` (either already consumed by a prior mix, still processing, or reaped after `SEPARATION_ABANDON_TTL_MS`).
 - **Perso returns 402** — workspace quota is exhausted. Status maps to `402 Payment Required` on the BFF response.

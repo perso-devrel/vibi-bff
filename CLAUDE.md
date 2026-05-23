@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-vibi BFF — Kotlin/Ktor backend. **Perso AI** 프록시 (오디오 분리) + **Vertex AI Gemini** 프록시 (자연어 채팅 function calling) + 로컬 ffmpeg 렌더 파이프라인 (multi-segment concat, BGM atrim+amix, audio override) + **Google / Apple Sign In** ID Token 검증 + **Postgres** user upsert + HS256 JWT 발급 + 옵션 **Cloudflare R2** SigV4 presigned URL redirect.
+vibi BFF — Kotlin/Ktor backend. **Perso AI** 프록시 (오디오 분리) + 로컬 ffmpeg 렌더 파이프라인 (multi-segment concat, BGM atrim+amix, audio override) + **Google / Apple Sign In** ID Token 검증 + **Postgres** user upsert + HS256 JWT 발급 + 옵션 **Cloudflare R2** SigV4 presigned URL redirect.
 
 - **Stack**: Kotlin 2.0, Ktor 3.0.3, Netty, kotlinx.serialization, JDK 21, Exposed + HikariCP, Postgres
 - **Runtime deps**: `ffmpeg`, `ffprobe` on `PATH`; Postgres (Neon free tier 호환); Cloudflare R2 bucket (옵션)
@@ -28,12 +28,12 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 
 - `Application.kt` — entry point. `loadDotenv` (real env > sys prop > .env), `loadConfig`, `DbBootstrap.init`, HttpClient + 모든 서비스 wiring, CallLogging (signed-URL token / OAuth code 마스킹), 종료 hook (httpClient + render/separation/stemMix shutdown + dataSource close).
 - `Constants.kt` — `MAX_UPLOAD_FILE_SIZE` 등.
-- `config/AppConfig.kt` — HOCON + env var loading (StorageConfig·PersoConfig·GeminiConfig·SeparationConfig·AuthConfig·DbConfig). 각 config 의 `init { require(...) }` 가 boot 시 fail-fast.
+- `config/AppConfig.kt` — HOCON + env var loading (StorageConfig·PersoConfig·SeparationConfig·AuthConfig·DbConfig). 각 config 의 `init { require(...) }` 가 boot 시 fail-fast.
 - `db/Database.kt` (DbBootstrap, HikariCP) + `db/UsersTable.kt` (Exposed `(provider, providerSub)` unique).
 - `plugins/` — CORS, Serialization (`AppJson = Json { ignoreUnknownKeys=true, encodeDefaults=true }`), `ErrorHandling` (StatusPages), `Routing`.
-- `routes/` — `/api/v2` (`AuthRoutes` · `LanguageRoutes` · `RenderRoutes` (+ `/inputs`) · `SeparationRoutes` · `ChatRoutes` · `DownloadResponder`·`MultipartUtils` 헬퍼). dev mock 으로 `/testdata/separation/*`.
-- `model/` — `AuthModels` · `BffModels` · `ChatModels` · `PersoModels`. BFF DTO 와 Perso upstream DTO 분리, `@SerialName` 으로 snake_case ↔ camelCase 매핑.
-- `service/` — `PersoClient`, `PersoPolling`, `GeminiClient`, `ChatToolDefs`, `FileStorageService`, `MediaSourceResolver`, `MediaTrimmer`, `RenderService`, `RenderInputCacheService`, `SeparationService`, `StemMixService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
+- `routes/` — `/api/v2` (`AuthRoutes` · `LanguageRoutes` · `RenderRoutes` (+ `/inputs`) · `SeparationRoutes` · `DownloadResponder`·`MultipartUtils` 헬퍼). dev mock 으로 `/testdata/separation/*`.
+- `model/` — `AuthModels` · `BffModels` · `PersoModels`. BFF DTO 와 Perso upstream DTO 분리, `@SerialName` 으로 snake_case ↔ camelCase 매핑.
+- `service/` — `PersoClient`, `PersoPolling`, `FileStorageService`, `MediaSourceResolver`, `MediaTrimmer`, `RenderService`, `RenderInputCacheService`, `SeparationService`, `StemMixService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
 
 > 과거 `AutoSubtitleService` / `AutoDubService` / `LipSyncService` + 관련 route·DTO 는 **commit `52f8d7c refactor(bff): sticker/자막/더빙 surface 절단`** 으로 일괄 제거. 모바일에 잔존하는 caller (BffApi 메서드들 + Auto*RepositoryImpl) 는 호출 시 404 — 재도입 작업 시 본 commit 의 디프를 base 로 복원하지 말고 새로 설계할 것.
 
@@ -50,7 +50,6 @@ GET  /api/v2/separate/{id}              # stem + 서명 URL
 GET  /api/v2/separate/{id}/stem/{stemId}        # token=*** 필수
 POST /api/v2/separate/{id}/mix          # 사용자 stem 선택 → amix (normalize=0)
 GET  /api/v2/separate/mix/{id}{,/download}
-POST /api/v2/chat                       # Gemini function calling
 GET  /api/v2/testdata/separation/*      # (dev mock)
 ```
 
@@ -103,15 +102,6 @@ GET  /api/v2/testdata/separation/*      # (dev mock)
 **증상**: 모바일이 보낸 옛 spec JSON 에 BFF 가 모르는 필드가 섞여있으면 `MissingFieldException` 으로 폭사.
 
 **해결**: `AppJson = Json { ignoreUnknownKeys=true, encodeDefaults=true }` 를 single source 로 두고, route 들이 `AppJson.decodeFromString` 사용. RenderConfig 도 동일 (`d865f19 fix(bff): /render 의 RenderConfig 파싱을 AppJson 으로`).
-
-### Gemini 2.5 Flash 가 functionDeclarations 무시하고 tool_code 텍스트로 fallback
-
-**증상**: `/api/v2/chat` 응답이 structured `functionCall` part 없이 `tool_code` 마크다운 + `print(default_api.<name>(args))` Python 스타일 텍스트로 옴.
-
-**해결 패턴 (3중 방어)**:
-1. `ChatToolDefs.SYSTEM_INSTRUCTION` 첫 부분에 "structured functionCall response part" 명시 + `tool_code` / `print(default_api.foo(...))` 명시 금지.
-2. `GeminiClient.chat` payload 에 `toolConfig.functionCallingConfig.mode = "AUTO"` 명시.
-3. `GeminiClient.parseChatResult` 에 fallback regex parser — text 에 `default_api.<name>(kwargs)` 발견 시 `recoverToolCallsFromText` 가 ToolCall 복원. Python literal (str/int/float/bool/list) 만 지원.
 
 ### Separation idempotency — 버튼 연타로 같은 구간 중복 submit 차단
 

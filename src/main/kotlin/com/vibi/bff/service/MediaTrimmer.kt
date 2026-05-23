@@ -1,5 +1,6 @@
 package com.vibi.bff.service
 
+import kotlinx.coroutines.CancellationException
 import org.slf4j.LoggerFactory
 import java.io.File
 
@@ -27,6 +28,10 @@ object MediaTrimmer {
             val output = FfmpegRunner.run(cmd, "ffprobe ${file.name}", timeoutMinutes = 1).trim()
             val seconds = output.lines().firstOrNull()?.toDoubleOrNull() ?: return null
             (seconds * 1000).toLong()
+        } catch (e: CancellationException) {
+            // coroutine cancel 은 client disconnect / shutdown 신호 — 일반 ffmpeg
+            // 실패로 위장하지 않고 상위로 전달.
+            throw e
         } catch (e: Exception) {
             log.warn("ffprobe failed for {}: {}", file.name, e.message)
             null
@@ -49,6 +54,10 @@ object MediaTrimmer {
         val durationSec = (endMs - startMs) / 1000.0
         // secondsToFfmpegArg: Double.toString 의 scientific notation 변환 회피.
         // 예: 0.000670 → "6.7E-4" 가 ffmpeg `-t` 파서에서 "Invalid duration" 으로 거부됨.
+        // -avoid_negative_ts make_zero: iOS 카메라 등 edit-list 로 audio 트랙 첫 PTS 가
+        // 음수인 컨테이너 → mux-level 정규화. FLAC 출력 자체는 PTS 안 가져 no-op 에 가깝지만
+        // 향후 컨테이너 변경 시에도 부작용 없는 default. 실측 PTS rebase 가 필요해지면
+        // `-af "aresample=async=1:first_pts=0"` 같은 sample-level 필터를 별도 검증 후 도입.
         val cmd = listOf(
             "ffmpeg", "-y",
             "-i", src.absolutePath,
@@ -57,6 +66,7 @@ object MediaTrimmer {
             "-vn",
             "-c:a", "flac",
             "-compression_level", "5",
+            "-avoid_negative_ts", "make_zero",
             outFile.absolutePath,
         )
         return try {
@@ -66,6 +76,11 @@ object MediaTrimmer {
                 outFile.delete()
                 false
             } else true
+        } catch (e: CancellationException) {
+            // coroutine cancel 은 client disconnect / shutdown 신호 — 'trim failed'
+            // 로 위장해 500 으로 응답하지 말고 상위로 전달. outFile 은 정리.
+            outFile.delete()
+            throw e
         } catch (e: Exception) {
             log.error("ffmpeg flac extract exception for {}: {}", src.name, e.message)
             outFile.delete()

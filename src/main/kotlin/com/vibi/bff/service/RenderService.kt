@@ -25,9 +25,8 @@ import java.util.concurrent.atomic.AtomicInteger
  * audio bitrate 만 결정. per-segment trim 의 libx264 는 별개 고정 설정 (preset=fast,
  * default CRF) — quality 와 무관.
  *
- * crf/preset 필드는 향후 video 재인코딩이 다시 필요해질 경우의 hook 으로 남겨둠 (BGM/
- * separation 외에 video 를 건드리는 기능 — 자막 burn-in 등 — 이 부활하면 final 패스가
- * 다시 -c:v libx264 로 돌아가야 함).
+ * crf/preset 필드는 향후 video 재인코딩이 다시 필요해질 경우의 hook 으로 남겨둠 (현재 운영
+ * surface 는 BGM atrim+amix / 음성분리 stem mix 만 — final 패스가 `-c:v copy` 인 한 미사용).
  *
  * Input validation 은 [com.vibi.bff.model.RenderConfig.init] 에서 일어나 high/medium/low
  * 외 값은 [of] 도달 전에 reject 됨.
@@ -197,10 +196,11 @@ class RenderService(
      */
     fun acquireRenderOutputCopy(jobId: String, copyTargetDir: File, callerUserId: UUID? = null): File? {
         val job = jobs[jobId] ?: return null
-        // owner / caller 가 둘 다 있을 때만 매칭 검증 — owner null (test / 미인증 잡) 또는
-        // caller null (jwtSecret 미주입 분기) 면 통과. owner mismatch 는 not-found 와 동일
-        // 응답 경로 (null) 로 두어 IDOR 정보 누출 (existence oracle) 방지.
-        if (job.ownerUserId != null && callerUserId != null && job.ownerUserId != callerUserId) {
+        // owner 가 set 된 잡은 caller 도 반드시 매칭 — caller null 이라도 reject 해
+        // jwtSecret 미주입 분기에서 owned-job 으로 fall-through 되는 회귀 차단.
+        // owner null (test 시드 / 미인증 잡) 인 잡은 caller 무관 통과.
+        // mismatch 는 not-found 와 동일 응답 경로 (null) 로 두어 IDOR existence oracle 방지.
+        if (job.ownerUserId != null && job.ownerUserId != callerUserId) {
             return null
         }
         synchronized(job) {

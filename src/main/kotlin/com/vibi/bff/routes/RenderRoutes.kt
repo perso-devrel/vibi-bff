@@ -47,6 +47,10 @@ fun Route.renderRoutes(
         // sha256(video)[:16 bytes hex] so the same video resolves to the same
         // slot on retry.
         post("/inputs") {
+            // 인증 강제 + cache entry 의 ownerUserId 바인딩 — 같은 sha256 의 슬롯을
+            // 다른 user 가 resolve 해 cross-account content IDOR 으로 이어지는 회귀 차단.
+            // legacy (ownerUserId null) entry 는 다음 인증 caller hit 시 박힘 — 점진 마이그레이션.
+            val principal = jwtSecret?.let { call.requireUser(it) }
             val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
             var videoFileName: String? = null
@@ -87,6 +91,7 @@ fun Route.renderRoutes(
                     videoFileName = vName,
                     videoStream = vTemp.inputStream(),
                     maxVideoBytes = MAX_UPLOAD_FILE_SIZE,
+                    ownerUserId = principal?.userId,
                 )
 
                 call.respond(
@@ -141,9 +146,9 @@ fun Route.renderRoutes(
                     }
                     is PartData.FormItem -> {
                         when (part.name) {
-                            // AppJson — ignoreUnknownKeys=true. 모바일이 dubClips/imageClips/
-                            // audioOverrideKey/outputLanguageCode 같은 (절단된) 옛 필드를 계속
-                            // 보내도 strict Json 처럼 SerializationException 으로 폭사하지 않게.
+                            // AppJson — ignoreUnknownKeys=true. 모바일이 절단된 옛 필드
+                            // (dubClips/imageClips/audioOverrideKey/outputLanguageCode 등) 를
+                            // 계속 보내도 strict Json 처럼 SerializationException 으로 폭사하지 않게.
                             "config" -> renderConfig = AppJson.decodeFromString<RenderConfig>(part.value)
                             "inputId" -> inputId = part.value.trim().ifBlank { null }
                         }
@@ -164,7 +169,9 @@ fun Route.renderRoutes(
             // mobile think it's saving bytes when really the server can't
             // find anything.
             if (inputId != null) {
-                val cached = inputCacheService.resolve(inputId!!)
+                // resolve 가 principal.userId 와 entry.ownerUserId 매칭 — 다른 user 의
+                // cache 슬롯에 대한 hit 은 null 반환으로 not-found (existence oracle 차단).
+                val cached = inputCacheService.resolve(inputId!!, principal?.userId)
                     ?: throw IllegalArgumentException("inputId expired or not found")
                 // Cache video → legacy slot (single-video render path).
                 legacyVideoFile = cached.videoFile
@@ -187,6 +194,7 @@ fun Route.renderRoutes(
                         audioUrl = selection.audioUrl,
                         separationService = separationService,
                         signedUrlService = signedUrlService,
+                        callerUserId = principal?.userId,
                     )
                     resolvedStems.add(DirectiveStem(file = file, volume = selection.volume))
                 }
@@ -243,8 +251,10 @@ fun Route.renderRoutes(
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
 
-            // download 와 동일 — owner / caller 둘 다 있을 때 매칭 검증. mismatch 시 not-found.
-            if (job.ownerUserId != null && principal?.userId != null && job.ownerUserId != principal.userId) {
+            // owner 가 set 된 잡은 caller 도 반드시 매칭. caller null 이어도 reject —
+            // jwtSecret 미주입 분기에서 owned-job 으로 fall-through 되는 회귀 차단.
+            // owner null (boot/테스트 시드) 인 잡만 caller 무관 통과.
+            if (job.ownerUserId != null && job.ownerUserId != principal?.userId) {
                 throw NotFoundException("Render job not found: $jobId")
             }
 
@@ -264,10 +274,11 @@ fun Route.renderRoutes(
             val job = renderService.getJob(jobId)
                 ?: throw NotFoundException("Render job not found: $jobId")
 
-            // 자원 소유권 — job.ownerUserId 가 principal.userId 와 일치해야 다운로드. 둘 중
-            // 하나라도 null 이면 검증 skip (테스트 / 운영 boot 직후 jwtSecret 미주입 분기).
-            // mismatch 는 not-found 와 동일 메시지로 응답해 IDOR 시 owner 존재 여부 oracle 차단.
-            if (job.ownerUserId != null && principal?.userId != null && job.ownerUserId != principal.userId) {
+            // 자원 소유권 — owner 가 set 된 잡은 caller 도 반드시 매칭. caller null 이어도
+            // reject 해 jwtSecret 미주입 분기에서 owned-job 으로 fall-through 되는 회귀 차단.
+            // owner null (boot/테스트 시드) 인 잡만 caller 무관 통과. mismatch 는 not-found
+            // 와 동일 메시지로 응답해 IDOR existence oracle 차단.
+            if (job.ownerUserId != null && job.ownerUserId != principal?.userId) {
                 throw NotFoundException("Render job not found: $jobId")
             }
 
@@ -303,6 +314,7 @@ private fun resolveStemUrlToFile(
     audioUrl: String,
     separationService: SeparationService,
     signedUrlService: SignedUrlService,
+    callerUserId: UUID? = null,
 ): File {
     val match = SEP_URL_REGEX.matchEntire(audioUrl)
         ?: throw ApiErrorException(
@@ -332,6 +344,17 @@ private fun resolveStemUrlToFile(
             errorCode = "invalid_stem_url",
             detail = "separation job not found: $jobId",
         )
+    // capability(HMAC token) + identity(render caller) 이중. owner 가 set 된 stem
+    // 잡은 caller 도 반드시 매칭 — caller null (jwtSecret 미주입 분기) 도 reject 해
+    // sibling status/download 와 동일 패턴 (`owner != null && owner != caller`). leaked
+    // HMAC URL 이 다른 user 의 render 에 끼워지는 IDOR 차단.
+    if (job.ownerUserId != null && job.ownerUserId != callerUserId) {
+        throw ApiErrorException(
+            HttpStatusCode.BadRequest,
+            errorCode = "invalid_stem_url",
+            detail = "stem job ownership mismatch",
+        )
+    }
     val stem = job.stems.firstOrNull { it.stemId == stemId }
         ?: throw ApiErrorException(
             HttpStatusCode.BadRequest,

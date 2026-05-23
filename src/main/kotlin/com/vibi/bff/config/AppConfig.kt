@@ -6,7 +6,6 @@ data class AppConfig(
     val storage: StorageConfig,
     val baseUrl: String,
     val perso: PersoConfig,
-    val gemini: GeminiConfig,
     val separation: SeparationConfig,
     val auth: AuthConfig,
     val db: DbConfig,
@@ -201,30 +200,6 @@ data class PersoConfig(
 }
 
 /**
- * Vertex AI configuration.
- *
- * Auth 우선순위 ([com.vibi.bff.service.GeminiClient.loadOrRefreshCredentials] 참고):
- * 1. [credentialsPath] 가 비어있지 않으면 그 파일을 service account JSON 으로 사용 (로컬 dev).
- * 2. 비어있으면 Application Default Credentials — Cloud Run / GCE 의 attached service
- *    account, 또는 로컬의 `gcloud auth application-default login` 캐시 / env
- *    `GOOGLE_APPLICATION_CREDENTIALS` 자동 탐색.
- *
- * Validation 은 [GeminiClient] 의 첫 호출 시점까지 지연돼, 자막 번역 비활성 dev 환경에서도
- * 서버 부팅이 가능.
- */
-data class GeminiConfig(
-    val projectId: String,
-    val location: String,
-    val credentialsPath: String,
-    val model: String,
-) {
-    init {
-        require(model.isNotBlank()) { "GEMINI_MODEL must not be blank" }
-        require(location.isNotBlank()) { "GEMINI_LOCATION must not be blank" }
-    }
-}
-
-/**
  * Google OAuth + Apple Sign In + 자체 JWT 발급 설정.
  *
  * - [googleClientIds] — `tokeninfo` 응답의 `aud` 가 이 중 하나와 일치해야 통과.
@@ -303,7 +278,6 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
     val vibi = config.config("vibi")
     val storage = vibi.config("storage")
     val perso = vibi.config("perso")
-    val gemini = vibi.config("gemini")
     val separation = vibi.config("separation")
     val auth = vibi.config("auth")
     val db = vibi.config("db")
@@ -338,12 +312,6 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
                 ?.filter { it.isNotEmpty() }
                 ?.toSet()
                 ?: setOf("portal-media.perso.ai"),
-        ),
-        gemini = GeminiConfig(
-            projectId = gemini.property("projectId").getString(),
-            location = gemini.property("location").getString(),
-            credentialsPath = gemini.property("credentialsPath").getString(),
-            model = gemini.property("model").getString(),
         ),
         separation = SeparationConfig(
             abandonTtlMs = separation.property("abandonTtlMs").getString().toLong(),

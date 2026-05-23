@@ -82,7 +82,11 @@ class AuthService(
         if (expMs <= clock()) {
             throw ApiErrorException(HttpStatusCode.Unauthorized, "google_token_expired")
         }
-        if (info.emailVerified != null && info.emailVerified.equals("false", ignoreCase = true)) {
+        // Apple 과 대칭 — claim 누락 또는 'false' 모두 reject (fail-closed). Google
+        // tokeninfo 가 향후 schema 변경으로 일부 계정에서 claim 을 omit 하거나, forged
+        // token 이 통과한 경우의 silent 통과를 차단. 정상 Google 토큰은 항상 "true".
+        if (info.emailVerified == null || !info.emailVerified.equals("true", ignoreCase = true)) {
+            log.warn("Google email_verified claim invalid: value={} sub={}", info.emailVerified, info.sub)
             throw ApiErrorException(HttpStatusCode.Unauthorized, "google_email_unverified")
         }
 
@@ -128,11 +132,22 @@ class AuthService(
         // Google 의 emailVerified 와 동일 패턴 — Apple ID Token 의 email_verified 는 사실상
         // 항상 true 지만 (이메일 공유 / 사설 릴레이 모두 verified), defense-in-depth 차원에서
         // 명시 거부. boolean 외 string ("true"/"false") 으로 오는 케이스도 흡수.
+        // claim 자체가 누락된 토큰은 fail-closed — Apple 이 향후 schema 변경으로 누락된
+        // 토큰을 보내거나 forged 토큰이 통과한 경우의 silent 통과를 차단.
+        // 누락 / unrecognized 케이스는 reject 전에 warn 로그 — production 에서 실제 Apple
+        // 토큰에 누락이 발생하는지 모니터링.
         val emailVerifiedClaim = verified.getClaim("email_verified")
-        val emailVerified = emailVerifiedClaim.asBoolean()
-            ?: emailVerifiedClaim.asString()?.equals("true", ignoreCase = true)
-            ?: true // claim 자체가 없으면 boundary 신뢰 (Apple 이 항상 채워 보내지만 누락 시 reject 하지 않음)
+        val emailVerifiedBoolean = emailVerifiedClaim.asBoolean()
+        val emailVerifiedString = emailVerifiedClaim.asString()
+        val emailVerified = emailVerifiedBoolean
+            ?: emailVerifiedString?.equals("true", ignoreCase = true)
+            ?: false
         if (!emailVerified) {
+            if (emailVerifiedBoolean == null && emailVerifiedString == null) {
+                log.warn("Apple ID Token missing email_verified claim — fail-closed reject sub={}", sub)
+            } else {
+                log.info("Apple email_verified claim is false-equivalent: bool={} str={}", emailVerifiedBoolean, emailVerifiedString)
+            }
             throw ApiErrorException(HttpStatusCode.Unauthorized, "apple_email_unverified")
         }
 

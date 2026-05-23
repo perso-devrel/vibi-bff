@@ -72,10 +72,10 @@ data class AdminOverview(
 )
 
 /**
- * 외부 API (Perso/Gemini) 일별 호출 통계. 비용 추정 + 실패율 가시화.
+ * 외부 API (Perso 등) 일별 호출 통계. 비용 추정 + 실패율 가시화.
  *
- * - [provider] — 'perso' / 'gemini'
- * - [endpoint] — 'audio-separation' / 'chat' 등 logical operation 단위
+ * - [provider] — 'perso' 등
+ * - [endpoint] — 'audio-separation' 등 logical operation 단위
  * - [callCount] — 성공/실패 합산
  * - [failureCount] — `success=false` 카운트. 실패율 = failureCount / callCount
  * - [p95LatencyMs] — 응답 시간 분포 (Postgres `percentile_cont` 사용)

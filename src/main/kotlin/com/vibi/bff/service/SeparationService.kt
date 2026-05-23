@@ -120,6 +120,7 @@ class SeparationService(
     fun submit(
         sourceFile: File,
         spec: SeparationSpec,
+        audioPreExtracted: Boolean,
         dedupKey: String? = null,
         userId: UUID? = null,
         sourceDurationMs: Long = 0L,
@@ -135,17 +136,18 @@ class SeparationService(
                     log.info("Separation dedup hit: key={} → existing jobId={}", dedupKey, existing)
                     return existing
                 }
-                val jobId = createAndLaunch(sourceFile, spec, dedupKey, userId, sourceDurationMs, renderJobId)
+                val jobId = createAndLaunch(sourceFile, spec, audioPreExtracted, dedupKey, userId, sourceDurationMs, renderJobId)
                 dedupIndex[dedupKey] = jobId
                 return jobId
             }
         }
-        return createAndLaunch(sourceFile, spec, dedupKey = null, userId, sourceDurationMs, renderJobId)
+        return createAndLaunch(sourceFile, spec, audioPreExtracted, dedupKey = null, userId, sourceDurationMs, renderJobId)
     }
 
     private fun createAndLaunch(
         sourceFile: File,
         spec: SeparationSpec,
+        audioPreExtracted: Boolean,
         dedupKey: String?,
         userId: UUID? = null,
         sourceDurationMs: Long = 0L,
@@ -162,7 +164,7 @@ class SeparationService(
             }
             try {
                 externalCalls.withExternalCall("perso", "audio-separation") {
-                    runPipeline(job, sourceFile, spec)
+                    runPipeline(job, sourceFile, spec, audioPreExtracted)
                 }
                 if (userId != null && job.status == "READY") {
                     analytics?.updateSeparationJobStatus(jobId, "READY")
@@ -215,15 +217,22 @@ class SeparationService(
 
     // ── Pipeline ─────────────────────────────────────────────────────────────
 
-    private suspend fun runPipeline(job: SeparationJob, sourceFile: File, spec: SeparationSpec) {
+    private suspend fun runPipeline(
+        job: SeparationJob,
+        sourceFile: File,
+        spec: SeparationSpec,
+        audioPreExtracted: Boolean,
+    ) {
         val isVideo = spec.mediaType == "VIDEO"
 
         // Perso 는 audio-only 업로드만 받음. MediaTrimmer.trim 을 거친 입력은 이미 sample-accurate
         // FLAC 이라 그대로 보내고, no-trim 영상 fallback 만 MP3 추출이 필요.
+        // audioPreExtracted 는 caller 가 명시한 신호 (라우트의 maybeTrim 결과 추론).
+        // 이전엔 sourceFile.extension 으로 sniff 했으나, 멀티파트 originalFileName 이
+        // attacker-controlled 라 video 를 ".flac" 으로 박아 MP3 추출 단계를 우회 가능했음 — 명시 flag 로 단절.
         job.status = "PROCESSING"
-        val isPreExtractedAudio = sourceFile.extension.equals(MediaTrimmer.OUTPUT_EXTENSION, ignoreCase = true)
         val uploadFile = when {
-            isPreExtractedAudio -> sourceFile
+            audioPreExtracted -> sourceFile
             isVideo -> {
                 job.progressReason = "Extracting audio"
                 val mp3 = File(job.outputDir, "audio.mp3")
@@ -236,8 +245,24 @@ class SeparationService(
 
         job.status = "UPLOADING_UPSTREAM"
         job.progressReason = "Uploading"
-        val registration = persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
-        uploadFile.delete()
+        // uploadFile cleanup 정책:
+        //  - audioPreExtracted=true → uploadFile = editedSourceDir/*.trimmed.flac (caller-owned
+        //    FLAC). 실패해도 무조건 정리 — dispose() 는 outputDir 만 reap 하므로 finally 필요.
+        //    원본 mp4 는 maybeTrim 이 이미 삭제했으므로 retry 도 불가, 누수 방지가 옳음.
+        //  - 그 외 (legacy AUDIO upload, video→MP3 extract) → 성공 시에만 delete.
+        //    실패 시 sourceFile (legacy: caller-owned 업로드 / video: outputDir 안 mp3) 을
+        //    보존해 caller 가 동일 잡으로 retry 가능 ("Leave sourceFile on disk — caller can retry").
+        val registration = if (audioPreExtracted) {
+            try {
+                persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
+            } finally {
+                uploadFile.delete()
+            }
+        } else {
+            val r = persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
+            uploadFile.delete()
+            r
+        }
 
         // Perso 전용 audio-separation 프로젝트 생성. audio-only 업로드라 isVideoProject=false.
         job.status = "SUBMITTED"

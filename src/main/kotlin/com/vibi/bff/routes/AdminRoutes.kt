@@ -63,7 +63,7 @@ fun Route.adminRoutes(
             call.respond(HttpStatusCode.OK, AdminUsersResponse(users = rows, total = total))
         }
 
-        // 외부 API (Perso / Gemini) 일별 호출 카운트 + 실패율 + p95 latency.
+        // 외부 API (Perso) 일별 호출 카운트 + 실패율 + p95 latency.
         // 비용 예측 + 안정성 가시화.
         get("/stats/external-calls") {
             call.respondDailyRange(jwtSecret, adminRepository::getExternalCallsDaily)

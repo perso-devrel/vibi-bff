@@ -4,6 +4,7 @@ import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.RenderJob
 import com.vibi.bff.service.RenderService
 import java.io.File
+import java.util.UUID
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
@@ -11,19 +12,19 @@ import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertNotEquals
 import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
  * Phase 1 follow-up regression coverage for the [MediaSourceResolver] copy
  * strategy + [RenderService.acquireRenderOutputCopy] cleanup race.
  *
- * The render output file must survive being passed to N downstream
- * pipelines (auto-subtitle deletes the source after audio extract,
- * auto-dub renames it, separation deletes it after Perso upload). The
- * resolver therefore returns a *copy* under
- * [com.vibi.bff.service.FileStorageService.editedSourceDir]; the
- * downstream pipeline owns the copy and the render output stays intact
- * for the next consumer.
+ * The render output file must survive being passed to downstream pipelines
+ * that mutate / delete the source (separation deletes it after Perso upload).
+ * The resolver therefore returns a *copy* under
+ * [com.vibi.bff.service.FileStorageService.editedSourceDir]; the downstream
+ * pipeline owns the copy and the render output stays intact for the next
+ * consumer.
  */
 class MediaSourceResolverTest {
 
@@ -72,6 +73,39 @@ class MediaSourceResolverTest {
         assertEquals(editedSourceDir.absolutePath, copy.parentFile.absolutePath)
         assertEquals("rendered-bytes", copy.readText())
         assertTrue(rendered.exists(), "original render output must still be present")
+    }
+
+    /**
+     * Tightened owner-check 회귀 가드: owner 가 set 된 잡은 caller 도 반드시 매칭.
+     * callerUserId=null + owner=set 케이스는 reject (legacy "둘 다 있을 때만 검증"
+     * 패턴으로 회귀 못 잡게 service level 에서 pin).
+     */
+    @Test
+    fun `acquireRenderOutputCopy rejects owner-set job when caller is null`() {
+        val owner = UUID.randomUUID()
+        val outputFile = File(renderDir, "render-owned.mp4").apply { writeText("bytes") }
+        val job = RenderJob(
+            jobId = "render-owned",
+            outputFile = outputFile,
+            ownerUserId = owner,
+        ).also {
+            it.status = "COMPLETED"
+            it.progress = 100
+        }
+        renderService.registerJobForTest(job)
+
+        assertNull(
+            renderService.acquireRenderOutputCopy("render-owned", editedSourceDir, callerUserId = null),
+            "owner-set job must reject null caller",
+        )
+        assertNull(
+            renderService.acquireRenderOutputCopy("render-owned", editedSourceDir, callerUserId = UUID.randomUUID()),
+            "owner-set job must reject different caller",
+        )
+        assertNotNull(
+            renderService.acquireRenderOutputCopy("render-owned", editedSourceDir, callerUserId = owner),
+            "owner-set job must accept matching caller",
+        )
     }
 
     @Test

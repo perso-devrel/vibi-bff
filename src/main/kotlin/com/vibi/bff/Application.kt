@@ -9,7 +9,6 @@ import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.ExternalApiCallsRepository
 import com.vibi.bff.service.ObjectStore
-import com.vibi.bff.service.GeminiClient
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.JobAnalyticsRepository
 import com.vibi.bff.service.MediaSourceResolver
@@ -106,10 +105,6 @@ fun Application.module() {
     val adminRepository = AdminRepository()
     val creditRepository = CreditRepository()
 
-    // Vertex AI / Gemini credentials are validated lazily on the first
-    // chat call, so the server can boot without them in dev when the chat
-    // surface isn't being exercised.
-
     val httpClient = HttpClient(CIO) {
         install(ContentNegotiation) {
             json(AppJson)
@@ -195,7 +190,6 @@ fun Application.module() {
     )
 
     val authService = AuthService(appConfig.auth, httpClient, userRepository)
-    val geminiClient = GeminiClient(appConfig.gemini, httpClient, externalApiCallsRepository)
 
     // IAP receipt verifiers — config 가 null (미설정) 이면 verifier 도 null. 라우트가 null
     // 분기로 `iap_unconfigured` 400 응답하므로 stub 통과 없음. 출시 외 환경 (dev/test) 에서도
@@ -233,7 +227,7 @@ fun Application.module() {
     configureRouting(
         fileStorage, persoClient, appConfig, renderService,
         separationService, stemMixService, signedUrlService,
-        geminiClient, httpClient, renderInputCache,
+        renderInputCache,
         mediaSourceResolver, authService, objectStore,
         adminRepository,
         userRepository, creditRepository,

@@ -135,6 +135,49 @@ class RenderRoutesTest {
     }
 
     @Test
+    fun `POST inputs requires Authorization when jwtSecret is set`() = testApp(jwtSecret = testJwtSecret) {
+        // 인증 강제 회귀 가드: jwtSecret 주입 + Authorization 헤더 누락 → 401.
+        val response = client.post("/api/v2/render/inputs") {
+            setBody(MultiPartFormDataContent(formData {
+                append("video", ByteArray(64) { it.toByte() }, Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"x.mp4\"")
+                })
+            }))
+        }
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
+    }
+
+    @Test
+    fun `POST inputs cache is owner-bound — resolve from a different user returns 400`() = testApp(jwtSecret = testJwtSecret) {
+        val ownerId = UUID.randomUUID()
+        val otherId = UUID.randomUUID()
+        val videoBytes = ByteArray(512) { (it % 31).toByte() }
+
+        val first = client.post("/api/v2/render/inputs") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(ownerId, testJwtSecret)}")
+            setBody(MultiPartFormDataContent(formData {
+                append("video", videoBytes, Headers.build {
+                    append(HttpHeaders.ContentType, "video/mp4")
+                    append(HttpHeaders.ContentDisposition, "filename=\"a.mp4\"")
+                })
+            }))
+        }
+        assertEquals(HttpStatusCode.OK, first.status)
+        val inputId = AppJson.parseToJsonElement(first.bodyAsText()).jsonObject["inputId"]!!.jsonPrimitive.content
+
+        // 두 번째 user 가 같은 inputId 로 /render 호출 → resolve null → 400.
+        val second = client.post("/api/v2/render") {
+            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
+            setBody(MultiPartFormDataContent(formData {
+                append("inputId", inputId)
+                append("config", """{"videoDurationMs":3000}""")
+            }))
+        }
+        assertEquals(HttpStatusCode.BadRequest, second.status)
+    }
+
+    @Test
     fun `POST inputs without video part returns 400`() = testApp {
         val response = client.post("/api/v2/render/inputs") {
             setBody(MultiPartFormDataContent(formData {

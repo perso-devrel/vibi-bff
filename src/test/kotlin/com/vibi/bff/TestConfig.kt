@@ -6,7 +6,6 @@ import com.vibi.bff.config.AdminConfig
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.config.AuthConfig
 import com.vibi.bff.config.DbConfig
-import com.vibi.bff.config.GeminiConfig
 import com.vibi.bff.config.IapConfig
 import com.vibi.bff.config.PersoConfig
 import com.vibi.bff.config.SeparationConfig
@@ -45,12 +44,6 @@ fun testAppConfig(
         pollIntervalMs = 5000,
         maxPollMinutes = 30,
         downloadAllowedHosts = setOf("portal-media.perso.ai"),
-    ),
-    gemini = GeminiConfig(
-        projectId = "",
-        location = "us-central1",
-        credentialsPath = "",
-        model = "gemini-2.5-flash",
     ),
     separation = SeparationConfig(
         abandonTtlMs = 1_800_000,
