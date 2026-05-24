@@ -68,7 +68,7 @@ jobs:
             --service-account "${{ secrets.GCP_RUNTIME_SA_EMAIL }}" \
             --execution-environment gen2 \
             --cpu 1 --memory 2Gi --cpu-boost \
-            --timeout 3600 \
+            --timeout 600 \
             --concurrency 4 \
             --min-instances 0 --max-instances 2 \
             --session-affinity \
