@@ -116,13 +116,51 @@ class SeparationQueueRepository {
         }
     }
 
-    suspend fun markReady(jobId: String) {
+    /**
+     * 완료 마킹과 함께 stem 메타를 한 UPDATE 로 persist — durability 보장. [stemsJson] 은
+     * JSON 배열 (`[{stemId, label, ext}, ...]`), [actualDurationMs] 는 speaker stem 길이.
+     * 두 값 모두 새 인스턴스가 GET 응답을 재구축할 때 필요 — caller (SeparationService) 가
+     * R2 업로드를 본 호출 **전에** 끝낸 상태여야 안전.
+     *
+     * 둘 다 NULL 허용 (V7 마이그레이션 이전 row 호환 + 테스트 분기) — null 이면 단순 status
+     * 전이만.
+     */
+    suspend fun markReady(
+        jobId: String,
+        stemsJson: String? = null,
+        actualDurationMs: Long? = null,
+    ) {
         newSuspendedTransaction(Dispatchers.IO) {
             SeparationJobsTable.update({ SeparationJobsTable.id eq jobId }) {
                 it[SeparationJobsTable.status] = STATUS_READY
                 it[SeparationJobsTable.finishedAt] = Instant.now()
+                if (stemsJson != null) it[SeparationJobsTable.stemsJson] = stemsJson
+                if (actualDurationMs != null) it[SeparationJobsTable.actualDurationMs] = actualDurationMs
             }
         }
+    }
+
+    /**
+     * 새 인스턴스의 in-memory 재구축용 — status=READY + stems_json 이 모두 살아있는 row 만 반환.
+     * SeparationService.getJob 의 in-memory miss 분기에서 호출.
+     *
+     * stems_json 이 NULL 이면 V7 이전 잡 (legacy) — 재구축 못 함, null 반환. 호출자는 그대로
+     * not-found 처리해 사용자한테 재요청 안내. owner_user_id 가 null 인 미인증 잡도 함께 반환되어
+     * 호출자가 IDOR 검증 (route 단의 ownerUserId 매칭) 을 적용.
+     */
+    suspend fun loadReady(jobId: String): ReadyJobRow? = newSuspendedTransaction(Dispatchers.IO) {
+        val row = SeparationJobsTable
+            .selectAll()
+            .where { SeparationJobsTable.id eq jobId }
+            .firstOrNull() ?: return@newSuspendedTransaction null
+        if (row[SeparationJobsTable.status] != STATUS_READY) return@newSuspendedTransaction null
+        val json = row[SeparationJobsTable.stemsJson] ?: return@newSuspendedTransaction null
+        ReadyJobRow(
+            jobId = jobId,
+            stemsJson = json,
+            actualDurationMs = row[SeparationJobsTable.actualDurationMs],
+            ownerUserId = row[SeparationJobsTable.userId],
+        )
     }
 
     suspend fun markFailed(jobId: String) {
@@ -298,5 +336,15 @@ class SeparationQueueRepository {
 data class ResumableJob(
     val jobId: String,
     val persoProjectSeq: Long,
+    val ownerUserId: java.util.UUID?,
+)
+
+/** [SeparationQueueRepository.loadReady] 반환. 새 인스턴스의 in-memory 재구축용 ─
+ *  stemsJson 은 JSON 배열 (`[{stemId, label, ext}, ...]`); R2 object key 는 ObjectKey
+ *  .separationStem 으로 계산. */
+data class ReadyJobRow(
+    val jobId: String,
+    val stemsJson: String,
+    val actualDurationMs: Long?,
     val ownerUserId: java.util.UUID?,
 )

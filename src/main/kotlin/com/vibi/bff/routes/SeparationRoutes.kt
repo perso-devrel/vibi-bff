@@ -181,9 +181,9 @@ fun Route.separationRoutes(
 
             val stem = job.stems.firstOrNull { it.stemId == stemId }
                 ?: throw NotFoundException("Stem not found: $stemId")
-            if (!stem.file.exists()) {
-                throw NotFoundException("Stem file missing on disk")
-            }
+            // 로컬 file 존재 체크 의도적 제거 — R2 가 source-of-truth. DB fallback 으로 재구축된
+            // SeparationJob 은 placeholder File 을 들고 있고 실체는 R2. ObjectStore.uploadIfAbsent
+            // 가 HEAD 로 R2 hit 확인 후 signed URL 302. R2 도 없으면 그 안에서 throw.
             val ext = stem.file.extension.ifBlank { "wav" }
             call.respondDownload(
                 file = stem.file,

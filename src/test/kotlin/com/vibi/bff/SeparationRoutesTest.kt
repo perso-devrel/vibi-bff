@@ -79,7 +79,7 @@ class SeparationRoutesTest {
     // GET /separate/{jobId} with unknown id → 404
     @Test
     fun `GET unknown separation job returns 404`() = testApp {
-        every { separationService.getJob("no-such") } returns null
+        coEvery { separationService.getJob("no-such") } returns null
         val response = client.get("/api/v2/separate/no-such")
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
@@ -102,7 +102,7 @@ class SeparationRoutesTest {
     @Test
     fun `GET stem with valid token but missing job returns 404`() = testApp {
         val token = signer.sign("sep-y", "background", 60)
-        every { separationService.getJob("sep-y") } returns null
+        coEvery { separationService.getJob("sep-y") } returns null
         val response = client.get("/api/v2/separate/sep-y/stem/background?token=$token")
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
@@ -112,7 +112,7 @@ class SeparationRoutesTest {
     fun `POST mix on non-ready job returns 409`() = testApp {
         // owner 검증 추가 후 mix 라우트가 reserveForMix 전에 getJob 부터 호출 — 미인증
         // 분기 (jwtSecret null) 라 owner 무관하게 통과시키려면 잡이 존재만 하면 됨.
-        every { separationService.getJob("sep-z") } returns separationJob("sep-z", ownerUserId = null)
+        coEvery { separationService.getJob("sep-z") } returns separationJob("sep-z", ownerUserId = null)
         every { separationService.reserveForMix("sep-z", any()) } returns null
         every { stemMixService.newJobId() } returns "mix-abcd"
 
@@ -434,7 +434,7 @@ class SeparationRoutesTest {
     fun `GET separation status returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {
         val ownerId = UUID.randomUUID()
         val otherId = UUID.randomUUID()
-        every { separationService.getJob("sep-owned") } returns separationJob("sep-owned", ownerId)
+        coEvery { separationService.getJob("sep-owned") } returns separationJob("sep-owned", ownerId)
 
         val response = client.get("/api/v2/separate/sep-owned") {
             header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
@@ -446,7 +446,7 @@ class SeparationRoutesTest {
     fun `POST mix returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {
         val ownerId = UUID.randomUUID()
         val otherId = UUID.randomUUID()
-        every { separationService.getJob("sep-mix-owned") } returns separationJob("sep-mix-owned", ownerId)
+        coEvery { separationService.getJob("sep-mix-owned") } returns separationJob("sep-mix-owned", ownerId)
 
         val response = client.post("/api/v2/separate/sep-mix-owned/mix") {
             header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")

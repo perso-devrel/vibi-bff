@@ -5,11 +5,18 @@ import com.vibi.bff.config.SeparationConfig
 import com.vibi.bff.model.PersoDownloadInfo
 import com.vibi.bff.model.PersoProjectInfo
 import com.vibi.bff.model.SeparationSpec
+import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.PersoApiException
+import com.vibi.bff.routes.ObjectKey
+import com.vibi.bff.routes.contentTypeForExtension
+import io.ktor.http.ContentType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
+import kotlinx.serialization.builtins.ListSerializer
 import org.apache.commons.compress.archivers.tar.TarArchiveInputStream
 import org.slf4j.LoggerFactory
 import java.io.File
@@ -73,6 +80,19 @@ data class LocalStem(
     val file: File,
 )
 
+/**
+ * separation_jobs.stems_json 의 element schema. R2 object key 는
+ * [ObjectKey.separationStem]`(jobId, stemId, ext)` 로 계산되므로 별도 컬럼 / 필드 불필요.
+ * Forward-compatible: stem 개수가 가변 (1 ~ N 화자 + voice_all + background) + 향후 메타 (예:
+ * peakDb, sampleRateHz) 가 늘어도 컬럼 마이그레이션 없이 JSON 필드만 추가하면 됨.
+ */
+@Serializable
+internal data class StemMeta(
+    val stemId: String,
+    val label: String,
+    val ext: String,
+)
+
 class SeparationService(
     private val persoClient: PersoClient,
     private val separationDir: File,
@@ -91,6 +111,10 @@ class SeparationService(
     /** Cloud Run 인스턴스 단위 UUID — bff_instance_id 컬럼에 기록되어 dispatcher 가 자기
      *  인스턴스 QUEUED 만 claim 하게 함. 소스 파일이 인스턴스 로컬 디스크에 있기 때문. */
     private val bffInstanceId: String = UUID.randomUUID().toString(),
+    /** R2 object store. **READY 마킹 직전 stem 들을 eager upload** 해 인스턴스 사망 시 데이터
+     *  손실 차단. null 이면 eager upload skip — 로컬 dev / R2 미사용 분기에서만 허용 (인스턴스
+     *  churn 손실 위험 감수). */
+    private val objectStore: ObjectStore? = null,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
@@ -113,7 +137,59 @@ class SeparationService(
         if (!cleanup.awaitTermination(2, TimeUnit.SECONDS)) cleanup.shutdownNow()
     }
 
-    fun getJob(jobId: String): SeparationJob? = jobs[jobId]
+    /**
+     * In-memory hit 우선, miss 면 DB 에서 status=READY row 를 가져와 in-memory 재구축.
+     *
+     * 시나리오: 이전 인스턴스가 RUN/READY 직전에 죽음 → 새 인스턴스 boot resumption 은
+     * PROCESSING 만 다루므로 READY 상태 잡은 in-memory 에 없음. 본 메서드가 DB 에서 READY 잡을
+     * 가져와 재구축 — stems FLAC 은 R2 가 source-of-truth (V7 마이그레이션 이후 잡은 READY 마킹
+     * 직전에 eager upload 됨).
+     *
+     * 재구축된 SeparationJob 의 [SeparationJob.sourceFile] / [SeparationJob.spec] /
+     * [LocalStem.file] 은 placeholder — caller 는 mix/download 만 가능 (재처리 불가).
+     * stems_json 이 NULL 인 V7 이전 잡은 재구축 불가능 — null 반환 (사용자 재요청 안내).
+     */
+    suspend fun getJob(jobId: String): SeparationJob? {
+        jobs[jobId]?.let { return it }
+        val ready = queue?.loadReady(jobId) ?: return null
+        return rebuildReadyJob(ready)
+    }
+
+    /**
+     * In-memory 전용 lookup — DB fallback 없음. dispatcher / dedup / mix 예약 등 본 인스턴스가
+     * 소유 중인 잡만 다루는 분기에서 사용 (재구축된 잡은 source/spec 이 placeholder 라 쓸모없음).
+     */
+    private fun getInMemoryJob(jobId: String): SeparationJob? = jobs[jobId]
+
+    /**
+     * [SeparationQueueRepository.loadReady] 결과로 in-memory SeparationJob 재구축. putIfAbsent
+     * 로 race-safe — 동시에 두 caller 가 같은 잡을 재구축 시도해도 한 쪽만 win.
+     */
+    private fun rebuildReadyJob(ready: ReadyJobRow): SeparationJob {
+        val outputDir = File(separationDir, ready.jobId).apply { mkdirs() }
+        val metas = AppJson.decodeFromString(ListSerializer(StemMeta.serializer()), ready.stemsJson)
+        val stemsList = metas.map { meta ->
+            // placeholder file — 실체는 R2. /stem/{id} 경로의 respondDownload 가 ObjectStore
+            // HEAD 로 R2 hit 확인 후 signed URL 302. file.exists()=false 라도 정상 동작.
+            LocalStem(meta.stemId, meta.label, File(outputDir, "${meta.stemId}.${meta.ext}"))
+        }
+        val rebuilt = SeparationJob(
+            jobId = ready.jobId,
+            outputDir = outputDir,
+            ownerUserId = ready.ownerUserId,
+            sourceFile = File(outputDir, ".rebuilt-no-source"),
+            spec = SeparationSpec(mediaType = "AUDIO"),
+            audioPreExtracted = true,
+        ).apply {
+            status = "READY"
+            progress = 100
+            progressReason = "Completed"
+            stems = stemsList
+            actualDurationMs = ready.actualDurationMs
+        }
+        val existing = jobs.putIfAbsent(ready.jobId, rebuilt)
+        return existing ?: rebuilt
+    }
 
     /**
      * 주어진 [dedupKey] 로 등록된 jobId 중 still-active 한 것을 반환. active 는
@@ -264,10 +340,8 @@ class SeparationService(
                 externalCalls.withExternalCall("perso", "audio-separation-resume") {
                     // 재시작 후엔 Perso 가 이미 처리 끝났을 가능성 높음 → initialDelay 짧게 (5s).
                     // 아직 처리 중이면 normal pollIntervalMs 로 polling 진행.
+                    // markReady 는 runPipelineDownloadPhase 내부에서 stems 메타와 함께 처리됨.
                     runPipelineDownloadPhase(job, persoProjectSeq, initialDelayMs = 5_000L)
-                }
-                if (job.status == "READY") {
-                    queue?.markReady(jobId)
                 }
             } catch (e: Exception) {
                 job.status = "FAILED"
@@ -282,7 +356,9 @@ class SeparationService(
     }
 
     /** 본 함수는 트랜잭션 밖 — 분 단위 Perso 호출 포함. 시작 시점 queue row 는 이미
-     *  SUBMITTING (dispatcher claimNext 결과) 또는 in-memory only (queue==null 분기). */
+     *  SUBMITTING (dispatcher claimNext 결과) 또는 in-memory only (queue==null 분기).
+     *  markReady DB 콜은 runPipelineDownloadPhase 내부에서 stems_json/actualDurationMs 와
+     *  함께 atomic 하게 처리되므로 여기서는 markFailed 만 다룬다. */
     private suspend fun executePipeline(job: SeparationJob) {
         try {
             externalCalls.withExternalCall("perso", "audio-separation") {
@@ -290,9 +366,6 @@ class SeparationService(
                     // Perso 가 projectSeq 발급한 직후 → DB 를 SUBMITTING → PROCESSING 으로.
                     queue?.markProcessing(job.jobId, projectSeq)
                 }
-            }
-            if (job.status == "READY") {
-                queue?.markReady(job.jobId)
             }
         } catch (e: Exception) {
             job.status = "FAILED"
@@ -484,19 +557,62 @@ class SeparationService(
         }
 
         // speaker stem 들은 모두 같은 trim 입력에서 분리돼 동일 길이라 1개만 측정.
-        job.actualDurationMs = runCatching {
+        val measuredDurationMs = runCatching {
             MediaTrimmer.probeDurationMs(local.first { it.stemId.startsWith(SPEAKER_STEM_PREFIX) }.file)
         }.getOrNull()
         log.info(
             "Stem actual duration probed: jobId={} actualDurationMs={}",
-            job.jobId, job.actualDurationMs,
+            job.jobId, measuredDurationMs,
         )
 
+        // Stems 를 in-memory 에 우선 set (status != READY 이므로 route 응답에는 아직 노출 안 됨).
+        // 다음으로 R2 eager upload → DB markReady 순서로 durable 한 상태를 만든 뒤 status=READY 로
+        // commit. 순서가 중요 — status=READY 가 먼저면 user 가 GET 받았는데 R2/DB 미반영인 짧은
+        // window 가 생김.
         job.stems = local
+        job.actualDurationMs = measuredDurationMs
+
+        // (1) R2 eager upload — 인스턴스 사망에도 stems FLAC 이 살아남도록. uploadIfAbsent 는
+        //     HEAD-first 멱등이라 재호출 비용 minimal. R2 미설정 (로컬 dev) 면 skip — 그 환경은
+        //     인스턴스 churn 위험 자체가 없으므로 OK.
+        eagerUploadStems(job)
+
+        // (2) DB markReady 에 stem 메타 동봉 — 새 인스턴스가 in-memory 재구축할 때 필요. stems_json
+        //     이 NULL 인 채 status=READY 인 row 는 V7 이전 잡 (legacy) 으로 fallback 불가.
+        val stemsJson = AppJson.encodeToString(
+            ListSerializer(StemMeta.serializer()),
+            local.map { StemMeta(it.stemId, it.label, it.file.extension.ifBlank { "flac" }) },
+        )
+        queue?.markReady(job.jobId, stemsJson, measuredDurationMs)
+
+        // (3) Commit — status=READY 후 route 가 stems list 를 응답에 노출.
         job.progress = 100
         job.progressReason = "Completed"
         job.status = "READY"
         log.info("Separation READY: jobId={} stems={}", job.jobId, local.map { it.stemId })
+    }
+
+    /**
+     * READY 마킹 직전 stems 를 R2 로 eager upload — 인스턴스 사망에도 데이터 손실 없도록.
+     * objectStore null (로컬 dev) 분기에선 skip. ObjectStore.uploadIfAbsent 는 HEAD-first 멱등이라
+     * 재시도 / 동일 잡 두 번 처리되어도 안전. 실패하면 throw → 호출자(runPipelineDownloadPhase)에서
+     * 그대로 던져 executePipeline catch 가 FAILED 처리 — markReady 가 호출되지 않으므로 DB 도
+     * READY 로 안 옮겨감 (durability 일관성 유지).
+     */
+    private suspend fun eagerUploadStems(job: SeparationJob) {
+        val store = objectStore ?: return
+        withContext(Dispatchers.IO) {
+            job.stems.forEach { stem ->
+                val ext = stem.file.extension.ifBlank { "flac" }
+                val contentType = contentTypeForExtension(ext, ContentType("audio", "flac")).toString()
+                store.uploadIfAbsent(
+                    file = stem.file,
+                    objectKey = ObjectKey.separationStem(job.jobId, stem.stemId, ext),
+                    contentType = contentType,
+                )
+            }
+        }
+        log.info("Eager R2 upload completed: jobId={} stems={}", job.jobId, job.stems.size)
     }
 
     // ── Speaker collection (.tar) 다운로드 + 풀이 ──────────────────────────────
