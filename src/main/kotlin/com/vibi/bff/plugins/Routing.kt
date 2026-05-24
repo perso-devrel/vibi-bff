@@ -4,7 +4,6 @@ import com.vibi.bff.config.AppConfig
 import com.vibi.bff.routes.adminRoutes
 import com.vibi.bff.routes.authRoutes
 import com.vibi.bff.routes.creditRoutes
-import com.vibi.bff.routes.languageRoutes
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.routes.separationRoutes
 import com.vibi.bff.service.AdminRepository
@@ -82,7 +81,6 @@ fun Application.configureRouting(
                 googleVerifier = googleReceiptVerifier,
                 jwtSecret = appConfig.auth.jwtSecret,
             )
-            languageRoutes(persoClient)
             renderRoutes(
                 renderService, fileStorage,
                 separationService, signedUrlService, renderInputCache,

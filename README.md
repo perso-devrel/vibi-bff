@@ -135,7 +135,6 @@ v1 has been retired.
 |--------|----------------------------------------------|---------------------------------------------------------------|
 | POST   | `/api/v2/auth/google`                        | Google ID Token → BFF JWT (see [Sign-In](#sign-in)).          |
 | POST   | `/api/v2/auth/apple`                         | Apple ID Token → BFF JWT (503 when `APPLE_OAUTH_CLIENT_IDS` blank). |
-| GET    | `/api/v2/languages`                          | Perso-supported target language list.                         |
 | POST   | `/api/v2/render/inputs`                      | Multipart `video` upload → `{inputId, expiresAt, videoSizeBytes}`. Reused by N variant renders. `inputId = sha256(video)[:16]`. |
 | POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint)). Optional `inputId` form field replaces the video file part. |
 | GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`. |
@@ -337,11 +336,10 @@ src/main/kotlin/com/vibi/bff/
 │   └── ErrorHandling.kt        # StatusPages → ErrorResponse
 ├── model/
 │   ├── AuthModels.kt           # GoogleAuthRequest / AppleAuthRequest / AuthResponse
-│   ├── BffModels.kt            # Render / Separation / Mix / Language DTOs
+│   ├── BffModels.kt            # Render / Separation / Mix DTOs
 │   └── PersoModels.kt          # Perso upstream DTOs
 ├── routes/
 │   ├── AuthRoutes.kt           # /auth/google · /auth/apple
-│   ├── LanguageRoutes.kt       # /languages
 │   ├── RenderRoutes.kt         # /render · /render/inputs · /render/{id}/{status,download}
 │   ├── SeparationRoutes.kt     # /separate · /separate/{id} · /stem · /mix · /mix/{id}{,/download}
 │   ├── DownloadResponder.kt    # respondFile / R2-redirect dispatcher

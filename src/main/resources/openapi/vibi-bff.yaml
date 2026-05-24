@@ -29,8 +29,6 @@ tags:
     description: |
       크레딧 잔액 + IAP 영수증 가산. App Store / Play Store productId 와 1:1 매핑된
       카탈로그(CreditCatalog) 만 허용. (platform, transactionId) UNIQUE 로 재시도 중복 차단.
-  - name: Languages
-    description: Perso 가 지원하는 타깃 언어 목록 프록시
   - name: Render
     description: ffmpeg 기반 렌더 파이프라인 (segments / bgm / 음원분리 directive)
   - name: Separation
@@ -211,23 +209,6 @@ paths:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
         '403':
           description: admin role 아님
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-
-  # ---------------------------------------------------------------- Languages
-  /api/v2/languages:
-    get:
-      tags: [Languages]
-      summary: Perso 지원 타깃 언어 목록
-      responses:
-        '200':
-          description: 언어 목록
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/LanguageListResponse' }
-        '502':
-          description: Perso 통신 실패
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -692,25 +673,6 @@ components:
           type: string
           description: CreditCatalog 에 등록된 productId. 매 호출마다 서버가 새 txId 생성.
           example: vibi.credits.150
-
-    # -------------------------- Languages
-    LanguageOption:
-      type: object
-      required: [code, name]
-      properties:
-        code: { type: string }
-        name: { type: string }
-        nativeName:
-          type: string
-          nullable: true
-
-    LanguageListResponse:
-      type: object
-      required: [languages]
-      properties:
-        languages:
-          type: array
-          items: { $ref: '#/components/schemas/LanguageOption' }
 
     # -------------------------- Render
     BgmClip:

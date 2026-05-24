@@ -22,19 +22,6 @@ data class ErrorResponse(
     val detail: String? = null,
 )
 
-// --- Languages (Perso 가 지원하는 타깃 언어 목록) ---
-@Serializable
-data class LanguageOption(
-    val code: String,
-    val name: String,
-    val nativeName: String? = null,
-)
-
-@Serializable
-data class LanguageListResponse(
-    val languages: List<LanguageOption>,
-)
-
 // --- Render ---
 @Serializable
 data class BgmClip(

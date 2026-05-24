@@ -41,7 +41,6 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 
 ```
 POST /api/v2/auth/{google,apple}        # ID Token → BFF JWT 교환
-GET  /api/v2/languages                  # Perso 지원 언어
 POST /api/v2/render/inputs              # video bytes 한 번만 업로드 → inputId
 POST /api/v2/render                     # multipart, multi-segment 합성 (inputId 재사용)
 GET  /api/v2/render/{id}/{status,download}

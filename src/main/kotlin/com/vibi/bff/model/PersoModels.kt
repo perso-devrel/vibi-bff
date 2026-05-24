@@ -8,19 +8,6 @@ import kotlinx.serialization.Serializable
 @Serializable
 data class PersoEnvelope<T>(val result: T)
 
-// --- Languages: 지원 타깃 언어 목록 (GET /video-translator/api/v1/languages) ---
-@Serializable
-data class PersoLanguage(
-    val code: String,
-    val name: String,
-    @SerialName("native_name") val nativeName: String? = null,
-)
-
-@Serializable
-data class PersoLanguagesResponse(
-    val languages: List<PersoLanguage> = emptyList(),
-)
-
 // --- Upload: SAS token ---
 @Serializable
 data class PersoSasTokenResponse(
