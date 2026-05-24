@@ -42,7 +42,14 @@ class SeparationServiceReservationTest {
     private fun seedReadyJob(jobId: String): SeparationJob {
         val outputDir = File(testDir, jobId).apply { mkdirs() }
         val stem = File(outputDir, "background.mp3").apply { writeText("x") }
-        val job = SeparationJob(jobId = jobId, outputDir = outputDir).apply {
+        val sourceFile = File(testDir, "$jobId-source.wav").apply { writeText("dummy") }
+        val job = SeparationJob(
+            jobId = jobId,
+            outputDir = outputDir,
+            sourceFile = sourceFile,
+            spec = com.vibi.bff.model.SeparationSpec(mediaType = "AUDIO"),
+            audioPreExtracted = true,
+        ).apply {
             status = "READY"
             stems = listOf(LocalStem("background", "배경음", stem))
         }

@@ -15,6 +15,7 @@ import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.RenderInputCacheService
 import com.vibi.bff.service.RenderService
+import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.StemMixService
@@ -35,6 +36,7 @@ fun Application.configureRouting(
     appConfig: AppConfig,
     renderService: RenderService,
     separationService: SeparationService,
+    separationQueue: SeparationQueueRepository?,
     stemMixService: StemMixService,
     signedUrlService: SignedUrlService,
     renderInputCache: RenderInputCacheService,
@@ -90,6 +92,7 @@ fun Application.configureRouting(
             separationRoutes(
                 separationService, stemMixService, signedUrlService, fileStorage,
                 appConfig, mediaSourceResolver, objectStore,
+                queueRepository = separationQueue,
                 jwtSecret = appConfig.auth.jwtSecret,
             )
             adminRoutes(adminRepository, jwtSecret = appConfig.auth.jwtSecret)

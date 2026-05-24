@@ -51,6 +51,7 @@ fun testAppConfig(
         signingSecret = "a".repeat(64),
         urlTtlSec = 1_800,
         mixUrlTtlSec = 600,
+        maxPersoInFlight = 2,
     ),
     auth = AuthConfig(
         googleClientIds = listOf("test-client-id.apps.googleusercontent.com"),

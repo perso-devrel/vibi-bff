@@ -261,6 +261,12 @@ data class SeparationConfig(
     val signingSecret: String,
     val urlTtlSec: Long,
     val mixUrlTtlSec: Long,
+    /** Perso 가 동시에 받는 audio-separation 잡 수의 BFF-side cap. Perso 측 실제 한계는
+     *  "실행 1 + 큐 2-3". 우리 Perso space 가 전용이라 정확히 추적 가능. 기본 2 (Perso 가 하나
+     *  처리하는 동안 다음 1개를 Perso 큐에 대기) — Perso 큐가 끊김 없이 다음 잡을 시작.
+     *  보수적으로 1로 두면 BFF 큐가 모든 대기 흡수 (UX 깔끔), 적극적으로 3으로 두면 throughput
+     *  최대화. 사고 시 즉시 1로 떨어뜨려 Perso 호출 차단 가능 (env override). */
+    val maxPersoInFlight: Int,
 ) {
     init {
         require(signingSecret.length >= 32) {
@@ -271,6 +277,10 @@ data class SeparationConfig(
         require(mixTtlMs >= 60_000) { "SEPARATION_MIX_TTL_MS must be >= 60000 (got $mixTtlMs)" }
         require(urlTtlSec in 60..604_800) { "SEPARATION_URL_TTL_SEC must be in 60..604800 (got $urlTtlSec)" }
         require(mixUrlTtlSec in 60..604_800) { "SEPARATION_MIX_URL_TTL_SEC must be in 60..604800 (got $mixUrlTtlSec)" }
+        require(maxPersoInFlight in 1..5) {
+            "SEPARATION_MAX_PERSO_IN_FLIGHT must be in 1..5 (got $maxPersoInFlight). " +
+                "Perso 측 제약은 '실행 1 + 큐 2-3' — 5 이상은 거절 위험."
+        }
     }
 }
 
@@ -319,6 +329,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
             signingSecret = separation.property("signingSecret").getString(),
             urlTtlSec = separation.property("urlTtlSec").getString().toLong(),
             mixUrlTtlSec = separation.property("mixUrlTtlSec").getString().toLong(),
+            maxPersoInFlight = separation.property("maxPersoInFlight").getString().toInt(),
         ),
         auth = AuthConfig(
             googleClientIds = auth.property("googleClientIds").getString()

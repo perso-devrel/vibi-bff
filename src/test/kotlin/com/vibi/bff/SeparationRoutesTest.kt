@@ -125,7 +125,15 @@ class SeparationRoutesTest {
 
     private fun separationJob(jobId: String, ownerUserId: UUID?): SeparationJob {
         val outDir = File(testDir, "sep-out-$jobId").apply { mkdirs() }
-        return SeparationJob(jobId = jobId, outputDir = outDir, ownerUserId = ownerUserId)
+        val src = File(testDir, "src-$jobId.wav").apply { writeText("dummy") }
+        return SeparationJob(
+            jobId = jobId,
+            outputDir = outDir,
+            ownerUserId = ownerUserId,
+            sourceFile = src,
+            spec = com.vibi.bff.model.SeparationSpec(mediaType = "AUDIO"),
+            audioPreExtracted = true,
+        )
     }
 
     // SeparationSpec 생성자 검증 — mediaType 오류

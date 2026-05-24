@@ -10,6 +10,7 @@ import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.MediaTrimmer
+import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.StemMixService
@@ -31,6 +32,8 @@ fun Route.separationRoutes(
     appConfig: AppConfig,
     mediaSourceResolver: MediaSourceResolver,
     objectStore: ObjectStore?,
+    /** 큐 상태 조회용 — null 이면 queuePosition 응답 안 함 (DB-less dev / 테스트). */
+    queueRepository: SeparationQueueRepository? = null,
     /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
     jwtSecret: String? = null,
 ) {
@@ -125,6 +128,14 @@ fun Route.separationRoutes(
                 }
             } else emptyList()
 
+            // QUEUED 단계에서만 큐 위치 + 예상 대기 노출. SUBMITTING/PROCESSING/READY 면 null.
+            // queueRepository 가 null (테스트 분기) 거나 in-memory status 가 QUEUED 가 아니면 skip.
+            val (queuePosition, estimatedWaitSec) = if (queueRepository != null && job.status == "QUEUED") {
+                val pos = queueRepository.queuePosition(jobId)
+                val avgSec = queueRepository.rollingAvgProcessingSec() ?: DEFAULT_ESTIMATED_PROCESSING_SEC
+                pos to pos?.let { it * avgSec }
+            } else null to null
+
             call.respond(HttpStatusCode.OK, SeparationStatusResponse(
                 jobId = jobId,
                 status = job.status,
@@ -134,6 +145,8 @@ fun Route.separationRoutes(
                 stems = stems,
                 mixJobId = job.consumedByMixJobId,
                 actualDurationMs = job.actualDurationMs,
+                queuePosition = queuePosition,
+                estimatedWaitSec = estimatedWaitSec,
             ))
         }
 
@@ -338,6 +351,13 @@ internal suspend fun computeSeparationSourceDurationMs(pipelineInput: File, spec
         .getOrDefault(0L)
         .coerceAtLeast(0L)
 }
+
+/**
+ * rollingAvg 표본이 부족할 때 (boot 직후 / FAILED 만 누적된 상황) 추정 대기 계산용 fallback.
+ * 분리 잡 평균 2-5분 → 보수적으로 3분(180초) — 사용자한테 너무 짧게 보여 불만 누적되는 것보다는
+ * 약간 길게 보이고 일찍 완료되는 편이 UX 안전.
+ */
+private const val DEFAULT_ESTIMATED_PROCESSING_SEC: Long = 180
 
 /**
  * Idempotency 키. 같은 (caller, editedRenderJobId, trim 구간, 언어, mediaType) 으로

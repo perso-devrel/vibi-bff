@@ -44,6 +44,11 @@ dependencies {
 
     // Logging
     implementation("ch.qos.logback:logback-classic:$logback_version")
+    // Cloud Run / GCP Error Reporting 자동 수집용 JSON encoder. K_SERVICE env 가 set 인 경우만
+    // 활성 (logback.xml 의 if-property), 로컬에선 기존 텍스트 포맷 유지.
+    implementation("net.logstash.logback:logstash-logback-encoder:7.4")
+    // logback.xml 의 <if condition> 평가 엔진. 부팅 시 ~50KB 메모리, eval 1회.
+    implementation("org.codehaus.janino:janino:3.1.12")
 
     // .env file support
     implementation("io.github.cdimascio:dotenv-kotlin:6.4.2")
