@@ -41,7 +41,6 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 
 ```
 POST /api/v2/auth/{google,apple}        # ID Token → BFF JWT 교환
-GET  /api/v2/languages                  # Perso 지원 언어
 POST /api/v2/render/inputs              # video bytes 한 번만 업로드 → inputId
 POST /api/v2/render                     # multipart, multi-segment 합성 (inputId 재사용)
 GET  /api/v2/render/{id}/{status,download}
@@ -76,6 +75,14 @@ GET  /api/v2/testdata/separation/*      # (dev mock)
 **원인**: Perso 의 `OriginalSubBackground` 의 'Sub' 가 화자 수에 따라 후처리 다름. 진짜 BGM only 는 file 명 `OriginalBaseBackground` (project info endpoint 의 `downloadPathInfo.originalBackgroundPath`).
 
 **해결 패턴**: `SeparationService.downloadBackgroundStem` 이 `getProjectInfo(projectSeq).downloadPathInfo.originalBackgroundPath` 우선 시도, 누락 시 `originalSubBackground` fallback.
+
+### Perso audio-separation — 업로드 codec 은 **PCM WAV / MP3**, FLAC 은 거부
+
+**증상**: trim 출력을 `.flac` 으로 업로드하면 `getSasToken` → `uploadToBlob` → `registerMedia` → `submitAudioSeparation` 까지 전부 OK 인데 잡 폴링이 `progress=20% Uploading → 100% Failed (hasFailed=false)` 로 종료. BFF `PersoPolling` 이 `progressReason == "Failed"` 를 `PersoApiException(500)` 으로 변환 → 502 응답.
+
+**원인**: Perso 분리 파이프라인이 FLAC 파일은 받아 두기만 하고 실제 처리 단계에서 거절. `hasFailed` 플래그가 false 라 단순 status 만 봐서는 안 잡힘. WAV PCM / MP3 는 정상 처리 (`Transcribing → Completed`).
+
+**해결 패턴**: `MediaTrimmer.OUTPUT_EXTENSION = "wav"` + `-c:a pcm_s16le`. sample-accurate 유지 + Perso 호환. 회귀 가드는 `PersoLiveSeparationIT` (env opt-in, fixture 부재 시 skip). 한때 FLAC 으로 통일 시도했다가 (`997c683`) 본 회귀로 되돌림.
 
 ### Perso API path prefix — `/video-translator` 통일 (단, 일부 endpoint 만 `/file`)
 

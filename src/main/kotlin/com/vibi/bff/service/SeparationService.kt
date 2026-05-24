@@ -226,10 +226,11 @@ class SeparationService(
         val isVideo = spec.mediaType == "VIDEO"
 
         // Perso 는 audio-only 업로드만 받음. MediaTrimmer.trim 을 거친 입력은 이미 sample-accurate
-        // FLAC 이라 그대로 보내고, no-trim 영상 fallback 만 MP3 추출이 필요.
+        // PCM WAV (Perso 분리 파이프라인이 받는 포맷) 이라 그대로 보내고, no-trim 영상 fallback 만
+        // MP3 추출이 필요.
         // audioPreExtracted 는 caller 가 명시한 신호 (라우트의 maybeTrim 결과 추론).
         // 이전엔 sourceFile.extension 으로 sniff 했으나, 멀티파트 originalFileName 이
-        // attacker-controlled 라 video 를 ".flac" 으로 박아 MP3 추출 단계를 우회 가능했음 — 명시 flag 로 단절.
+        // attacker-controlled 라 video 를 trimmed 확장자로 박아 MP3 추출 단계를 우회 가능했음 — 명시 flag 로 단절.
         job.status = "PROCESSING"
         val uploadFile = when {
             audioPreExtracted -> sourceFile
@@ -246,8 +247,8 @@ class SeparationService(
         job.status = "UPLOADING_UPSTREAM"
         job.progressReason = "Uploading"
         // uploadFile cleanup 정책:
-        //  - audioPreExtracted=true → uploadFile = editedSourceDir/*.trimmed.flac (caller-owned
-        //    FLAC). 실패해도 무조건 정리 — dispose() 는 outputDir 만 reap 하므로 finally 필요.
+        //  - audioPreExtracted=true → uploadFile = editedSourceDir/*.trimmed.wav (caller-owned
+        //    PCM WAV). 실패해도 무조건 정리 — dispose() 는 outputDir 만 reap 하므로 finally 필요.
         //    원본 mp4 는 maybeTrim 이 이미 삭제했으므로 retry 도 불가, 누수 방지가 옳음.
         //  - 그 외 (legacy AUDIO upload, video→MP3 extract) → 성공 시에만 delete.
         //    실패 시 sourceFile (legacy: caller-owned 업로드 / video: outputDir 안 mp3) 을

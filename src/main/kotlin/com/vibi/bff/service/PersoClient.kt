@@ -265,16 +265,4 @@ class PersoClient(
         return AppJson.decodeFromJsonElement(PersoProjectInfo.serializer(), target)
     }
 
-    /**
-     * 지원 언어 목록 — `GET /video-translator/api/v1/languages`.
-     * 모바일 클라이언트의 타깃 언어 드롭다운을 동적으로 채우기 위함.
-     */
-    suspend fun getLanguages(): PersoLanguagesResponse {
-        val response = httpClient.get(url("/video-translator/api/v1/languages")) {
-            authHeader()
-        }
-        checkResponse(response)
-        return response.body()
-    }
-
 }
