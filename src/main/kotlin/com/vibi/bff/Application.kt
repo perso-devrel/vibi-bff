@@ -14,6 +14,8 @@ import com.vibi.bff.service.JobAnalyticsRepository
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.RenderInputCacheService
+import com.vibi.bff.service.SeparationDispatcher
+import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
@@ -102,8 +104,15 @@ fun Application.module() {
     val userRepository = UserRepository()
     val jobAnalyticsRepository = JobAnalyticsRepository()
     val externalApiCallsRepository = ExternalApiCallsRepository()
+    val separationQueueRepository = SeparationQueueRepository()
     val adminRepository = AdminRepository()
     val creditRepository = CreditRepository()
+
+    // BFF 인스턴스 단위 UUID — SeparationDispatcher 가 "자기 인스턴스가 enqueue 한 QUEUED 만
+    // claim" 정책의 키. Cloud Run 이 새 컨테이너 띄울 때마다 새 UUID, 같은 인스턴스 lifetime
+    // 안엔 변하지 않음. K_REVISION 같은 GCP 변수보다 process-uuid 가 단순/안전 (한 revision
+    // 안에 여러 인스턴스 == 같은 K_REVISION 이라 식별 불가).
+    val bffInstanceId = java.util.UUID.randomUUID().toString()
 
     val httpClient = HttpClient(CIO) {
         install(ContentNegotiation) {
@@ -175,15 +184,46 @@ fun Application.module() {
         appConfig.perso.baseUrl, appConfig.perso.spaceSeq, appConfig.perso.pollIntervalMs
     )
     val signedUrlService = SignedUrlService(appConfig.separation.signingSecret)
+
+    // SeparationDispatcher 와 SeparationService 가 양방향 의존 (서비스 → dispatcher.nudge,
+    // dispatcher → service.runQueuedJob). 순환 해결: nudge 람다를 lateinit 변수로 우회.
+    // Application start 직후 둘 다 살아있다는 보장 안에서만 안전.
+    lateinit var separationDispatcher: SeparationDispatcher
     val separationService = SeparationService(
         persoClient = persoClient,
         separationDir = fileStorage.separationDir,
         config = appConfig.separation,
         pollIntervalMs = appConfig.perso.pollIntervalMs,
         maxPollMinutes = appConfig.perso.maxPollMinutes,
-        analytics = jobAnalyticsRepository,
+        queue = separationQueueRepository,
         externalCalls = externalApiCallsRepository,
+        onJobChange = { separationDispatcher.nudge() },
+        bffInstanceId = bffInstanceId,
     )
+    separationDispatcher = SeparationDispatcher(
+        service = separationService,
+        queue = separationQueueRepository,
+        bffInstanceId = bffInstanceId,
+        maxPersoInFlight = appConfig.separation.maxPersoInFlight,
+    )
+    separationDispatcher.start()
+
+    // Boot resumption: 다른 (죽은) 인스턴스가 처리 중이던 PROCESSING 잡들을 self 로 재할당한 뒤
+    // polling 재개. Perso 잡은 server-side 에서 계속 돌고 있어 결과만 받아오면 됨 — 사용자한테
+    // 인스턴스 재시작이 invisible. fire-and-forget — boot 막지 않음.
+    val bootScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    bootScope.launch {
+        runCatching {
+            val orphans = separationQueueRepository.claimOrphanedProcessing(bffInstanceId)
+            orphans.forEach { (jobId, persoProjectSeq, ownerUserId) ->
+                separationService.resumePollingForJob(jobId, persoProjectSeq, ownerUserId)
+            }
+        }.onFailure { e ->
+            org.slf4j.LoggerFactory.getLogger("BootResume")
+                .error("Failed to resume orphaned PROCESSING jobs: {}", e.message, e)
+        }
+    }
+
     val stemMixService = StemMixService(
         mixDir = File(fileStorage.separationDir, "mix"),
         mixTtlMs = appConfig.separation.mixTtlMs,
@@ -226,7 +266,8 @@ fun Application.module() {
     configureErrorHandling()
     configureRouting(
         fileStorage, persoClient, appConfig, renderService,
-        separationService, stemMixService, signedUrlService,
+        separationService, separationQueueRepository,
+        stemMixService, signedUrlService,
         renderInputCache,
         mediaSourceResolver, authService, objectStore,
         adminRepository,
@@ -237,9 +278,12 @@ fun Application.module() {
     val shutdownHooks: List<() -> Unit> = listOf(
         httpClient::close,
         renderService::shutdown,
+        // Dispatcher 를 먼저 멈춰서 새 claim 안 함 → in-flight 잡들 정상 종료 후 service shutdown.
+        separationDispatcher::shutdown,
         separationService::shutdown,
         stemMixService::shutdown,
         { cacheCleanupScope.cancel() },
+        { bootScope.cancel() },
         { objectStore?.shutdown() },
         dataSource::close,
     )

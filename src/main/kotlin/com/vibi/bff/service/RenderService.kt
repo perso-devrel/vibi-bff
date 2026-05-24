@@ -22,7 +22,7 @@ import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * 출력 audio 인코딩 프로필. 최종 mix 패스의 video 는 `-c:v copy` 로 stream-copy 되므로
- * audio bitrate 만 결정. per-segment trim 의 libx264 는 별개 고정 설정 (preset=fast,
+ * audio bitrate 만 결정. per-segment trim 의 libx264 는 별개 고정 설정 (preset=veryfast,
  * default CRF) — quality 와 무관.
  *
  * crf/preset 필드는 향후 video 재인코딩이 다시 필요해질 경우의 hook 으로 남겨둠 (현재 운영
@@ -743,7 +743,7 @@ class RenderService(
             cmd.addAll(listOf("-af", af))
         }
         cmd.addAll(listOf(
-            "-c:v", "libx264", "-preset", "fast", "-pix_fmt", "yuv420p", "-r", "30",
+            "-c:v", "libx264", "-preset", "veryfast", "-pix_fmt", "yuv420p", "-r", "30",
             "-c:a", "aac", "-b:a", "192k",
             outFile.absolutePath,
         ))

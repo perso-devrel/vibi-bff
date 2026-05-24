@@ -1,19 +1,15 @@
 #!/usr/bin/env bash
 # vibi-bff Cloud Run 배포 스크립트.
 # 사전 조건:
-#   1. gcloud CLI 설치 + 로그인 완료
+#   1. gcloud CLI + aws CLI 설치 (aws 는 R2 lifecycle 적용용 — S3 API 호환)
 #   2. PROJECT_ID 환경변수 또는 아래 PROJECT_ID 값 채우기 (신규 프로젝트 ID)
 #   3. vibi-bff/.env 에 채워져 있어야 함:
 #      - PERSO_API_KEY / PERSO_SPACE_SEQ / GOOGLE_OAUTH_CLIENT_IDS
 #      - DATABASE_URL / DB_USER / DB_PASSWORD (Neon 등 managed Postgres)
 #      - R2_BUCKET / R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (Cloudflare R2)
 #      - APPLE_OAUTH_CLIENT_IDS (선택 — 비우면 Apple 로그인 비활성)
-# 멱등 (중복 실행해도 안전): 이미 존재하면 update / skip.
-#
-# **R2 lifecycle (산출물 7일 자동 삭제)** 은 본 스크립트 범위 밖 — Cloudflare dashboard →
-# R2 → bucket 선택 → Settings → Object lifecycle rules 에서 1회 설정. 또는 `aws s3api
-# put-bucket-lifecycle-configuration` 으로 deploy/r2-lifecycle.json 적용 (R2 endpoint
-# override 필요).
+# 멱등 (중복 실행해도 안전): 이미 존재하면 update / skip. R2 lifecycle 도 매번 PUT —
+# S3 PutBucketLifecycleConfiguration 은 전체 교체 semantics 라 drift 자연 차단.
 
 set -euo pipefail
 
@@ -26,6 +22,11 @@ SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 # URL redirect 로 우회. **R2 egress 무료** 라 Cloud Run egress 비용 0. Cloud Run 인스턴스도
 # 바이트 전송으로 잠기지 않아 max-instances=2 cap 에서 동시 다운로드 처리량 회복.
 SIGNED_URL_TTL_SEC="${SIGNED_URL_TTL_SEC:-900}"
+# min-instances=1 이 기본 — SeparationDispatcher 가 BFF 안에 살고 있어 idle 시 인스턴스가
+# scale-to-zero 되면 큐 dispatch 가 멈춤. 사용자 submit 은 DB에 QUEUED 만 쌓이고 처리 안 됨.
+# 비용: us-central1 2Gi/1CPU ≈ $25/mo. 진짜 traffic 없는 dev 환경에선 MIN_INSTANCES=0 override.
+MIN_INSTANCES="${MIN_INSTANCES:-1}"
+MAX_INSTANCES="${MAX_INSTANCES:-2}"
 
 ENV_FILE="$(dirname "$0")/../.env"
 if [[ ! -f "$ENV_FILE" ]]; then
@@ -52,6 +53,9 @@ set -a; source "$ENV_FILE"; set +a
 # .env 의 GEMINI_PROJECT_ID 가 있으면 그 값, 없으면 PROJECT_ID fallback.
 : "${GEMINI_PROJECT_ID:=$PROJECT_ID}"
 
+command -v gcloud >/dev/null || { echo "❌ gcloud CLI not found — install from https://cloud.google.com/sdk/docs/install" >&2; exit 1; }
+command -v aws    >/dev/null || { echo "❌ aws CLI not found (필요: R2 lifecycle 적용) — install from https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" >&2; exit 1; }
+
 echo "▶ Using project: $PROJECT_ID  region: $REGION"
 gcloud config set project "$PROJECT_ID" >/dev/null
 
@@ -76,9 +80,9 @@ for ROLE in roles/aiplatform.user roles/secretmanager.secretAccessor; do
     --quiet >/dev/null
 done
 
-# R2 (Cloudflare) — bucket / lifecycle / access token 은 Cloudflare dashboard 에서 셋업.
-# 본 스크립트는 R2 credentials 를 Secret Manager 에 옮기는 것만 담당. lifecycle (산출물
-# 7일 retention) 은 dashboard → R2 → bucket → Settings → Object lifecycle rules.
+# R2 (Cloudflare) — bucket / access token 은 Cloudflare dashboard 에서 1회 생성.
+# 본 스크립트는 (1) R2 credentials 를 Secret Manager 에 미러, (2) bucket lifecycle 을
+# deploy/r2-lifecycle.json 으로 강제 적용 (산출물 7일 retention).
 
 echo "▶ Creating / updating secrets…"
 create_or_update_secret() {
@@ -103,6 +107,35 @@ create_or_update_secret DB_PASSWORD               "$DB_PASSWORD"
 create_or_update_secret R2_ACCESS_KEY_ID          "$R2_ACCESS_KEY_ID"
 create_or_update_secret R2_SECRET_ACCESS_KEY      "$R2_SECRET_ACCESS_KEY"
 
+# R2 lifecycle — bucket 에 7일 자동 삭제 룰 강제 적용. PUT semantics 라 매 배포마다
+# deploy/r2-lifecycle.json 으로 전체 교체 → drift 자연 차단. token 이 PutBucketLifecycle
+# 권한 없으면 (Object R/W 만 있는 경우) 403 — 서비스 동작과 무관한 운영 위생 단계라
+# 실패해도 deploy 계속 진행 (warn-only). 대시보드에서 수동 적용 가능.
+LIFECYCLE_JSON="$(dirname "$0")/r2-lifecycle.json"
+if [[ ! -f "$LIFECYCLE_JSON" ]]; then
+  echo "❌ R2 lifecycle config not found at $LIFECYCLE_JSON" >&2
+  exit 1
+fi
+echo "▶ Applying R2 lifecycle rule (bucket=$R2_BUCKET) from $(basename "$LIFECYCLE_JSON")…"
+LIFECYCLE_OUTPUT=$(AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+  AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+  AWS_DEFAULT_REGION=auto \
+  aws s3api put-bucket-lifecycle-configuration \
+    --bucket "$R2_BUCKET" \
+    --lifecycle-configuration "file://$LIFECYCLE_JSON" \
+    --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" 2>&1) \
+  && echo "  ✓ R2 lifecycle applied" \
+  || cat <<EOF >&2
+⚠️  R2 lifecycle 적용 실패 (deploy 는 계속). 보통 R2 token 권한 부족 (Object R/W 만 있고
+   PutBucketLifecycleConfiguration 미허용). 다음 중 하나로 해결:
+   - 대시보드에서 1회 수동 설정:
+     https://dash.cloudflare.com → R2 → $R2_BUCKET → Settings → Object lifecycle rules
+     → Add rule (delete-after-7d, all objects, 7 days)
+   - 또는 R2 API token 을 Admin Read & Write 권한으로 재발급 후 .env 갱신
+   원본 에러:
+$LIFECYCLE_OUTPUT
+EOF
+
 # admin-ui (Vite) 빌드 산출물은 .gitignore 됨 — deploy 시점에 항상 fresh build.
 # 빠뜨리면 ADMIN_SLUG 가 박혀도 classpath:/admin/index.html 부재로 마운트 skip + 부팅 로그 WARN.
 echo "▶ Building admin-ui (vite)…"
@@ -125,7 +158,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --cpu 1 --memory 2Gi --cpu-boost \
   --timeout 3600 \
   --concurrency 4 \
-  --min-instances 0 --max-instances 2 \
+  --min-instances "$MIN_INSTANCES" --max-instances "$MAX_INSTANCES" \
   --session-affinity \
   --allow-unauthenticated \
   --set-env-vars="^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${REGION}@PERSO_BASE_URL=https://api.perso.ai@PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai@STORAGE_PATH=/tmp/storage@GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS}@APPLE_OAUTH_CLIENT_IDS=${APPLE_OAUTH_CLIENT_IDS}@CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}@R2_BUCKET=${R2_BUCKET}@R2_ACCOUNT_ID=${R2_ACCOUNT_ID}@SIGNED_URL_TTL_SEC=${SIGNED_URL_TTL_SEC}@ADMIN_SLUG=${ADMIN_SLUG}" \

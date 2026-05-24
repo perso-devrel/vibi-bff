@@ -225,6 +225,16 @@ data class SeparationStatusResponse(
      * 측정 실패 → 클라이언트는 사용자 선택값 fallback.
      */
     val actualDurationMs: Long? = null,
+    /**
+     * QUEUED 상태일 때만 set. 1-based — `1` 은 다음 차례. 모바일이 "대기 N번째" 안내에 사용.
+     * 다른 상태에선 null.
+     */
+    val queuePosition: Int? = null,
+    /**
+     * QUEUED 일 때 [queuePosition] × 최근 평균 처리 시간(초) 으로 계산한 추정 대기. 평균 표본
+     * 부족하면 보수적 fallback 사용. null 이면 추정 불가 (QUEUED 가 아니거나 표본 0).
+     */
+    val estimatedWaitSec: Long? = null,
 )
 
 @Serializable

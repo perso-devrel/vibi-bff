@@ -854,7 +854,12 @@ components:
         jobId: { type: string }
         status:
           type: string
-          enum: [PENDING, UPLOADING_UPSTREAM, SUBMITTED, PROCESSING, DOWNLOADING, READY, FAILED, DISPOSED]
+          enum: [QUEUED, SUBMITTING, UPLOADING_UPSTREAM, SUBMITTED, PROCESSING, DOWNLOADING, READY, FAILED, DISPOSED]
+          description: |
+            QUEUED = BFF 큐 대기 (Perso 미호출).
+            SUBMITTING = dispatcher 가 Perso 호출 중 (수초).
+            UPLOADING_UPSTREAM/SUBMITTED/PROCESSING/DOWNLOADING = pipeline 세부 단계.
+            READY/FAILED = 종결.
         progress: { type: integer, nullable: true }
         progressReason: { type: string, nullable: true }
         error: { type: string, nullable: true }
@@ -865,6 +870,27 @@ components:
           type: string
           nullable: true
           description: mix 가 이 separation 을 점유했을 때 그 mix jobId
+        actualDurationMs:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            READY 상태에서 stem FLAC 의 실측 길이(ms). 클라이언트가 사용자 선택 trim 길이
+            대신 이 값을 timeline 막대 길이로 사용 — stem 파일과 1:1 매칭. null = 측정 실패
+            또는 미-READY.
+        queuePosition:
+          type: integer
+          nullable: true
+          description: |
+            QUEUED 상태일 때만 set. 1-based — `1` 은 다음 차례. 모바일 "대기 N번째" 표시용.
+            QUEUED 가 아니면 null.
+        estimatedWaitSec:
+          type: integer
+          format: int64
+          nullable: true
+          description: |
+            queuePosition × 최근 평균 처리 시간(초) 추정 대기. 표본 부족 시 보수적 fallback.
+            QUEUED 가 아니거나 추정 불가면 null.
 
     StemMixSelection:
       type: object

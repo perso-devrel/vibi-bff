@@ -18,10 +18,17 @@ import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
 
-// State machine:
-//   PENDING → UPLOADING_UPSTREAM → SUBMITTED → PROCESSING → DOWNLOADING → READY
+// State machine (in-memory job.status):
+//   QUEUED → UPLOADING_UPSTREAM → SUBMITTED → PROCESSING → DOWNLOADING → READY
 //                                                              │
 //                                                              └→ FAILED
+//
+// QUEUED 단계는 SeparationDispatcher 가 Perso 동시성 cap (env: MAX_PERSO_IN_FLIGHT) 까지
+// 도달하기 전엔 기다리는 큐 상태. dispatcher 가 claim 하면 코루틴이 launch 되어 그 다음 단계로
+// 진행. DB (separation_jobs.status) 는 보다 거친 단계만 추적 (QUEUED/SUBMITTING/PROCESSING/
+// READY/FAILED) — 인메모리 fine-grained 상태가 사용자 progress UI source, DB 는 dispatcher 의
+// capacity 카운트 source.
+//
 // READY + consumedByMixJobId=null → eligible for mix reservation.
 // READY + consumedByMixJobId=set  → mix in flight; blocks re-submit.
 // COMPLETED mix triggers dispose(jobId); FAILED is kept briefly so clients
@@ -32,7 +39,7 @@ internal const val SPEAKER_STEM_PREFIX = "speaker_"
 
 data class SeparationJob(
     val jobId: String,
-    @Volatile var status: String = "PENDING",
+    @Volatile var status: String = "QUEUED",
     @Volatile var progress: Int = 0,
     @Volatile var progressReason: String? = null,
     @Volatile var error: String? = null,
@@ -51,6 +58,13 @@ data class SeparationJob(
      * 미주입 분기). 라우트가 status/mix 호출 시 caller principal 과 매칭 — mismatch 면
      * 다른 사용자가 남의 잡을 mix command 로 소비/dispose 시키는 IDOR 차단. */
     val ownerUserId: UUID? = null,
+    // ── Dispatcher 가 QUEUED row 를 pickup 한 뒤 runPipeline 에 넘기는 입력 ────────────
+    // submit() 가 받은 그대로 보존. claim 시점에 dispatcher 가 in-memory lookup 으로 꺼냄.
+    val sourceFile: File,
+    val spec: SeparationSpec,
+    val audioPreExtracted: Boolean,
+    val sourceDurationMs: Long = 0L,
+    val renderJobId: String? = null,
 )
 
 data class LocalStem(
@@ -66,10 +80,17 @@ class SeparationService(
     private val scope: CoroutineScope = CoroutineScope(Dispatchers.IO),
     private val pollIntervalMs: Long,
     private val maxPollMinutes: Int,
-    /** admin 대시보드용 Postgres 영속화. null 이면 분석 write skip (테스트). */
-    private val analytics: JobAnalyticsRepository? = null,
+    /** Perso 동시성 큐의 source-of-truth. null 이면 큐 write skip — 테스트/dev 분기에서만
+     *  허용 (DB 없이 in-memory 만으로 동작). 운영에선 항상 주입. */
+    private val queue: SeparationQueueRepository? = null,
     /** Perso API 호출 instrumentation. null 이면 외부 호출 추적 skip. */
     private val externalCalls: ExternalApiCallsRepository? = null,
+    /** Dispatcher 의 깨우기 신호. submit (새 QUEUED) / 완료 (capacity 해제) 시 호출.
+     *  null 이면 dispatcher 가 자기 30초 tick 으로만 깨어남 — 테스트 분기. */
+    private val onJobChange: (() -> Unit)? = null,
+    /** Cloud Run 인스턴스 단위 UUID — bff_instance_id 컬럼에 기록되어 dispatcher 가 자기
+     *  인스턴스 QUEUED 만 claim 하게 함. 소스 파일이 인스턴스 로컬 디스크에 있기 때문. */
+    private val bffInstanceId: String = UUID.randomUUID().toString(),
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
@@ -155,36 +176,139 @@ class SeparationService(
     ): String {
         val jobId = "sep-${UUID.randomUUID()}"
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
-        val job = SeparationJob(jobId = jobId, outputDir = outputDir, dedupKey = dedupKey, ownerUserId = userId)
+        val job = SeparationJob(
+            jobId = jobId,
+            outputDir = outputDir,
+            dedupKey = dedupKey,
+            ownerUserId = userId,
+            sourceFile = sourceFile,
+            spec = spec,
+            audioPreExtracted = audioPreExtracted,
+            sourceDurationMs = sourceDurationMs,
+            renderJobId = renderJobId,
+        )
         jobs[jobId] = job
 
-        scope.launch {
-            if (userId != null) {
-                analytics?.insertSeparationJob(jobId, userId, renderJobId, sourceDurationMs, "PROCESSING")
-            }
-            try {
-                externalCalls.withExternalCall("perso", "audio-separation") {
-                    runPipeline(job, sourceFile, spec, audioPreExtracted)
+        if (queue != null) {
+            // 운영 경로: DB enqueue → dispatcher 가 capacity 보고 자기 인스턴스 row claim →
+            // runQueuedJob 호출. 본 호출은 그 자리에서 DB INSERT 만 — Perso 호출은 dispatcher 가.
+            scope.launch {
+                runCatching {
+                    queue.enqueue(jobId, userId, renderJobId, sourceDurationMs, bffInstanceId)
+                }.onFailure { e ->
+                    // enqueue 실패면 dispatcher 가 영원히 모름 → in-memory 도 FAILED 마킹.
+                    log.error("Failed to enqueue separation jobId={}: {}", jobId, e.message, e)
+                    job.status = "FAILED"
+                    job.error = "enqueue failed"
+                    dedupKey?.let { dedupIndex.remove(it, jobId) }
                 }
-                if (userId != null && job.status == "READY") {
-                    analytics?.updateSeparationJobStatus(jobId, "READY")
+                onJobChange?.invoke()
+            }
+        } else {
+            // 테스트 / DB-less dev 분기: 큐 없이 즉시 launch. 기존 동작과 동일.
+            scope.launch { executePipeline(job) }
+        }
+        return jobId
+    }
+
+    /**
+     * Dispatcher 가 호출하는 진입점. claim 한 jobId 의 in-memory 잡을 꺼내 파이프라인 실행.
+     * 파이프라인이 Perso projectSeq 를 받는 즉시 queue.markProcessing 호출 (인스턴스 재시작 시
+     * polling resumption 의 entry point).
+     *
+     * in-memory miss 는 stale claim (인스턴스 재시작 후의 잔여) — 운영상 발생 안 해야 하지만
+     * 발생하면 FAILED 마킹 후 끝.
+     */
+    suspend fun runQueuedJob(jobId: String) {
+        val job = jobs[jobId]
+        if (job == null) {
+            log.warn("Dispatcher claimed unknown in-memory jobId={} — marking FAILED", jobId)
+            queue?.markFailed(jobId)
+            onJobChange?.invoke()
+            return
+        }
+        executePipeline(job)
+    }
+
+    /**
+     * 인스턴스 재시작 후 PROCESSING 잡 polling 재개. [persoProjectSeq] 는 DB 에 보존된 값으로,
+     * Perso 측 잡은 server-side 에서 계속 돌고 있으므로 결과만 받아오면 됨.
+     *
+     * 호출 전 caller (Application.kt boot scanner) 가 queueRepo.claimOrphanedProcessing 으로
+     * bff_instance_id 를 self 로 재할당해두어야 함 — 본 메서드는 in-memory 재구성 + 폴링 launch
+     * 만 담당.
+     *
+     * source 파일은 이미 죽은 인스턴스 디스크에 있어 복구 불가 — runPipelineDownloadPhase 가
+     * source 의존성 없이 polling+download 만 하므로 정상 동작.
+     */
+    fun resumePollingForJob(jobId: String, persoProjectSeq: Long, ownerUserId: UUID?) {
+        val outputDir = File(separationDir, jobId).apply { mkdirs() }
+        // sourceFile/spec/audioPreExtracted 는 본 경로에서 사용 안 함 — placeholder 로 주입.
+        val placeholderSource = File(outputDir, ".resumed-no-source")
+        val job = SeparationJob(
+            jobId = jobId,
+            outputDir = outputDir,
+            ownerUserId = ownerUserId,
+            sourceFile = placeholderSource,
+            spec = SeparationSpec(mediaType = "AUDIO"),
+            audioPreExtracted = true,
+        ).apply {
+            status = "PROCESSING"
+            progressReason = "Resumed after restart"
+        }
+        jobs[jobId] = job
+        log.info("Resuming separation polling: jobId={} persoProjectSeq={}", jobId, persoProjectSeq)
+
+        scope.launch {
+            try {
+                externalCalls.withExternalCall("perso", "audio-separation-resume") {
+                    // 재시작 후엔 Perso 가 이미 처리 끝났을 가능성 높음 → initialDelay 짧게 (5s).
+                    // 아직 처리 중이면 normal pollIntervalMs 로 polling 진행.
+                    runPipelineDownloadPhase(job, persoProjectSeq, initialDelayMs = 5_000L)
+                }
+                if (job.status == "READY") {
+                    queue?.markReady(jobId)
                 }
             } catch (e: Exception) {
                 job.status = "FAILED"
                 job.error = e.message
-                // FAILED 상태에선 같은 키 재submit 이 새 잡을 만들어야 하므로 즉시
-                // dedup entry 정리 (cleanupAbandoned 의 FAILED_JOB_TTL 까지 기다리면
-                // 그동안 mobile 이 재시도해도 실패한 잡 ID 만 받게 됨).
-                dedupKey?.let { dedupIndex.remove(it, jobId) }
-                if (userId != null) {
-                    analytics?.updateSeparationJobStatus(jobId, "FAILED")
-                }
-                // Leave sourceFile on disk — caller can retry; cleanupAbandoned
-                // reaps it via dispose() once FAILED_JOB_TTL_MS passes.
-                log.error("Separation pipeline failed: jobId={}", jobId, e)
+                job.dedupKey?.let { dedupIndex.remove(it, jobId) }
+                queue?.markFailed(jobId)
+                log.error("Resumed separation pipeline failed: jobId={}", jobId, e)
+            } finally {
+                onJobChange?.invoke()
             }
         }
-        return jobId
+    }
+
+    /** 본 함수는 트랜잭션 밖 — 분 단위 Perso 호출 포함. 시작 시점 queue row 는 이미
+     *  SUBMITTING (dispatcher claimNext 결과) 또는 in-memory only (queue==null 분기). */
+    private suspend fun executePipeline(job: SeparationJob) {
+        try {
+            externalCalls.withExternalCall("perso", "audio-separation") {
+                runPipeline(job, job.sourceFile, job.spec, job.audioPreExtracted) { projectSeq ->
+                    // Perso 가 projectSeq 발급한 직후 → DB 를 SUBMITTING → PROCESSING 으로.
+                    queue?.markProcessing(job.jobId, projectSeq)
+                }
+            }
+            if (job.status == "READY") {
+                queue?.markReady(job.jobId)
+            }
+        } catch (e: Exception) {
+            job.status = "FAILED"
+            job.error = e.message
+            // FAILED 상태에선 같은 키 재submit 이 새 잡을 만들어야 하므로 즉시
+            // dedup entry 정리 (cleanupAbandoned 의 FAILED_JOB_TTL 까지 기다리면
+            // 그동안 mobile 이 재시도해도 실패한 잡 ID 만 받게 됨).
+            job.dedupKey?.let { dedupIndex.remove(it, job.jobId) }
+            queue?.markFailed(job.jobId)
+            // Leave sourceFile on disk — caller can retry; cleanupAbandoned
+            // reaps it via dispose() once FAILED_JOB_TTL_MS passes.
+            log.error("Separation pipeline failed: jobId={}", job.jobId, e)
+        } finally {
+            // 끝 → capacity 한 칸 비움. dispatcher 가 즉시 다음 QUEUED 를 pickup 하도록.
+            onJobChange?.invoke()
+        }
     }
 
     // Atomically reserve stems for a given mix. Returns null if the job is
@@ -222,6 +346,7 @@ class SeparationService(
         sourceFile: File,
         spec: SeparationSpec,
         audioPreExtracted: Boolean,
+        onPersoProjectSeq: suspend (Long) -> Unit = {},
     ) {
         val isVideo = spec.mediaType == "VIDEO"
 
@@ -272,8 +397,10 @@ class SeparationService(
             isVideoProject = false,
             title = "separation-${job.jobId}",
         )
+        // queue DB row 를 SUBMITTING → PROCESSING + persoProjectSeq 기록. 인스턴스 재시작 시
+        // resumption 의 entry point. 본 hook 호출 실패는 catch 안에서 throw → catch 단에서 FAILED.
+        onPersoProjectSeq(projectSeq)
 
-        job.status = "PROCESSING"
         // 폴링 전략: 음성분리 처리 시간 ≈ 구간 길이 × 3. 매우 긴 영상이면 5분으로 cap —
         // 그 이상 sleep 하면 client 가 PROCESSING 상태에서 progressReason 변화 없이
         // 멈춰있는 것처럼 보여 timeout 으로 의심받음. 5분 후엔 정상 polling 으로 진입.
@@ -282,7 +409,22 @@ class SeparationService(
         } else 0L
         val initialDelayMs = (if (rangeMs > 0) rangeMs * 3 else 30_000L)
             .coerceAtMost(5 * 60_000L)
-        log.info("Initial Perso wait: {}ms (range×3 capped 5min, range={}ms)", initialDelayMs, rangeMs)
+        runPipelineDownloadPhase(job, projectSeq, initialDelayMs)
+    }
+
+    /**
+     * Perso 가 projectSeq 발급한 이후 단계 — 폴링 + 다운로드 + transcode + READY 마킹.
+     * 본 메서드는 [runPipeline] 의 후반부 + 인스턴스 재시작 후 [resumePollingForJob] 의 진입점.
+     * source 파일 / spec 의존성이 없어 둘 다 안전하게 호출 가능.
+     */
+    private suspend fun runPipelineDownloadPhase(
+        job: SeparationJob,
+        projectSeq: Long,
+        initialDelayMs: Long,
+    ) {
+        job.status = "PROCESSING"
+        log.info("Perso polling phase begin: jobId={} projectSeq={} initialDelay={}ms",
+            job.jobId, projectSeq, initialDelayMs)
         delay(initialDelayMs)
         pollPersoUntilComplete(
             persoClient, scope, projectSeq,
