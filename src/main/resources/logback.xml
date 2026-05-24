@@ -21,11 +21,13 @@
                         <levelValue>[ignore]</levelValue>
                         <version>[ignore]</version>
                     </fieldNames>
-                    <!-- Logback level → GCP severity 매핑. Cloud Logging 이 "severity" 키를 본다. -->
+                    <!-- Logback level → GCP severity 매핑. Cloud Logging 이 "severity" 키를 본다 —
+                         단, GCP enum 은 WARNING (Logback 은 WARN) 이라 replace 필수.
+                         TRACE → DEBUG, WARN → WARNING. INFO/ERROR 는 동일 문자열. -->
                     <provider class="net.logstash.logback.composite.loggingevent.LoggingEventPatternJsonProvider">
                         <pattern>
                             {
-                                "severity": "%level"
+                                "severity": "%replace(%replace(%level){'WARN', 'WARNING'}){'TRACE', 'DEBUG'}"
                             }
                         </pattern>
                     </provider>

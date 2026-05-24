@@ -46,7 +46,7 @@ echo "▶ Creating log-based metrics…"
 ensure_metric "separation_queue_stuck" \
     "Separation queue reaper found stuck/stale jobs" \
     'resource.type="cloud_run_revision"
-     AND severity="WARN"
+     AND severity="WARNING"
      AND jsonPayload.message=~"Reaped (stuck|stale)"'
 
 # 모든 ERROR 카운터. Error Reporting 이 그루핑까지 해주지만 absolute count 알람은 별개.
