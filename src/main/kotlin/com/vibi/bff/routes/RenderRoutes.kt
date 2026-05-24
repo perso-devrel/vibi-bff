@@ -310,7 +310,7 @@ fun Route.renderRoutes(
  * (separation/mix 산출물은 origin 인스턴스의 로컬 디스크에만 존재). 추후 필요해지면
  * 별도 internal API + 화이트리스트로 재설계.
  */
-private fun resolveStemUrlToFile(
+private suspend fun resolveStemUrlToFile(
     audioUrl: String,
     separationService: SeparationService,
     signedUrlService: SignedUrlService,

@@ -199,6 +199,9 @@ fun Application.module() {
         externalCalls = externalApiCallsRepository,
         onJobChange = { separationDispatcher.nudge() },
         bffInstanceId = bffInstanceId,
+        // R2 가 set 이면 READY 마킹 직전 stems 를 eager upload — 인스턴스 사망에도 데이터
+        // 살아남도록. 로컬 dev (R2 미설정) 분기에선 null 그대로 통과.
+        objectStore = objectStore,
     )
     separationDispatcher = SeparationDispatcher(
         service = separationService,

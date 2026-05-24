@@ -59,6 +59,34 @@ jobs:
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
+      # BFF_BASE_URL 출처 (deploy 전 미리 결정 — deploy 단계 한 번에 wire 하기 위함):
+      #   1. vars.BFF_BASE_URL 가 있으면 그 값 (커스텀 도메인 운영 시 — 예: https://api.vibi.fm)
+      #   2. 없으면 기존 Cloud Run 자동 URL describe (service 가 이미 존재할 때)
+      #   3. 둘 다 없으면 최초 배포 — 빈 값으로 진행하고 다음 push 에서 (2) 로 자동 채움
+      #
+      # 과거에는 deploy + 별도 `update --update-env-vars BFF_BASE_URL=...` 두 step 으로 처리해
+      # **매 push 마다 revision 이 2개 생성** → 처리 중인 separation 잡 인스턴스가 두 번 죽을
+      # 기회. 한 step 으로 합쳐 revision 1개 / push 로 정상화.
+      - name: Determine BFF_BASE_URL
+        id: bff_url
+        run: |
+          VAR_URL="${{ vars.BFF_BASE_URL }}"
+          if [ -n "$VAR_URL" ]; then
+            URL="$VAR_URL"
+            echo "Using vars.BFF_BASE_URL: $URL"
+          else
+            URL=$(gcloud run services describe "$SERVICE_NAME" \
+              --region "$REGION" \
+              --project "${{ secrets.GCP_PROJECT_ID }}" \
+              --format='value(status.url)' 2>/dev/null || echo "")
+            if [ -n "$URL" ]; then
+              echo "Falling back to Cloud Run default URL: $URL"
+            else
+              echo "::warning::Service '$SERVICE_NAME' not found — BFF_BASE_URL will be empty this revision; rerun the workflow to populate."
+            fi
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
       - name: Deploy to Cloud Run
         run: |
           gcloud run deploy "$SERVICE_NAME" \
@@ -73,30 +101,7 @@ jobs:
             --min-instances 1 --max-instances 2 \
             --session-affinity \
             --allow-unauthenticated \
-            --set-env-vars "^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${GEMINI_LOCATION}@PERSO_BASE_URL=${PERSO_BASE_URL}@PERSO_STORAGE_BASE_URL=${PERSO_STORAGE_BASE_URL}@STORAGE_PATH=${STORAGE_PATH}@GOOGLE_OAUTH_CLIENT_IDS=${{ secrets.GOOGLE_OAUTH_CLIENT_IDS }}@APPLE_OAUTH_CLIENT_IDS=${{ secrets.APPLE_OAUTH_CLIENT_IDS }}@CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}@R2_BUCKET=${{ vars.R2_BUCKET }}@R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}@ADMIN_SLUG=${{ secrets.ADMIN_SLUG }}" \
+            --set-env-vars "^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${GEMINI_LOCATION}@PERSO_BASE_URL=${PERSO_BASE_URL}@PERSO_STORAGE_BASE_URL=${PERSO_STORAGE_BASE_URL}@STORAGE_PATH=${STORAGE_PATH}@GOOGLE_OAUTH_CLIENT_IDS=${{ secrets.GOOGLE_OAUTH_CLIENT_IDS }}@APPLE_OAUTH_CLIENT_IDS=${{ secrets.APPLE_OAUTH_CLIENT_IDS }}@CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}@R2_BUCKET=${{ vars.R2_BUCKET }}@R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}@ADMIN_SLUG=${{ secrets.ADMIN_SLUG }}@BFF_BASE_URL=${{ steps.bff_url.outputs.url }}" \
             --set-secrets "PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest,DATABASE_URL=DATABASE_URL:latest,DB_USER=DB_USER:latest,DB_PASSWORD=DB_PASSWORD:latest,R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest" \
             --quiet
-
-      # BFF_BASE_URL 출처:
-      #   1. vars.BFF_BASE_URL 가 있으면 그 값 (커스텀 도메인 운영 시 — 예: https://api.vibi.fm)
-      #   2. 없으면 Cloud Run 자동 발급 URL self-reference (커스텀 도메인 미설정 fallback)
-      # 매 deploy 마다 vars 가 단일 소스 — 사용자는 한 곳만 갱신.
-      - name: Wire BFF_BASE_URL
-        run: |
-          VAR_URL="${{ vars.BFF_BASE_URL }}"
-          if [ -n "$VAR_URL" ]; then
-            URL="$VAR_URL"
-            echo "Using vars.BFF_BASE_URL: $URL"
-          else
-            URL=$(gcloud run services describe "$SERVICE_NAME" \
-              --region "$REGION" \
-              --project "${{ secrets.GCP_PROJECT_ID }}" \
-              --format='value(status.url)')
-            echo "Falling back to Cloud Run default URL: $URL"
-          fi
-          gcloud run services update "$SERVICE_NAME" \
-            --region "$REGION" \
-            --project "${{ secrets.GCP_PROJECT_ID }}" \
-            --update-env-vars "^@^BFF_BASE_URL=$URL" \
-            --quiet
-          echo "::notice title=Deployed::$URL"
+          echo "::notice title=Deployed::${{ steps.bff_url.outputs.url }}"

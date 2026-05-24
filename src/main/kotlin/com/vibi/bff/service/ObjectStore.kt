@@ -46,10 +46,22 @@ class ObjectStore(
 
     init { require(bucket.isNotBlank()) { "ObjectStore bucket must not be blank" } }
 
+    /**
+     * R2 가 객체를 갖고 있지 않으면 [file] 을 업로드. 멱등.
+     *
+     * **로컬 [file] 부재 허용**: SeparationService 의 DB fallback 분기 (`rebuildReadyJob`) 가
+     * 만든 placeholder File 처리 — 그 잡의 실체 stems 는 다른 인스턴스가 이미 eager upload
+     * 해둔 R2 객체. HEAD 가 R2 hit 을 확인하면 그대로 통과 (업로드 skip). HEAD 가 miss 인데
+     * 로컬 file 도 없으면 IllegalStateException — 호출자 (route) 는 그대로 propagate 해
+     * 404 가 아닌 500 으로 응답 (운영상 발생 시 R2 lifecycle 만료 후 잡 lookup 한 케이스).
+     */
     fun uploadIfAbsent(file: File, objectKey: String, contentType: String) {
-        val fileLen = file.length()
+        val fileExists = file.exists()
+        val fileLen = if (fileExists) file.length() else -1L
         // Hot path: 같은 인스턴스에서 이미 업로드한 객체면 R2 HEAD 도 skip.
-        if (uploadedKeys[objectKey] == fileLen) return
+        // 로컬 file 부재 분기에선 size 비교 못 하므로 cached 가 있기만 하면 통과.
+        val cachedLen = uploadedKeys[objectKey]
+        if (cachedLen != null && (!fileExists || cachedLen == fileLen)) return
 
         val existingLen = try {
             s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(objectKey).build()).contentLength()
@@ -60,9 +72,17 @@ class ObjectStore(
             // 둘 다 "없음" 으로 간주하고 upload 진행 — 권한 진짜 부족이면 putObject 에서 throw.
             if (e.statusCode() in MISSING_KEY_STATUS_CODES) -1L else throw e
         }
-        if (existingLen == fileLen) {
-            uploadedKeys[objectKey] = fileLen
+        if (existingLen >= 0 && (!fileExists || existingLen == fileLen)) {
+            // R2 가 갖고 있고 (로컬 file 없거나 같은 크기) — 업로드 skip. placeholder File 케이스도 통과.
+            uploadedKeys[objectKey] = existingLen
             return
+        }
+        if (!fileExists) {
+            // R2 도 없고 로컬도 없음 — 진짜 데이터 없음. 운영상 발생하면 R2 lifecycle 만료 후
+            // 옛 jobId 를 GET 한 케이스. throw 로 caller 가 5xx 응답하게 함.
+            throw IllegalStateException(
+                "Object missing in R2 and no local file: r2://$bucket/$objectKey",
+            )
         }
 
         s3.putObject(

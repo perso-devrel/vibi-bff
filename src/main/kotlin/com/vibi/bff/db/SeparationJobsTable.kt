@@ -31,5 +31,11 @@ object SeparationJobsTable : Table("separation_jobs") {
     val dispatchedAt = timestamp("dispatched_at").nullable()
     val attemptCount = integer("attempt_count")
 
+    // V7: stem 메타 영속화 — 인스턴스가 READY 직후 죽어도 새 인스턴스가 DB + R2 만으로 GET 응답
+    // 재구축. stemsJson 은 JSON 배열 [{stemId, label, ext}, ...]; R2 object key 는 ObjectKey
+    // .separationStem 으로 계산. actualDurationMs 는 SeparationService 가 측정한 speaker stem 길이.
+    val stemsJson = text("stems_json").nullable()
+    val actualDurationMs = long("actual_duration_ms").nullable()
+
     override val primaryKey = PrimaryKey(id)
 }

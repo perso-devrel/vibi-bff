@@ -5,6 +5,7 @@ import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.SeparationJob
 import com.vibi.bff.service.SeparationService
 import io.mockk.*
+import kotlinx.coroutines.runBlocking
 import java.io.File
 import kotlin.test.*
 
@@ -96,6 +97,6 @@ class SeparationServiceReservationTest {
         assertTrue(job.outputDir.exists())
         service.dispose("sep-4")
         assertFalse(job.outputDir.exists(), "outputDir should be deleted on dispose")
-        assertNull(service.getJob("sep-4"))
+        assertNull(runBlocking { service.getJob("sep-4") })
     }
 }
