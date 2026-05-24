@@ -109,31 +109,32 @@ create_or_update_secret R2_SECRET_ACCESS_KEY      "$R2_SECRET_ACCESS_KEY"
 
 # R2 lifecycle — bucket 에 7일 자동 삭제 룰 강제 적용. PUT semantics 라 매 배포마다
 # deploy/r2-lifecycle.json 으로 전체 교체 → drift 자연 차단. token 이 PutBucketLifecycle
-# 권한 없으면 (Object R/W 만 있는 경우) 403 → Admin Read & Write token 으로 재발급 필요.
+# 권한 없으면 (Object R/W 만 있는 경우) 403 — 서비스 동작과 무관한 운영 위생 단계라
+# 실패해도 deploy 계속 진행 (warn-only). 대시보드에서 수동 적용 가능.
 LIFECYCLE_JSON="$(dirname "$0")/r2-lifecycle.json"
 if [[ ! -f "$LIFECYCLE_JSON" ]]; then
   echo "❌ R2 lifecycle config not found at $LIFECYCLE_JSON" >&2
   exit 1
 fi
 echo "▶ Applying R2 lifecycle rule (bucket=$R2_BUCKET) from $(basename "$LIFECYCLE_JSON")…"
-AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
-AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
-AWS_DEFAULT_REGION=auto \
+LIFECYCLE_OUTPUT=$(AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
+  AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
+  AWS_DEFAULT_REGION=auto \
   aws s3api put-bucket-lifecycle-configuration \
     --bucket "$R2_BUCKET" \
     --lifecycle-configuration "file://$LIFECYCLE_JSON" \
-    --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com"
-# Read-back verify — Cloudflare 가 eventually-consistent 라 즉시 read 가 빈 응답일 수
-# 있으니 한 번 더 시도. silent 성공이 가장 흔한 운영 사고 패턴이라 명시 검증.
-echo "▶ Verifying lifecycle…"
-AWS_ACCESS_KEY_ID="$R2_ACCESS_KEY_ID" \
-AWS_SECRET_ACCESS_KEY="$R2_SECRET_ACCESS_KEY" \
-AWS_DEFAULT_REGION=auto \
-  aws s3api get-bucket-lifecycle-configuration \
-    --bucket "$R2_BUCKET" \
-    --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" \
-    --output json | grep -q '"ID": "delete-after-7d"' \
-  || { echo "❌ R2 lifecycle rule not visible after PUT — check Cloudflare dashboard" >&2; exit 1; }
+    --endpoint-url "https://${R2_ACCOUNT_ID}.r2.cloudflarestorage.com" 2>&1) \
+  && echo "  ✓ R2 lifecycle applied" \
+  || cat <<EOF >&2
+⚠️  R2 lifecycle 적용 실패 (deploy 는 계속). 보통 R2 token 권한 부족 (Object R/W 만 있고
+   PutBucketLifecycleConfiguration 미허용). 다음 중 하나로 해결:
+   - 대시보드에서 1회 수동 설정:
+     https://dash.cloudflare.com → R2 → $R2_BUCKET → Settings → Object lifecycle rules
+     → Add rule (delete-after-7d, all objects, 7 days)
+   - 또는 R2 API token 을 Admin Read & Write 권한으로 재발급 후 .env 갱신
+   원본 에러:
+$LIFECYCLE_OUTPUT
+EOF
 
 # admin-ui (Vite) 빌드 산출물은 .gitignore 됨 — deploy 시점에 항상 fresh build.
 # 빠뜨리면 ADMIN_SLUG 가 박혀도 classpath:/admin/index.html 부재로 마운트 skip + 부팅 로그 WARN.
