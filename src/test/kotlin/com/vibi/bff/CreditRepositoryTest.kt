@@ -3,13 +3,19 @@ package com.vibi.bff
 import com.vibi.bff.config.DbConfig
 import com.vibi.bff.db.DbBootstrap
 import com.vibi.bff.model.AuthProvider
+import com.vibi.bff.service.CreditCost
 import com.vibi.bff.service.CreditRepository
+import com.vibi.bff.service.InsufficientCreditsException
+import com.vibi.bff.service.SIGNUP_BONUS_CREDITS
 import com.vibi.bff.service.UserRepository
 import com.zaxxer.hikari.HikariDataSource
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
+import kotlin.test.assertNull
 import kotlin.test.assertTrue
 
 /**
@@ -93,5 +99,101 @@ class CreditRepositoryTest {
         assertTrue(deleted >= 1)
         // user_credits row 도 CASCADE 로 사라지므로 잔액은 0 으로 fallback.
         assertEquals(0, credits.balance(u.id))
+    }
+
+    // ── 신규 가입 보너스 ─────────────────────────────────────────────────────
+
+    @Test
+    fun `grantSignupBonus adds SIGNUP_BONUS_CREDITS once`() {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)
+        val r = credits.grantSignupBonus(u.id)
+        assertEquals(SIGNUP_BONUS_CREDITS, r.granted)
+        assertEquals(SIGNUP_BONUS_CREDITS, r.balance)
+    }
+
+    @Test
+    fun `grantSignupBonus is idempotent on second call`() {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)
+        credits.grantSignupBonus(u.id)
+        val again = credits.grantSignupBonus(u.id)
+        // 두 번째 호출은 (platform='signup', txId='signup-<userId>') UNIQUE 가 막아 가산 안 됨.
+        assertEquals(0, again.granted)
+        assertEquals(SIGNUP_BONUS_CREDITS, again.balance)
+    }
+
+    // ── reserve / refund ────────────────────────────────────────────────────
+
+    @Test
+    fun `reserve deducts balance and records consume ledger`() {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)
+        credits.grantSignupBonus(u.id) // = SIGNUP_BONUS_CREDITS
+
+        val r = credits.reserve(u.id, jobId = "sep-job-1", credits = 2)
+        assertEquals(2, r.charged)
+        assertEquals(SIGNUP_BONUS_CREDITS - 2, r.balance)
+        assertEquals(SIGNUP_BONUS_CREDITS - 2, credits.balance(u.id))
+    }
+
+    @Test
+    fun `reserve throws when balance insufficient`() {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)
+        // grantSignupBonus 안 함 → balance=0.
+        val ex = assertFailsWith<InsufficientCreditsException> {
+            credits.reserve(u.id, "sep-x", 1)
+        }
+        assertEquals(1, ex.required)
+        assertEquals(0, ex.balance)
+        assertEquals(0, credits.balance(u.id))
+    }
+
+    @Test
+    fun `reserve is idempotent on same jobId (no double-charge)`() {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)
+        credits.grantSignupBonus(u.id) // 3 credits
+
+        val first = credits.reserve(u.id, "sep-dup", 2)
+        val second = credits.reserve(u.id, "sep-dup", 2) // same jobId — 이미 차감됨
+        assertEquals(2, first.charged)
+        assertEquals(2, second.charged) // 멱등: 같은 metadata 반환
+        assertEquals(SIGNUP_BONUS_CREDITS - 2, credits.balance(u.id)) // 한 번만 차감
+    }
+
+    @Test
+    fun `refund restores balance and is idempotent on double call`() {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)
+        credits.grantSignupBonus(u.id)
+        credits.reserve(u.id, "sep-refund", 2)
+        assertEquals(SIGNUP_BONUS_CREDITS - 2, credits.balance(u.id))
+
+        val r1 = credits.refund("sep-refund")
+        assertNotNull(r1)
+        assertEquals(2, r1.granted)
+        assertEquals(SIGNUP_BONUS_CREDITS, r1.balance)
+
+        // 두 번째 환불은 (platform='refund', txId='refund-<jobId>') UNIQUE 가 차단 → 가산 안 됨.
+        val r2 = credits.refund("sep-refund")
+        assertNotNull(r2)
+        assertEquals(0, r2.granted)
+        assertEquals(SIGNUP_BONUS_CREDITS, r2.balance) // 잔액 변화 없음
+    }
+
+    @Test
+    fun `refund on never-reserved jobId returns null gracefully`() {
+        // 환불 hook 이 미인증 / 무료 잡 분기에서도 무해하게 통과해야 한다 (SeparationService FAILED hook 호환).
+        val r = credits.refund("sep-never-charged")
+        assertNull(r)
+    }
+
+    // ── CreditCost ──────────────────────────────────────────────────────────
+
+    @Test
+    fun `CreditCost forSeparation ceils per minute with minimum 1`() {
+        assertEquals(1, CreditCost.forSeparation(0))            // 0 → min 1
+        assertEquals(1, CreditCost.forSeparation(1))            // 1ms → 1
+        assertEquals(1, CreditCost.forSeparation(60_000))       // 정확히 1분 → 1
+        assertEquals(2, CreditCost.forSeparation(60_001))       // 1분 +1ms → 2 (올림)
+        assertEquals(2, CreditCost.forSeparation(120_000))      // 2분 → 2
+        assertEquals(3, CreditCost.forSeparation(120_001))      // 2분 +1ms → 3
+        assertEquals(1, CreditCost.forSeparation(-100))         // 음수 입력은 0 으로 clamp 후 min 1
     }
 }

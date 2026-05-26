@@ -32,6 +32,7 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import io.ktor.client.*
 import io.ktor.client.engine.cio.*
 import io.ktor.client.plugins.contentnegotiation.*
@@ -202,6 +203,11 @@ fun Application.module() {
         // R2 가 set 이면 READY 마킹 직전 stems 를 eager upload — 인스턴스 사망에도 데이터
         // 살아남도록. 로컬 dev (R2 미설정) 분기에선 null 그대로 통과.
         objectStore = objectStore,
+        // 잡 FAILED 진입 시 라우트가 선차감한 크레딧을 환불. 멱등 (이미 환불됐으면 no-op).
+        // refund 자체가 blocking JDBC 라 Dispatchers.IO 로 우회.
+        onJobFailed = { jobId ->
+            withContext(Dispatchers.IO) { creditRepository.refund(jobId) }
+        },
     )
     separationDispatcher = SeparationDispatcher(
         service = separationService,
@@ -232,7 +238,7 @@ fun Application.module() {
         mixTtlMs = appConfig.separation.mixTtlMs,
     )
 
-    val authService = AuthService(appConfig.auth, httpClient, userRepository)
+    val authService = AuthService(appConfig.auth, httpClient, userRepository, creditRepository)
 
     // IAP receipt verifiers — config 가 null (미설정) 이면 verifier 도 null. 라우트가 null
     // 분기로 `iap_unconfigured` 400 응답하므로 stub 통과 없음. 출시 외 환경 (dev/test) 에서도

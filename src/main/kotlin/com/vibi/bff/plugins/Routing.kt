@@ -94,6 +94,7 @@ fun Application.configureRouting(
                 appConfig, mediaSourceResolver, objectStore,
                 queueRepository = separationQueue,
                 jwtSecret = appConfig.auth.jwtSecret,
+                creditRepository = creditRepository,
             )
             adminRoutes(adminRepository, jwtSecret = appConfig.auth.jwtSecret)
 

@@ -44,16 +44,19 @@ class UserRepositoryTest {
 
     @Test
     fun `upsert returns same UUID for same provider+sub`() {
-        val id1 = repo.upsert(AuthProvider.GOOGLE, "g-123", "a@example.com", "Alice", null)
-        val id2 = repo.upsert(AuthProvider.GOOGLE, "g-123", "a@example.com", "Alice", null)
-        assertEquals(id1, id2)
+        val first = repo.upsert(AuthProvider.GOOGLE, "g-123", "a@example.com", "Alice", null)
+        val second = repo.upsert(AuthProvider.GOOGLE, "g-123", "a@example.com", "Alice", null)
+        assertEquals(first.id, second.id)
+        // isNewUser 는 첫 호출에서만 true (그 외 필드는 UPDATE 분기로 동일하게 떨어짐).
+        assertEquals(true, first.isNewUser)
+        assertEquals(false, second.isNewUser)
     }
 
     @Test
     fun `upsert returns different UUID for different provider sub`() {
         val google = repo.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "Alice", null)
         val apple = repo.upsert(AuthProvider.APPLE, "a-1", "a@example.com", "Alice", null)
-        assertNotEquals(google, apple)
+        assertNotEquals(google.id, apple.id)
     }
 
     @Test

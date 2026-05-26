@@ -46,6 +46,8 @@ class AuthService(
     private val config: AuthConfig,
     private val httpClient: HttpClient,
     private val userRepository: UserRepository,
+    /** 신규 가입 보너스 그랜트용. null 이면 보너스 skip (테스트 호환 / dev). 운영에선 항상 주입. */
+    private val creditRepository: CreditRepository? = null,
     private val clock: () -> Long = { System.currentTimeMillis() },
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
@@ -193,6 +195,24 @@ class AuthService(
     ): AuthUser {
         val upserted = withContext(Dispatchers.IO) {
             userRepository.upsert(provider, providerSub, email, name, picture)
+        }
+        // 신규 가입 보너스 — isNewUser 가 false-negative 일 수 있는 동시 가입 race 도
+        // grantSignupBonus 자체가 (platform='signup', txId='signup-<userId>') UNIQUE 로
+        // 멱등이라 한 사용자에 두 번 가산되지 않는다. 그랜트 실패는 로그만 — 로그인 자체는
+        // 성공시켜야 사용자가 일단 들어와서 잔액 grant 를 재시도(다음 로그인)할 수 있다.
+        if (upserted.isNewUser && creditRepository != null) {
+            withContext(Dispatchers.IO) {
+                runCatching { creditRepository.grantSignupBonus(upserted.id) }
+                    .onSuccess { outcome ->
+                        log.info(
+                            "signup bonus: user={} granted={} balance={}",
+                            upserted.id, outcome.granted, outcome.balance,
+                        )
+                    }
+                    .onFailure { e ->
+                        log.warn("signup bonus failed user={}: {}", upserted.id, e.message)
+                    }
+            }
         }
         return AuthUser(
             sub = upserted.id.toString(),

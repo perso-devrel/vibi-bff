@@ -3,11 +3,13 @@ package com.vibi.bff.routes
 import com.vibi.bff.model.AdminGrantRequest
 import com.vibi.bff.model.CreditBalanceResponse
 import com.vibi.bff.model.CreditCatalog
+import com.vibi.bff.model.CreditCostResponse
 import com.vibi.bff.model.CreditPurchaseRequest
 import com.vibi.bff.model.CreditPurchaseResponse
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.requireAdmin
 import com.vibi.bff.plugins.requireUser
+import com.vibi.bff.service.CreditCost
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.iap.AppleReceiptVerifier
 import com.vibi.bff.service.iap.GoogleReceiptVerifier
@@ -50,6 +52,28 @@ fun Route.creditRoutes(
             val principal = call.requireUser(jwtSecret)
             val balance = withContext(Dispatchers.IO) { creditRepository.balance(principal.userId) }
             call.respond(CreditBalanceResponse(balance = balance))
+        }
+
+        // 모바일이 "이 구간 분리 X 크레딧 사용, 진행?" 팝업 표시 전에 호출.
+        // durationMs 는 trim 윈도우 길이 또는 원본 영상 길이 (모바일이 계산해서 보냄).
+        // 비용 계산은 [CreditCost.forSeparation] 단일 source — 라우트의 실제 차감과 동일 공식.
+        get("/cost") {
+            val principal = call.requireUser(jwtSecret)
+            val durationMs = call.request.queryParameters["durationMs"]?.toLongOrNull()
+                ?: throw ApiErrorException(HttpStatusCode.BadRequest, "missing_duration_ms")
+            if (durationMs < 0) {
+                throw ApiErrorException(HttpStatusCode.BadRequest, "duration_ms_negative")
+            }
+            val credits = CreditCost.forSeparation(durationMs)
+            val balance = withContext(Dispatchers.IO) { creditRepository.balance(principal.userId) }
+            call.respond(
+                CreditCostResponse(
+                    durationMs = durationMs,
+                    credits = credits,
+                    balance = balance,
+                    sufficient = balance >= credits,
+                )
+            )
         }
 
         post("/purchase") {
