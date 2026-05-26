@@ -18,7 +18,6 @@ import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
 import com.vibi.bff.service.UserRepository
 import com.vibi.bff.service.iap.AppleReceiptVerifier
 import com.vibi.bff.service.iap.GoogleReceiptVerifier
@@ -37,7 +36,6 @@ fun Application.configureRouting(
     renderService: RenderService,
     separationService: SeparationService,
     separationQueue: SeparationQueueRepository?,
-    stemMixService: StemMixService,
     signedUrlService: SignedUrlService,
     renderInputCache: RenderInputCacheService,
     authService: AuthService,
@@ -90,7 +88,7 @@ fun Application.configureRouting(
                 jwtSecret = appConfig.auth.jwtSecret,
             )
             separationRoutes(
-                separationService, stemMixService, signedUrlService, fileStorage,
+                separationService, signedUrlService, fileStorage,
                 appConfig, objectStore,
                 queueRepository = separationQueue,
                 jwtSecret = appConfig.auth.jwtSecret,

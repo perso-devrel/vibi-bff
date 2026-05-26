@@ -11,7 +11,6 @@ import com.vibi.bff.service.MediaTrimmer
 import com.vibi.bff.service.SeparationJob
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
@@ -29,7 +28,6 @@ class SeparationRoutesTest {
     private val testDir = File(System.getProperty("java.io.tmpdir"), "vibi-test-storage-separation").apply { mkdirs() }
     private val appConfig = testAppConfig(storagePath = testDir.path)
     private lateinit var separationService: SeparationService
-    private lateinit var stemMixService: StemMixService
     private lateinit var signer: SignedUrlService
     private lateinit var fileStorage: FileStorageService
 
@@ -38,7 +36,6 @@ class SeparationRoutesTest {
         testDir.deleteRecursively()
         fileStorage = FileStorageService(appConfig.storage)
         separationService = mockk(relaxed = true)
-        stemMixService = mockk(relaxed = true)
         signer = SignedUrlService(appConfig.separation.signingSecret)
     }
 
@@ -60,7 +57,7 @@ class SeparationRoutesTest {
         routing {
             route("/api/v2") {
                 separationRoutes(
-                    separationService, stemMixService, signer, fileStorage,
+                    separationService, signer, fileStorage,
                     appConfig, objectStore = null,
                     jwtSecret = jwtSecret,
                     creditRepository = creditRepository,
@@ -70,7 +67,7 @@ class SeparationRoutesTest {
         block()
     }
 
-    // ── GET / mix smoke tests ────────────────────────────────────────────────
+    // ── GET smoke tests ──────────────────────────────────────────────────────
 
     @Test
     fun `GET unknown separation job returns 404`() = testApp {
@@ -99,19 +96,6 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
 
-    @Test
-    fun `POST mix on non-ready job returns 409`() = testApp {
-        coEvery { separationService.getJob("sep-z") } returns separationJob("sep-z", ownerUserId = null)
-        every { separationService.reserveForMix("sep-z", any()) } returns null
-        every { stemMixService.newJobId() } returns "mix-abcd"
-
-        val response = client.post("/api/v2/separate/sep-z/mix") {
-            contentType(ContentType.Application.Json)
-            setBody("""{"stems":[{"stemId":"background","volume":1.0}]}""")
-        }
-        assertEquals(HttpStatusCode.Conflict, response.status)
-    }
-
     private fun separationJob(jobId: String, ownerUserId: UUID?): SeparationJob {
         val outDir = File(testDir, "sep-out-$jobId").apply { mkdirs() }
         val src = File(testDir, "src-$jobId.m4a").apply { writeText("dummy") }
@@ -122,24 +106,6 @@ class SeparationRoutesTest {
             sourceFile = src,
             spec = com.vibi.bff.model.SeparationSpec(),
         )
-    }
-
-    // ── StemMixRequest 검증 ──────────────────────────────────────────────────
-
-    @Test
-    fun `StemMixRequest rejects negative volume`() {
-        assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.StemMixRequest(
-                stems = listOf(com.vibi.bff.model.StemMixSelection("background", -0.1f))
-            )
-        }
-    }
-
-    @Test
-    fun `StemMixRequest rejects empty stems`() {
-        assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.StemMixRequest(stems = emptyList())
-        }
     }
 
     // ── POST /separate audio-only contract ───────────────────────────────────
@@ -303,21 +269,6 @@ class SeparationRoutesTest {
             header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
         }
         assertEquals(HttpStatusCode.NotFound, response.status)
-    }
-
-    @Test
-    fun `POST mix returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {
-        val ownerId = UUID.randomUUID()
-        val otherId = UUID.randomUUID()
-        coEvery { separationService.getJob("sep-mix-owned") } returns separationJob("sep-mix-owned", ownerId)
-
-        val response = client.post("/api/v2/separate/sep-mix-owned/mix") {
-            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
-            contentType(ContentType.Application.Json)
-            setBody("""{"stems":[{"stemId":"background","volume":1.0}]}""")
-        }
-        assertEquals(HttpStatusCode.NotFound, response.status)
-        verify(exactly = 0) { separationService.reserveForMix(any(), any()) }
     }
 
     // ── 크레딧 게이트 ─────────────────────────────────────────────────────────

@@ -36,10 +36,10 @@ import java.util.concurrent.TimeUnit
 // READY/FAILED) — 인메모리 fine-grained 상태가 사용자 progress UI source, DB 는 dispatcher 의
 // capacity 카운트 source.
 //
-// READY + consumedByMixJobId=null → eligible for mix reservation.
-// READY + consumedByMixJobId=set  → mix in flight; blocks re-submit.
-// COMPLETED mix triggers dispose(jobId); FAILED is kept briefly so clients
-// can read the error before the cleanup task reaps it.
+// READY 잡은 abandonTtlMs 가 지나면 cleanupAbandoned 가 dispose 로 회수. FAILED 도
+// FAILED_JOB_TTL_MS 짧은 grace 후 회수. 모바일이 stem URL 들을 받아 로컬 mix 하므로
+// 서버 측 mix 잡 / reservation 상태머신은 없음 — stem 들은 클라가 다 받은 뒤 abandon TTL
+// 으로만 reap.
 
 /** speaker stem id = "$SPEAKER_STEM_PREFIX$idx" (idx 0-based). 모바일 Stem.SPEAKER_PREFIX 와 일치. */
 internal const val SPEAKER_STEM_PREFIX = "speaker_"
@@ -52,14 +52,13 @@ data class SeparationJob(
     @Volatile var error: String? = null,
     val outputDir: File,
     @Volatile var stems: List<LocalStem> = emptyList(),
-    @Volatile var consumedByMixJobId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
     /** READY 시 ffprobe 로 잰 stem FLAC 의 실측 길이 (ms). 클라이언트가 timeline 막대 길이를
      * 사용자 선택값 대신 이 값으로 보정해 stem 파일과 1:1 매칭. null = 측정 실패 또는 미-READY. */
     @Volatile var actualDurationMs: Long? = null,
     /** submit 의 principal.userId 가 그대로 보존. null 이면 미인증 잡 (테스트 / jwtSecret
-     * 미주입 분기). 라우트가 status/mix 호출 시 caller principal 과 매칭 — mismatch 면
-     * 다른 사용자가 남의 잡을 mix command 로 소비/dispose 시키는 IDOR 차단. */
+     * 미주입 분기). 라우트가 status 호출 시 caller principal 과 매칭 — mismatch 는 IDOR
+     * existence oracle 차단을 위해 not-found 로 응답. */
     val ownerUserId: UUID? = null,
     // ── Dispatcher 가 QUEUED row 를 pickup 한 뒤 runPipeline 에 넘기는 입력 ────────────
     // submit() 가 받은 그대로 보존. claim 시점에 dispatcher 가 in-memory lookup 으로 꺼냄.
@@ -334,25 +333,6 @@ class SeparationService(
         } finally {
             // 끝 → capacity 한 칸 비움. dispatcher 가 즉시 다음 QUEUED 를 pickup 하도록.
             onJobChange?.invoke()
-        }
-    }
-
-    // Atomically reserve stems for a given mix. Returns null if the job is
-    // not READY or has already been consumed, ensuring stems can never be
-    // double-deleted by two concurrent mix submissions.
-    fun reserveForMix(jobId: String, mixJobId: String): SeparationJob? {
-        val job = jobs[jobId] ?: return null
-        synchronized(job) {
-            if (job.status != "READY" || job.consumedByMixJobId != null) return null
-            job.consumedByMixJobId = mixJobId
-            return job
-        }
-    }
-
-    fun releaseReservation(jobId: String) {
-        val job = jobs[jobId] ?: return
-        synchronized(job) {
-            if (job.status == "READY") job.consumedByMixJobId = null
         }
     }
 
@@ -704,12 +684,13 @@ class SeparationService(
         // normalize=0: voice_all 은 화자 stem 들을 원본 발화 bus 로 재조립하는 것 →
         // 원본 = sum(speaker stems) 이므로 평균(default normalize=1) 이 아니라 합산이
         // 맞음. 평균을 내면 voice_all 자체가 -6dB(2 화자) 이상 작아지고, 그걸 또
-        // StemMixService 가 다시 amix 하면 누적 -12dB ~ 까지 떨어짐.
+        // downstream (RenderService.buildFfmpegCommand 의 separation amix) 가 다시
+        // 입력으로 받으면 누적 -12dB ~ 까지 떨어짐.
         cmd += listOf(
             "-filter_complex",
             "${labels}amix=inputs=${inputs.size}:duration=longest:dropout_transition=0:normalize=0[out]"
         )
-        // FLAC lossless — voice_all 은 downstream StemMixService 가 다시 amix 의 입력으로 쓰므로
+        // FLAC lossless — voice_all 은 downstream render amix 의 입력으로 쓰므로
         // mp3 같은 lossy 단계가 끼면 음질 손실 누적. compression_level 5 는 ffmpeg default,
         // encode 시간/크기 균형.
         cmd += listOf("-map", "[out]", "-c:a", "flac", "-compression_level", "5", output.absolutePath)
@@ -744,8 +725,7 @@ class SeparationService(
         jobs.entries
             .filter { (_, j) ->
                 val age = now - j.createdAt
-                val abandoned = j.status == "READY" && j.consumedByMixJobId == null &&
-                    age > config.abandonTtlMs
+                val abandoned = j.status == "READY" && age > config.abandonTtlMs
                 // FAILED jobs get a short grace period so clients can observe
                 // the error once, then are reaped independently of the longer
                 // abandoned-READY TTL.

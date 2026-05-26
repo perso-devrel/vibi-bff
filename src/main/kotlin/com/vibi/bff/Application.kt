@@ -18,7 +18,6 @@ import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
 import com.vibi.bff.service.UserRepository
 import com.vibi.bff.service.iap.AppleReceiptVerifier
 import com.vibi.bff.service.iap.GoogleReceiptVerifier
@@ -237,11 +236,6 @@ fun Application.module() {
         }
     }
 
-    val stemMixService = StemMixService(
-        mixDir = File(fileStorage.separationDir, "mix"),
-        mixTtlMs = appConfig.separation.mixTtlMs,
-    )
-
     val authService = AuthService(appConfig.auth, httpClient, userRepository, creditRepository)
 
     // IAP receipt verifiers — config 가 null (미설정) 이면 verifier 도 null. 라우트가 null
@@ -274,7 +268,7 @@ fun Application.module() {
     configureRouting(
         fileStorage, persoClient, appConfig, renderService,
         separationService, separationQueueRepository,
-        stemMixService, signedUrlService,
+        signedUrlService,
         renderInputCache,
         authService, objectStore,
         adminRepository,
@@ -288,7 +282,6 @@ fun Application.module() {
         // Dispatcher 를 먼저 멈춰서 새 claim 안 함 → in-flight 잡들 정상 종료 후 service shutdown.
         separationDispatcher::shutdown,
         separationService::shutdown,
-        stemMixService::shutdown,
         { cacheCleanupScope.cancel() },
         { bootScope.cancel() },
         { objectStore?.shutdown() },

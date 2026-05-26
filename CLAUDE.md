@@ -26,14 +26,14 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 
 ## Structure
 
-- `Application.kt` — entry point. `loadDotenv` (real env > sys prop > .env), `loadConfig`, `DbBootstrap.init`, HttpClient + 모든 서비스 wiring, CallLogging (signed-URL token / OAuth code 마스킹), 종료 hook (httpClient + render/separation/stemMix shutdown + dataSource close).
+- `Application.kt` — entry point. `loadDotenv` (real env > sys prop > .env), `loadConfig`, `DbBootstrap.init`, HttpClient + 모든 서비스 wiring, CallLogging (signed-URL token / OAuth code 마스킹), 종료 hook (httpClient + render/separation shutdown + dataSource close).
 - `Constants.kt` — `MAX_UPLOAD_FILE_SIZE` 등.
 - `config/AppConfig.kt` — HOCON + env var loading (StorageConfig·PersoConfig·SeparationConfig·AuthConfig·DbConfig). 각 config 의 `init { require(...) }` 가 boot 시 fail-fast.
 - `db/Database.kt` (DbBootstrap, HikariCP) + `db/UsersTable.kt` (Exposed `(provider, providerSub)` unique).
 - `plugins/` — CORS, Serialization (`AppJson = Json { ignoreUnknownKeys=true, encodeDefaults=true }`), `ErrorHandling` (StatusPages), `Routing`.
 - `routes/` — `/api/v2` (`AuthRoutes` · `LanguageRoutes` · `RenderRoutes` (+ `/inputs`) · `SeparationRoutes` · `DownloadResponder`·`MultipartUtils` 헬퍼). dev mock 으로 `/testdata/separation/*`.
 - `model/` — `AuthModels` · `BffModels` · `PersoModels`. BFF DTO 와 Perso upstream DTO 분리, `@SerialName` 으로 snake_case ↔ camelCase 매핑.
-- `service/` — `PersoClient`, `PersoPolling`, `FileStorageService`, `MediaTrimmer` (audio duration probe 전용), `RenderService`, `RenderInputCacheService`, `SeparationService`, `StemMixService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
+- `service/` — `PersoClient`, `PersoPolling`, `FileStorageService`, `MediaTrimmer` (audio duration probe 전용), `RenderService`, `RenderInputCacheService`, `SeparationService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
 
 > 과거 `AutoSubtitleService` / `AutoDubService` / `LipSyncService` + 관련 route·DTO 는 **commit `52f8d7c refactor(bff): sticker/자막/더빙 surface 절단`** 으로 일괄 제거. 모바일에 잔존하는 caller (BffApi 메서드들 + Auto*RepositoryImpl) 는 호출 시 404 — 재도입 작업 시 본 commit 의 디프를 base 로 복원하지 말고 새로 설계할 것.
 
@@ -47,8 +47,6 @@ GET  /api/v2/render/{id}/{status,download}
 POST /api/v2/separate                   # audio-only multipart (m4a/mp3/wav, ≤100MB)
 GET  /api/v2/separate/{id}              # stem + 서명 URL
 GET  /api/v2/separate/{id}/stem/{stemId}        # token=*** 필수
-POST /api/v2/separate/{id}/mix          # 사용자 stem 선택 → amix (normalize=0)
-GET  /api/v2/separate/mix/{id}{,/download}
 GET  /api/v2/testdata/separation/*      # (dev mock)
 ```
 
@@ -114,7 +112,11 @@ GET  /api/v2/testdata/separation/*      # (dev mock)
 
 이전엔 `editedRenderJobId + trim` 키 기반 dedup 이 있었으나 audio-only contract 로 surface 단순화되며 dead path 가 됨. 버튼 연타 방어는 일단 클라 측 책임 (모바일이 `submitting` flag 로 차단). 필요해지면 RenderInputCacheService 의 `sha256(bytes)[:16]` 패턴을 audio 에도 적용 가능.
 
-### Separation amix `normalize=0` — stem 합칠 때 원본 loudness 보존
+### Mix 프리뷰는 모바일 로컬 — BFF mix endpoint 없음
+
+stem volume 슬라이더 프리뷰는 모바일이 stem URL 들을 받아 AVAudioPlayer / ExoPlayer 다중 인스턴스로 로컬에서 합성. 최종 render 는 `/render` 의 `SeparationDirective.selections[]` 로 stem URL + volume 을 받아 ffmpeg `amix=normalize=0` 으로 한 번에 합성 — 서버 측 mix 잡 없음. (이전 `/separate/{id}/mix` endpoint + StemMixService 는 dead path 라 제거.)
+
+### Render 의 amix `normalize=0` — stem + BGM + base 합칠 때 원본 loudness 보존
 
 `amix=normalize=1` (ffmpeg default) 은 input 개수에 따라 자동 감쇠 → 사용자가 모든 stem unmute 했을 때 원본보다 조용. `normalize=0` 으로 원본 loudness 유지. (commit `92e1758 fix(separation): amix normalize=0`)
 
@@ -132,7 +134,7 @@ normalize 단계에서 이미 output 해상도·codec 으로 맞췄으므로 최
 
 ### Cloud Run egress 분리 — `R2_BUCKET` 설정 시 SigV4 presigned URL redirect
 
-`/render/{id}/download` 와 `/separate/mix/{id}/download` 가 R2 에 upload → SigV4 presigned URL 302 redirect. R2 egress 무료 → Cloud Run egress 비용 0. 인스턴스 점유 분리. blank 면 `respondFile` streaming (로컬 dev). TTL 60..86400.
+`/render/{id}/download` 와 `/separate/{id}/stem/{stemId}` 가 R2 에 upload → SigV4 presigned URL 302 redirect. R2 egress 무료 → Cloud Run egress 비용 0. 인스턴스 점유 분리. blank 면 `respondFile` streaming (로컬 dev). TTL 60..86400.
 
 ## Error handling
 
@@ -142,12 +144,12 @@ normalize 단계에서 이미 output 해상도·codec 으로 맞췄으므로 최
 
 ## File serving
 
-Render outputs · separation stems · stem-mix outputs **never static-mounted**. Two backends:
+Render outputs · separation stems **never static-mounted**. Two backends:
 
 1. **로컬 streaming** (default, `R2_BUCKET` 비어있을 때) — `respondFile` 로 Ktor 가 직접 서브. 작은 산출물 / 로컬 dev 용.
 2. **R2 SigV4 presigned URL redirect** (`R2_BUCKET` 설정 시) — 산출물을 Cloudflare R2 bucket 에 업로드 후 presigned URL (TTL `SIGNED_URL_TTL_SEC`) 로 302. R2 egress 무료 → Cloud Run egress 비용 0. 인스턴스도 큰 응답 동안 점유되지 않음.
 
-두 backend 모두 HMAC-signed `?token=...` 요구 (separation/mix). Render download 는 `jobId` 자체가 random — 단 짧은 TTL 후 GC.
+stem 다운로드는 HMAC-signed `?token=...` 요구. Render download 는 `jobId` 자체가 random — 단 짧은 TTL 후 GC.
 
 ## Testing
 
@@ -158,5 +160,5 @@ Ktor `testApplication` + MockK. 테스트 파일은 라우트·서비스와 1:1 
 해당 서브시스템 작업 시 로드 — 본 파일을 잡스럽게 만들지 않기 위해 분리:
 
 - `render-pipeline` — ffmpeg 파이프라인, `RenderConfig`, segments, BGM atrim/amix, Windows path escaping, RenderInputCache.
-- `separation-pipeline` — Perso upload 3-step, audio-separation 잡 / polling / download, stem plan mapping, HMAC URL signing, mix-triggered dispose, MediaSourceResolver.
+- `separation-pipeline` — Perso upload 3-step, audio-separation 잡 / polling / download, stem plan mapping, HMAC URL signing.
 - `review` — code review checklist (트리거: "리뷰")

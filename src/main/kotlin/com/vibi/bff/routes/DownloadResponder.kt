@@ -53,15 +53,12 @@ suspend fun ApplicationCall.respondDownload(
  * R2 object key 단일 소스. 경로 규칙 (`<prefix>/<jobId>/...`) 이 callsite 마다 흩어지면
  * prefix 리네임/충돌 감사 시 다중 grep 필요. 여기 모아두면 단일 grep 으로 끝남.
  *
- * `separationStem` / `separationMix` / `renderOutput` 세 prefix 가 R2 lifecycle rule
+ * `separationStem` / `renderOutput` 두 prefix 가 R2 lifecycle rule
  * (`deploy/r2-lifecycle.json`) 의 `matchesPrefix` 분기 후보가 되므로 중앙화 가치가 더 큼.
  */
 object ObjectKey {
     fun separationStem(jobId: String, stemId: String, ext: String): String =
         "separation/$jobId/$stemId.$ext"
-
-    fun separationMix(mixJobId: String): String =
-        "separation/mix/$mixJobId.mp3"
 
     fun renderOutput(jobId: String, fileName: String): String =
         "render/$jobId/$fileName"

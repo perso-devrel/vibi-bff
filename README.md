@@ -4,13 +4,14 @@ Kotlin/Ktor Backend-For-Frontend for the vibi mobile app (Android + iOS, KMP/CMP
 Current surface:
 
 - Proxies **Perso AI** for audio source separation (background / all-voice /
-  per-speaker stems, plus user-selected stem remix).
+  per-speaker stems). Stem volume preview is mixed locally on the mobile client;
+  final composition merges stems into the render pipeline server-side.
 - Runs a local **ffmpeg** render pipeline (multi-segment concat, BGM
-  `atrim`+`amix` sub-range mixing, audio override).
+  `atrim`+`amix` sub-range mixing, separation stem `amix normalize=0`).
 - Gateways **Google Sign In** + **Apple Sign In** ID Token verification → upserts
   the user in **Postgres** → issues an HS256 access token whose `sub` is the
   internal UUID (reusable as IAP `appAccountToken`).
-- Optionally redirects large render / mix downloads to **Cloudflare R2** SigV4 presigned URLs (egress free)
+- Optionally redirects large render / stem downloads to **Cloudflare R2** SigV4 presigned URLs (egress free)
   so Cloud Run egress and instance occupancy decouple.
 
 > Surface previously exposed but **removed** in commit `52f8d7c` (sticker
@@ -29,7 +30,7 @@ Current surface:
 - **Postgres** (Neon free tier is fine) — required for user upsert
 - At least one **Google OAuth client id** (iOS / Android / Web) — required to boot
 - *(Optional)* **Apple Sign In** client ids (iOS bundle id) — blank disables Apple
-- *(Optional)* A **Cloudflare R2 bucket** — large render / mix downloads redirect to SigV4
+- *(Optional)* A **Cloudflare R2 bucket** — large render / stem downloads redirect to SigV4
   signed URLs instead of streaming through Cloud Run
 
 On Windows, verify:
@@ -68,7 +69,7 @@ Environment variables (also loadable from system env):
 | `STORAGE_PATH`               | `./storage`              | Local file storage root (`uploads/`, `render/`, `separation/`, `render-input-cache/`, `edited-source/`). |
 | `BFF_BASE_URL`               | `http://localhost:8080`  | Public base URL used in signed download links.       |
 | `CORS_ALLOWED_ORIGINS`       | *(blank = any)*          | Comma-separated allow-list. Set a sentinel such as `android-only.invalid` to lock out browsers. |
-| `R2_BUCKET`                  | *(blank = disabled)*     | When set, large render / separation / mix downloads upload to this Cloudflare R2 bucket and respond with a `302` to a SigV4 presigned URL. **R2 egress free** → zero Cloud Run egress cost. Blank falls back to `respondFile` streaming. |
+| `R2_BUCKET`                  | *(blank = disabled)*     | When set, large render / separation downloads upload to this Cloudflare R2 bucket and respond with a `302` to a SigV4 presigned URL. **R2 egress free** → zero Cloud Run egress cost. Blank falls back to `respondFile` streaming. |
 | `R2_ACCOUNT_ID`              | —                        | Cloudflare account ID (32-char hex from dashboard URL). Required when `R2_BUCKET` set. |
 | `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` | — | R2 API token (Object Read & Write). Cloudflare dashboard → R2 → Manage API Tokens. |
 | `SIGNED_URL_TTL_SEC`         | `900`                    | Presigned URL TTL in seconds (60..86400).            |
@@ -80,11 +81,9 @@ Environment variables (also loadable from system env):
 
 | Key                          | Default                  | Description                                          |
 |------------------------------|--------------------------|------------------------------------------------------|
-| `SEPARATION_SIGNING_SECRET`  | —                        | **Required.** HMAC key (≥32 chars) for stem / mix URL signing. `openssl rand -hex 32`. |
+| `SEPARATION_SIGNING_SECRET`  | —                        | **Required.** HMAC key (≥32 chars) for stem URL signing. `openssl rand -hex 32`. |
 | `SEPARATION_ABANDON_TTL_MS`  | `604800000` (7 days)     | Reap READY-but-unclaimed separations after this many ms. |
-| `SEPARATION_MIX_TTL_MS`      | `600000`                 | Keep mix outputs for this many ms after completion.  |
 | `SEPARATION_URL_TTL_SEC`     | `604800` (7 days)        | Stem download URL token lifetime. Must be ≤ abandonTtlMs so a token that outlives the reaped job never appears. |
-| `SEPARATION_MIX_URL_TTL_SEC` | `600`                    | Mix download URL token lifetime.                     |
 
 ### Auth & Postgres
 
@@ -120,7 +119,7 @@ to `C:/tmp/vibi-bff-build` (configured in `build.gradle.kts`).
 
 Once running:
 - Swagger UI: <http://localhost:8080/swagger>
-- Render outputs / separation stems / mix outputs are **not** static-mounted —
+- Render outputs and separation stems are **not** static-mounted —
   see API section below. Each download either streams via `respondFile` (default)
   or 302-redirects to a Cloudflare R2 SigV4 presigned URL (when `R2_BUCKET` is set).
 
@@ -142,9 +141,6 @@ v1 has been retired.
 | POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Audio-only upload (`m4a` / `mp3` / `wav`, ≤100MB). |
 | GET    | `/api/v2/separate/{jobId}`                   | Status + signed stem URLs when `READY`.                       |
 | GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream (requires `?token=…`).                      |
-| POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems with `amix normalize=0`; disposes source stems on success. |
-| GET    | `/api/v2/separate/mix/{mixJobId}`            | Mix status + signed download URL when `COMPLETED`.            |
-| GET    | `/api/v2/separate/mix/{mixJobId}/download`   | Mix audio stream (requires `?token=…`). With `R2_BUCKET`, `302` to an R2 presigned URL. |
 | GET    | `/api/v2/testdata/separation/list`           | (dev mock) `testdata/<startSec>-<endSec>/` folder listing.    |
 | GET    | `/api/v2/testdata/separation/{folder}/{stem}` | (dev mock) Stem audio stream (no auth).                      |
 
@@ -209,9 +205,10 @@ ffprobe on the source (legacy).
 
 `POST /api/v2/separate` accepts an **already-trimmed audio file** (m4a / mp3 / wav),
 submits it to Perso's dubbing pipeline, and exposes the byproduct stems for the
-mobile client to pick and remix. The mobile client handles trim + audio extract
-locally (iOS `AVAssetExportPresetAppleM4A`), so the BFF performs no ffmpeg work
-before the upstream upload.
+mobile client to pick and locally mix for preview. The mobile client handles trim +
+audio extract locally (iOS `AVAssetExportPresetAppleM4A`), so the BFF performs no
+ffmpeg work before the upstream upload. Final stem amix happens once at `/render`
+time via `SeparationDirective.selections[]` — there is no server-side mix endpoint.
 
 #### Multipart fields
 
@@ -256,20 +253,20 @@ a speaker collection.
 1. `POST /api/v2/separate` with the source file + spec → `{ "jobId": "sep-…" }`
 2. Poll `GET /api/v2/separate/{jobId}` every 5s until `status=READY`; response
    carries `stems[]` with signed `url` fields valid for `SEPARATION_URL_TTL_SEC`.
-3. Preview individual stems via `GET /api/v2/separate/{jobId}/stem/{stemId}?token=…`.
-4. `POST /api/v2/separate/{jobId}/mix` with `{ "stems": [{ "stemId": …, "volume": … }, …] }` → `{ "mixJobId": "mix-…" }`.
-5. Poll `GET /api/v2/separate/mix/{mixJobId}` until `status=COMPLETED`; response
-   carries a signed `downloadUrl`.
-6. `GET /api/v2/separate/mix/{mixJobId}/download?token=…` streams the mp3.
+3. Mobile downloads each stem via `GET /api/v2/separate/{jobId}/stem/{stemId}?token=…`
+   and mixes them locally (AVAudioPlayer / ExoPlayer multi-instance) so volume
+   slider previews are realtime and free of server round-trips.
+4. On save, mobile builds a `RenderConfig` whose `separationDirectives[].selections[]`
+   carries each stem's signed URL + final volume — `/render` amixes them into the
+   final mp4 in a single ffmpeg pass.
 
-**Lifecycle note:** a successful mix disposes the source separation atomically
-— the parent `jobId`'s stems are deleted and further `/mix` calls against it
-return `409 Conflict`. Download any stems you want to keep **before** calling
-`/mix`. Abandoned `READY` separations are reaped after `SEPARATION_ABANDON_TTL_MS`.
+**Lifecycle note:** abandoned `READY` separations are reaped after
+`SEPARATION_ABANDON_TTL_MS` (7 days by default). There is no explicit dispose
+endpoint — the mobile client just stops referencing the job when done.
 
 #### Security
 
-- Stems and mixes are **never** static-mounted; all downloads require a
+- Stems are **never** static-mounted; all downloads require a
   short-lived HMAC token bound to `{jobId, resourceId, expiry}`.
 - Tokens appear in response `url` fields. Access logs mask `?token=***` so
   signatures don't leak to log aggregators.
@@ -323,12 +320,12 @@ src/main/kotlin/com/vibi/bff/
 │   └── ErrorHandling.kt        # StatusPages → ErrorResponse
 ├── model/
 │   ├── AuthModels.kt           # GoogleAuthRequest / AppleAuthRequest / AuthResponse
-│   ├── BffModels.kt            # Render / Separation / Mix DTOs
+│   ├── BffModels.kt            # Render / Separation DTOs
 │   └── PersoModels.kt          # Perso upstream DTOs
 ├── routes/
 │   ├── AuthRoutes.kt           # /auth/google · /auth/apple
 │   ├── RenderRoutes.kt         # /render · /render/inputs · /render/{id}/{status,download}
-│   ├── SeparationRoutes.kt     # /separate · /separate/{id} · /stem · /mix · /mix/{id}{,/download}
+│   ├── SeparationRoutes.kt     # /separate · /separate/{id} · /stem
 │   ├── DownloadResponder.kt    # respondFile / R2-redirect dispatcher
 │   └── MultipartUtils.kt       # parsing helpers
 └── service/
@@ -341,7 +338,6 @@ src/main/kotlin/com/vibi/bff/
     ├── RenderService.kt        # ffmpeg orchestration (normalize → concat → final mix -c:v copy)
     ├── RenderInputCacheService.kt # /render/inputs slot (sha256 inputId, TTL sweep)
     ├── SeparationService.kt    # Perso-backed stem separation jobs (idempotency, TTL reap)
-    ├── StemMixService.kt       # ffmpeg amix=normalize=0 stem remix
     ├── SignedUrlService.kt     # HMAC-SHA256 download URL signer
     ├── ObjectStore.kt          # Optional Cloudflare R2 upload + SigV4 presigned URL redirect
     └── FfmpegRunner.kt         # ffmpeg / ffprobe process spawning + stderr capture
@@ -360,5 +356,4 @@ and is exercised end-to-end against the mobile client.
 - **`SEPARATION_SIGNING_SECRET must be at least 32 chars`** — the default template has a placeholder; generate one with `openssl rand -hex 32` and paste into `.env`.
 - **Render jobs stuck in `FAILED` with "ffmpeg exited with code …"** — check the server logs; the last 500 bytes of ffmpeg stderr are emitted on failure. The most common causes are missing `ffmpeg`/`ffprobe` on `PATH` or a segment referencing an unknown `sourceFileKey`.
 - **Separation status returns 403 after a while** — stem tokens expire after `SEPARATION_URL_TTL_SEC`. Re-call `GET /api/v2/separate/{jobId}` to mint fresh signed URLs.
-- **`POST /api/v2/separate/{jobId}/mix` returns 409** — the separation is no longer `READY` (either already consumed by a prior mix, still processing, or reaped after `SEPARATION_ABANDON_TTL_MS`).
 - **Perso returns 402** — workspace quota is exhausted. Status maps to `402 Payment Required` on the BFF response.

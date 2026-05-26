@@ -15,12 +15,10 @@ import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
 import io.ktor.http.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import io.ktor.utils.io.discard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -37,7 +35,6 @@ private val SEPARATION_AUDIO_EXTENSIONS = setOf("m4a", "mp3", "wav")
 
 fun Route.separationRoutes(
     separationService: SeparationService,
-    stemMixService: StemMixService,
     signer: SignedUrlService,
     fileStorage: FileStorageService,
     appConfig: AppConfig,
@@ -191,7 +188,6 @@ fun Route.separationRoutes(
                 progressReason = job.progressReason,
                 error = job.error,
                 stems = stems,
-                mixJobId = job.consumedByMixJobId,
                 actualDurationMs = job.actualDurationMs,
                 queuePosition = queuePosition,
                 estimatedWaitSec = estimatedWaitSec,
@@ -238,140 +234,6 @@ fun Route.separationRoutes(
                 objectKey = ObjectKey.separationStem(jobId, stem.stemId, ext),
                 contentType = contentTypeForExtension(ext, ContentType("audio", "wav")),
                 downloadFilename = "${stem.stemId}.$ext",
-                store = objectStore,
-            )
-        }
-
-        // POST /api/v2/separate/{jobId}/mix — kick off mixing; on success, stems are disposed
-        post("/{jobId}/mix") {
-            val principal = jwtSecret?.let { call.requireUser(it) }
-            val jobId = call.parameters["jobId"]
-                ?: throw NotFoundException("jobId required")
-
-            // mix 는 separation 잡의 stems 를 reserve → 성공 시 dispose. 다른 사용자가
-            // 남의 잡을 mix command 로 소비/삭제시키는 IDOR 막기 위해 reserveForMix
-            // 호출 전에 ownerUserId 검증. mismatch 는 not-found 로 응답.
-            //
-            // **body 파싱보다 먼저** 검증 — IDOR-rejected 요청이 비싼 JSON deserialize
-            // 비용을 지불하지 않도록 (DoS 증폭 방지). missing-job (typo / dispose) 도
-            // body 파싱 전에 409 로 차단해 미사용 JSON deserialize 도 막음.
-            val existing = separationService.getJob(jobId)
-            if (existing == null) {
-                // 응답 전 incoming body drain — Ktor 3.x 가 자동 drain 안 함, client
-                // 가 body 송신 중인데 server 가 먼저 respond + close 하면 TCP RST 로
-                // client 가 broken-pipe IOException 봄 (409 body 못 읽음).
-                runCatching { call.receiveChannel().discard() }
-                return@post call.respond(
-                    HttpStatusCode.Conflict,
-                    ErrorResponse(error = "Separation job not ready or already consumed"),
-                )
-            }
-            if (existing.ownerUserId != null && existing.ownerUserId != principal?.userId) {
-                runCatching { call.receiveChannel().discard() }
-                throw NotFoundException("Separation job not found: $jobId")
-            }
-
-            val req = call.receive<StemMixRequest>()
-
-            val mixJobId = stemMixService.newJobId()
-            val job = separationService.reserveForMix(jobId, mixJobId)
-                ?: return@post call.respond(
-                    HttpStatusCode.Conflict,
-                    ErrorResponse(
-                        error = "Separation job not ready or already consumed",
-                    ),
-                )
-
-            val stemByIdLocal = job.stems.associateBy { it.stemId }
-            val unknownStemId = req.stems.firstOrNull { it.stemId !in stemByIdLocal }?.stemId
-            if (unknownStemId != null) {
-                separationService.releaseReservation(jobId)
-                throw IllegalArgumentException("Unknown stemId: $unknownStemId")
-            }
-            val selected = req.stems.map { sel ->
-                sel to stemByIdLocal.getValue(sel.stemId).file
-            }
-
-            // mix 잡의 owner = caller principal. 운영에서는 owner 검증 위에서 통과한
-            // principal 이 보장됨. principal null (jwtSecret 미주입 분기) 이면 owner null
-            // 잡으로 등록 — 그래야 같은 caller 가 mix status 폴링 시 owner null 분기로
-            // 통과 (이전엔 existing.ownerUserId 로 fallback 해 caller=null 인데 owner=set
-            // 인 잡이 만들어져 자기 mix 잡에 접근 못하는 lockout 회귀 발생).
-            stemMixService.submit(mixJobId, selected, ownerUserId = principal?.userId) { completed ->
-                when (completed.status) {
-                    "COMPLETED" -> separationService.dispose(jobId)
-                    "FAILED" -> separationService.releaseReservation(jobId)
-                    else -> { /* still PROCESSING — leave alone */ }
-                }
-            }
-
-            call.respond(HttpStatusCode.Accepted, StemMixResponse(mixJobId = mixJobId))
-        }
-
-        // GET /api/v2/separate/mix/{mixJobId} — mix status
-        get("/mix/{mixJobId}") {
-            val mixJobId = call.parameters["mixJobId"]
-                ?: throw NotFoundException("mixJobId required")
-            val job = stemMixService.getJob(mixJobId)
-                ?: throw NotFoundException("Mix job not found: $mixJobId")
-
-            // owner 매칭 — Authorization 헤더가 있으면 강제, 없으면 token-only polling
-            // 호환을 위해 통과 (모바일 background worker / webview 가 헤더 없이 폴링
-            // 가능). 헤더가 있는데 invalid 면 capability 단독 분기 (mixJobId 자체가
-            // unguessable v4 UUID 라 추측 불가능).
-            if (jwtSecret != null && call.request.header(HttpHeaders.Authorization) != null) {
-                val principal = runCatching { call.requireUser(jwtSecret) }.getOrNull()
-                if (principal != null && job.ownerUserId != null && job.ownerUserId != principal.userId) {
-                    throw NotFoundException("Mix job not found: $mixJobId")
-                }
-            }
-
-            val downloadUrl = if (job.status == "COMPLETED") {
-                val token = signer.sign(mixJobId, "download", appConfig.separation.mixUrlTtlSec)
-                "/api/v2/separate/mix/$mixJobId/download?token=$token"
-            } else null
-
-            call.respond(HttpStatusCode.OK, StemMixStatusResponse(
-                mixJobId = mixJobId,
-                status = job.status,
-                progress = job.progress,
-                error = job.error,
-                downloadUrl = downloadUrl,
-            ))
-        }
-
-        // GET /api/v2/separate/mix/{mixJobId}/download?token=... — streamed mix
-        get("/mix/{mixJobId}/download") {
-            val mixJobId = call.parameters["mixJobId"]
-                ?: throw NotFoundException("mixJobId required")
-            val token = call.request.queryParameters["token"]
-                ?: throw IllegalArgumentException("token required")
-
-            if (!signer.verify(mixJobId, "download", token)) {
-                call.respond(HttpStatusCode.Forbidden)
-                return@get
-            }
-
-            val job = stemMixService.getJob(mixJobId)
-                ?: throw NotFoundException("Mix job not found: $mixJobId")
-
-            // capability(HMAC) + identity(JWT 헤더) 이중. 헤더가 있고 valid 면 owner
-            // 매칭 강제. 헤더가 invalid 면 capability 단독 fallback — stem 다운로드와 동일.
-            if (jwtSecret != null && call.request.header(HttpHeaders.Authorization) != null) {
-                val principal = runCatching { call.requireUser(jwtSecret) }.getOrNull()
-                if (principal != null && job.ownerUserId != null && job.ownerUserId != principal.userId) {
-                    throw NotFoundException("Mix job not found: $mixJobId")
-                }
-            }
-
-            if (job.status != "COMPLETED" || !job.outputFile.exists()) {
-                throw NotFoundException("Mix not ready: status=${job.status}")
-            }
-            call.respondDownload(
-                file = job.outputFile,
-                objectKey = ObjectKey.separationMix(mixJobId),
-                contentType = ContentType("audio", "mpeg"),
-                downloadFilename = "$mixJobId.mp3",
                 store = objectStore,
             )
         }

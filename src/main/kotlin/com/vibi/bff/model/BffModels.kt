@@ -287,7 +287,6 @@ data class SeparationStatusResponse(
     val progressReason: String? = null,
     val error: String? = null,
     val stems: List<StemInfo> = emptyList(),
-    val mixJobId: String? = null,
     /**
      * READY 상태에서 stem FLAC 의 실측 길이(ms). 클라이언트가 사용자 선택 trim 길이 대신 이 값을
      * 써서 timeline 막대(SeparationDirective.rangeEndMs) 와 stem 실제 길이를 1:1 매칭. null 이면
@@ -304,35 +303,5 @@ data class SeparationStatusResponse(
      * 부족하면 보수적 fallback 사용. null 이면 추정 불가 (QUEUED 가 아니거나 표본 0).
      */
     val estimatedWaitSec: Long? = null,
-)
-
-@Serializable
-data class StemMixSelection(
-    val stemId: String,
-    val volume: Float = 1.0f,
-)
-
-@Serializable
-data class StemMixRequest(
-    val stems: List<StemMixSelection>,
-) {
-    init {
-        require(stems.isNotEmpty()) { "stems must not be empty" }
-        for (s in stems) {
-            requireValidVolume("StemMixRequest.stem", s.volume)
-        }
-    }
-}
-
-@Serializable
-data class StemMixResponse(val mixJobId: String)
-
-@Serializable
-data class StemMixStatusResponse(
-    val mixJobId: String,
-    val status: String,
-    val progress: Int? = null,
-    val error: String? = null,
-    val downloadUrl: String? = null,
 )
 

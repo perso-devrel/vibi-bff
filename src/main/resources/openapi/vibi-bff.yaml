@@ -5,7 +5,7 @@ info:
     vibi Backend-For-Frontend API.
 
     - Perso AI 프록시 — 음성분리
-    - 로컬 ffmpeg 파이프라인 — segment concat / BGM mix / 음원분리 stem mix
+    - 로컬 ffmpeg 파이프라인 — segment concat + BGM mix + 음원분리 stem amix
     - Google / Apple Sign In 검증 + Postgres user upsert + HS256 access token 발급
 
     모든 운영 endpoint 는 `/api/v2` 아래에 마운트된다. 1MB 이상 binary 응답
@@ -32,7 +32,7 @@ tags:
   - name: Render
     description: ffmpeg 기반 렌더 파이프라인 (segments / bgm / 음원분리 directive)
   - name: Separation
-    description: Perso 음성분리 → stem 다운로드 + 사용자 mix 합성
+    description: Perso 음성분리 → stem 다운로드 (사용자 mix 는 모바일 로컬에서)
   - name: Testdata
     description: 개발/QA 용 mock 음원분리 데이터 — production 비활성 권장
 
@@ -476,85 +476,6 @@ paths:
         '404':
           description: 잡/stem/파일 없음
 
-  /api/v2/separate/{jobId}/mix:
-    post:
-      tags: [Separation]
-      summary: 사용자 선택 stem 들을 단일 mp3 로 mix
-      description: |
-        성공 시 원본 separation stems 는 dispose (디스크에서 제거). 호출 후엔 동일
-        separation jobId 의 stem 다운로드 불가. 실패 시엔 reservation 해제 후 stems 유지.
-      parameters:
-        - in: path
-          name: jobId
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/StemMixRequest' }
-      responses:
-        '202':
-          description: mix 잡 접수
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StemMixResponse' }
-        '400':
-          description: stems 비어 있음 / unknown stemId
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-        '409':
-          description: separation 미완료 또는 이미 다른 mix 가 점유 중
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-
-  /api/v2/separate/mix/{mixJobId}:
-    get:
-      tags: [Separation]
-      summary: mix 잡 상태
-      parameters:
-        - in: path
-          name: mixJobId
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: status=COMPLETED 일 때 downloadUrl 동봉
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StemMixStatusResponse' }
-        '404':
-          description: mix 잡 없음
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-
-  /api/v2/separate/mix/{mixJobId}/download:
-    get:
-      tags: [Separation]
-      summary: mix 결과 mp3 다운로드 (HMAC 토큰 필수)
-      parameters:
-        - in: path
-          name: mixJobId
-          required: true
-          schema: { type: string }
-        - in: query
-          name: token
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: mix mp3
-          content:
-            audio/mpeg:
-              schema: { type: string, format: binary }
-        '403':
-          description: 토큰 검증 실패
-        '404':
-          description: mix 미완료 / 파일 없음
-
   # ---------------------------------------------------------------- Testdata (mock)
   /api/v2/testdata/separation/list:
     get:
@@ -919,10 +840,6 @@ components:
         stems:
           type: array
           items: { $ref: '#/components/schemas/StemInfo' }
-        mixJobId:
-          type: string
-          nullable: true
-          description: mix 가 이 separation 을 점유했을 때 그 mix jobId
         actualDurationMs:
           type: integer
           format: int64
@@ -944,43 +861,6 @@ components:
           description: |
             queuePosition × 최근 평균 처리 시간(초) 추정 대기. 표본 부족 시 보수적 fallback.
             QUEUED 가 아니거나 추정 불가면 null.
-
-    StemMixSelection:
-      type: object
-      required: [stemId]
-      properties:
-        stemId: { type: string }
-        volume: { type: number, format: float, default: 1.0 }
-
-    StemMixRequest:
-      type: object
-      required: [stems]
-      properties:
-        stems:
-          type: array
-          minItems: 1
-          items: { $ref: '#/components/schemas/StemMixSelection' }
-
-    StemMixResponse:
-      type: object
-      required: [mixJobId]
-      properties:
-        mixJobId: { type: string }
-
-    StemMixStatusResponse:
-      type: object
-      required: [mixJobId, status]
-      properties:
-        mixJobId: { type: string }
-        status:
-          type: string
-          enum: [PROCESSING, COMPLETED, FAILED]
-        progress: { type: integer, nullable: true }
-        error: { type: string, nullable: true }
-        downloadUrl:
-          type: string
-          nullable: true
-          description: status=COMPLETED 일 때 signed BFF URL
 
     # -------------------------- Testdata
     TestdataSeparationFolder:
