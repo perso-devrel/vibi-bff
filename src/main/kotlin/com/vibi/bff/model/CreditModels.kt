@@ -29,6 +29,22 @@ data class CreditBalanceResponse(
 )
 
 /**
+ * 음원 분리 비용 견적 — 모바일 확인 팝업 ("X 크레딧 사용, 잔액 Y → Z, 진행?") 표시용.
+ *
+ * - [durationMs] — 견적 기준 입력 길이 (요청에서 echo back).
+ * - [credits]    — [CreditCost.forSeparation] 결과 (최소 1, 분당 1, 올림).
+ * - [balance]    — 호출 시점 잔액.
+ * - [sufficient] — balance >= credits 여부. false 면 모바일은 "충전 필요" UI 분기.
+ */
+@Serializable
+data class CreditCostResponse(
+    val durationMs: Long,
+    val credits: Int,
+    val balance: Int,
+    val sufficient: Boolean,
+)
+
+/**
  * StoreKit2 / Play Billing 결제 영수증 검증 요청.
  *
  * - [productId] — App Store Connect / Play Console 에 등록된 SKU. [CreditCatalog] 와 cross-check.

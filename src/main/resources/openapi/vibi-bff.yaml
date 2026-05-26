@@ -130,6 +130,42 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
 
+  /api/v2/credits/cost:
+    get:
+      tags: [Credits]
+      summary: 음원 분리 비용 견적
+      description: |
+        모바일이 "이 구간 음원분리 X 크레딧 사용, 진행?" 팝업 표시 전에 호출.
+        비용 공식: ceil(durationMs / 60000) 크레딧, **최소 1**. /separate 의 실제 차감과
+        동일 source. `sufficient=false` 면 모바일은 충전 UI 분기.
+      security:
+        - bearerAuth: []
+      parameters:
+        - in: query
+          name: durationMs
+          required: true
+          schema:
+            type: integer
+            format: int64
+            minimum: 0
+          description: 비용 산정 기준 입력 길이 (ms). trim 윈도우 또는 원본 영상 길이.
+      responses:
+        '200':
+          description: 비용 + 잔액 + sufficiency
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/CreditCostResponse' }
+        '400':
+          description: durationMs 누락/음수 — `missing_duration_ms` / `duration_ms_negative`
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '401':
+          description: 인증 실패
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+
   /api/v2/credits/purchase:
     post:
       tags: [Credits]
@@ -377,6 +413,13 @@ paths:
               schema: { $ref: '#/components/schemas/SeparationResponse' }
         '400':
           description: spec 누락 / trim 범위 invalid / source 없음
+          content:
+            application/json:
+              schema: { $ref: '#/components/schemas/ErrorResponse' }
+        '402':
+          description: |
+            잔액 부족 — `insufficient_credits`. detail 에 `required=<N> balance=<M>` 형식으로 부족분 노출.
+            모바일은 충전 화면으로 분기. 비용 예측은 `/api/v2/credits/cost` 사전 호출.
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -632,6 +675,27 @@ components:
           type: integer
           minimum: 0
           description: 현재 잔액 (row 가 없으면 0)
+
+    CreditCostResponse:
+      type: object
+      required: [durationMs, credits, balance, sufficient]
+      properties:
+        durationMs:
+          type: integer
+          format: int64
+          minimum: 0
+          description: 견적 기준 입력 길이 (요청 echo back)
+        credits:
+          type: integer
+          minimum: 1
+          description: 차감될 크레딧 수 (분당 1, 올림, 최소 1)
+        balance:
+          type: integer
+          minimum: 0
+          description: 호출 시점 잔액
+        sufficient:
+          type: boolean
+          description: balance >= credits 여부
 
     CreditPurchaseRequest:
       type: object

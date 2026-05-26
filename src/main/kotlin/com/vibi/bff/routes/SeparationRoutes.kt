@@ -6,7 +6,10 @@ import com.vibi.bff.model.*
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.plugins.requireUser
+import com.vibi.bff.service.CreditCost
+import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.FileStorageService
+import com.vibi.bff.service.InsufficientCreditsException
 import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.MediaTrimmer
@@ -23,6 +26,9 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
+import org.slf4j.LoggerFactory
+
+private val log = LoggerFactory.getLogger("SeparationRoutes")
 
 fun Route.separationRoutes(
     separationService: SeparationService,
@@ -36,6 +42,8 @@ fun Route.separationRoutes(
     queueRepository: SeparationQueueRepository? = null,
     /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
     jwtSecret: String? = null,
+    /** 크레딧 선차감 / 환불용. null 이면 차감 skip (테스트 / dev). 운영에선 항상 주입. */
+    creditRepository: CreditRepository? = null,
 ) {
     route("/separate") {
         // POST /api/v2/separate — submit job
@@ -73,9 +81,15 @@ fun Route.separationRoutes(
             // resolve / maybeTrim / submit 어느 단계든 throw 시 caller-owned source
             // 파일이 디스크에 남는 것을 막기 위해 try-catch. submit 성공 후엔 service
             // 가 owner.
+            //
+            // 크레딧 선차감 — caller=null (인증 안 됨, 테스트/dev) 또는 creditRepository=null
+            // (dev) 면 skip. 차감 후 submit 이 dedup-hit (다른 동시 caller race) 을 돌려주면
+            // 우리가 차감한 만큼 환불 — SeparationService 의 FAILED 환불 hook 과는 별개 (이건
+            // 잡 자체가 생성되지 않은 경로).
             var source: File? = null
             var pipelineInput: File? = null
             var audioPreExtracted = false
+            var reservedJobId: String? = null
             try {
                 source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId, principal?.userId)
                 val trimmed = maybeTrim(source, spec)
@@ -85,7 +99,20 @@ fun Route.separationRoutes(
                 // wrap 한 새 인스턴스를 반환해도 silent flip 안 됨.
                 audioPreExtracted = trimmed.audioPreExtracted
                 val sourceDurationMs = computeSeparationSourceDurationMs(pipelineInput, spec)
-                val jobId = separationService.submit(
+
+                // 라우트가 jobId 를 미리 생성해 차감 ledger 의 키로 사용. 차감 → submit 순서로
+                // 진행. submit 이 dedup-hit (isNew=false) 면 우리 jobId 는 어디에도 등록되지
+                // 않고 기존 잡 jobId 가 반환됨 — 우리 차감 ledger 만 환불해야 함.
+                val newJobId = "sep-${UUID.randomUUID()}"
+                val cost = CreditCost.forSeparation(sourceDurationMs)
+                if (principal != null && creditRepository != null) {
+                    withContext(Dispatchers.IO) {
+                        creditRepository.reserve(principal.userId, newJobId, cost)
+                    }
+                    reservedJobId = newJobId
+                }
+
+                val result = separationService.submit(
                     sourceFile = pipelineInput,
                     spec = spec,
                     audioPreExtracted = audioPreExtracted,
@@ -93,11 +120,47 @@ fun Route.separationRoutes(
                     userId = principal?.userId,
                     sourceDurationMs = sourceDurationMs,
                     renderJobId = spec.editedRenderJobId,
+                    providedJobId = newJobId,
                 )
-                call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = jobId))
+                // dedup-hit (race) — 우리 차감 ledger 환불. 운영상 거의 발생 안 함 (pre-check 가
+                // 99% 차단) 이지만 발생 시 사용자에게 두 번 비용 청구되는 것 방지.
+                if (!result.isNew && reservedJobId != null && creditRepository != null) {
+                    withContext(Dispatchers.IO) {
+                        runCatching { creditRepository.refund(reservedJobId!!) }
+                            .onFailure { e ->
+                                log.warn("dedup-hit refund failed jobId={}: {}", reservedJobId, e.message)
+                            }
+                    }
+                }
+                // submit 성공 후엔 잡 lifecycle 의 owner 가 SeparationService — 실패 시 환불은
+                // onJobFailed hook 이 담당. 라우트의 catch 가 더 이상 환불해선 안 됨 (call.respond
+                // 가 client disconnect 등으로 throw 했을 때 잡은 비동기로 계속 돌아 사용자에게
+                // 결과물이 가는데 라우트 catch 가 환불하면 무료 사용이 되는 회귀 차단).
+                reservedJobId = null
+                call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = result.jobId))
+            } catch (e: InsufficientCreditsException) {
+                runCatching { pipelineInput?.delete() }
+                if (audioPreExtracted) runCatching { source?.delete() }
+                throw ApiErrorException(
+                    HttpStatusCode.PaymentRequired,
+                    "insufficient_credits",
+                    "required=${e.required} balance=${e.balance}",
+                )
             } catch (e: Throwable) {
                 runCatching { pipelineInput?.delete() }
                 if (audioPreExtracted) runCatching { source?.delete() }
+                // submit 진입 전 단계 (resolve / maybeTrim / submit 호출 자체) 가 throw 했을 때만
+                // 환불. reservedJobId 는 submit 성공 직후 null 로 비워지므로 (위 분기 참조),
+                // 본 블록에 도달한 시점에 non-null 이면 잡이 생성되지 않은 경로 — 안전하게 환불.
+                if (reservedJobId != null && creditRepository != null) {
+                    val toRefund = reservedJobId!!
+                    withContext(Dispatchers.IO) {
+                        runCatching { creditRepository.refund(toRefund) }
+                            .onFailure { ex ->
+                                log.warn("error-path refund failed jobId={}: {}", toRefund, ex.message)
+                            }
+                    }
+                }
                 throw e
             }
         }

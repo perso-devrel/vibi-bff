@@ -1,23 +1,66 @@
 package com.vibi.bff.service
 
+import com.vibi.bff.db.CreditLedgerTable
 import com.vibi.bff.db.CreditTransactionsTable
 import com.vibi.bff.db.UserCreditsTable
 import java.time.Instant
 import java.util.UUID
+import org.jetbrains.exposed.sql.SqlExpressionBuilder
+import org.jetbrains.exposed.sql.and
 import org.jetbrains.exposed.sql.insertIgnore
 import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
+import org.jetbrains.exposed.sql.update
 import org.jetbrains.exposed.sql.upsert
+import kotlin.math.ceil
 
 /**
- * user_credits 잔액 + credit_transactions 영속화.
+ * 신규 가입 시 자동 지급되는 보너스 크레딧. 1분 = 1 크레딧이므로 약 3분 분량 = 첫 사용 무료
+ * 체험. 변경 시 모바일 카피("가입 시 3 크레딧 제공") + App Store 설명문도 함께 갱신.
+ */
+const val SIGNUP_BONUS_CREDITS: Int = 3
+
+/**
+ * 잔액 부족 시 [CreditRepository.reserve] 가 throw. 라우트가 잡아 402 (Payment Required) 로 매핑.
+ * required/balance 는 모바일 팝업이 표시할 정확한 부족분 — sanitize 규약 위반 아님 (사용자
+ * 본인의 잔액이라 노출 OK).
+ */
+class InsufficientCreditsException(
+    val required: Int,
+    val balance: Int,
+) : RuntimeException("insufficient credits: required=$required balance=$balance")
+
+/**
+ * 잡 길이 → 크레딧 비용 계산. 1분당 1 크레딧, 올림 (ceil). 0초 입력은 비용 0이 아니라
+ * **최소 1 크레딧** — duration 측정 실패(0L)로 무료 사용 가능해지는 우회 차단. 본 계산은
+ * 라우트 (선차감) 와 /credits/cost endpoint (모바일 견적) 양쪽이 단일 source 로 사용.
+ */
+object CreditCost {
+    fun forSeparation(durationMs: Long): Int {
+        val minutes = ceil(durationMs.coerceAtLeast(0L) / 60_000.0).toInt()
+        return minutes.coerceAtLeast(1)
+    }
+}
+
+/**
+ * 잔액 관리 + 모든 변동 ledger 영속화.
  *
+ * 두 ledger 분리:
+ *   - [CreditTransactionsTable] — IAP 가산 (apple/google/admin).
+ *   - [CreditLedgerTable]       — signup 보너스 + consume/refund.
+ *
+ * 잔액 source-of-truth 는 [UserCreditsTable.balance]. ledger 두 곳 어디서도 SUM 으로
+ * 재구성하지 않는다 — race 안전성 위해 `SELECT ... FOR UPDATE` + UPDATE 로 단일 컬럼 갱신.
+ *
+ * 메서드:
  * - [balance] — 잔액 조회. row 가 없으면 0.
- * - [grantPurchase] — 영수증 1건을 idempotent 하게 처리. 동일 (platform, transactionId)
- *   가 이미 처리됐으면 재가산 없이 [PurchaseOutcome.granted] = 0 + 현재 잔액 반환.
- *
- * `consume` (잡 시작 시 잔액 차감) 은 본 PR 범위 밖 — 음원 분리 / 자동 더빙 라우트가 실제로
- * "1잡 = 1크레딧" 차감을 도입할 때 동일 패턴으로 `SELECT ... FOR UPDATE` + UPDATE 추가.
+ * - [grantPurchase] — IAP 영수증 1건의 idempotent 가산.
+ * - [grantSignupBonus] — 신규 가입 1회 보너스. ref_id="signup-<userId>" UNIQUE 로 중복 차단.
+ * - [reserve] — 잡 시작 전 선차감. `SELECT ... FOR UPDATE` + 부족 시 throw +
+ *   credit_ledger 에 consume row 기록. ref_id="consume-<jobId>" UNIQUE 라 같은 잡 두 번
+ *   reserve 호출도 멱등 (두 번째는 첫 번째와 동일 ReserveOutcome 반환, 잔액 변화 없음).
+ * - [refund] — 잡 실패 시 [reserve] 가 차감한 만큼 복원. ref_id="refund-<jobId>" UNIQUE 로
+ *   이중 환불 차단.
  */
 class CreditRepository {
 
@@ -26,13 +69,13 @@ class CreditRepository {
         val balance: Int,
     )
 
+    data class ReserveOutcome(
+        val charged: Int,
+        val balance: Int,
+    )
+
     fun balance(userId: UUID): Int = transaction {
-        UserCreditsTable
-            .select(UserCreditsTable.balance)
-            .where { UserCreditsTable.userId eq userId }
-            .singleOrNull()
-            ?.get(UserCreditsTable.balance)
-            ?: 0
+        readBalance(userId)
     }
 
     /**
@@ -64,10 +107,158 @@ class CreditRepository {
             return@transaction PurchaseOutcome(granted = 0, balance = readBalance(userId))
         }
 
+        addToBalance(userId, credits, now)
+        PurchaseOutcome(granted = credits, balance = readBalance(userId))
+    }
+
+    /**
+     * 신규 가입 보너스 — [SIGNUP_BONUS_CREDITS] 만큼 1회 가산. (kind='signup', ref_id="signup-<userId>")
+     * UNIQUE 라 같은 사용자에 대해 두 번 호출되어도 두 번째는 granted=0 으로 멱등.
+     *
+     * 호출자: [AuthService.completeSignIn] 가 [UpsertedUser.isNewUser] == true 일 때만.
+     * UserRepository 의 race 케이스에서 isNewUser 가 false-negative 일 수 있어도 본 메서드
+     * 자체는 idempotent — 안전망 한 겹 더 (false-positive 도 무해).
+     */
+    fun grantSignupBonus(userId: UUID): PurchaseOutcome = transaction {
+        val refId = "signup-$userId"
+        val now = Instant.now()
+        val inserted = CreditLedgerTable.insertIgnore {
+            it[CreditLedgerTable.userId] = userId
+            it[CreditLedgerTable.kind] = "signup"
+            it[CreditLedgerTable.refId] = refId
+            it[CreditLedgerTable.credits] = SIGNUP_BONUS_CREDITS
+            it[CreditLedgerTable.createdAt] = now
+        }.insertedCount
+        if (inserted == 0) {
+            return@transaction PurchaseOutcome(granted = 0, balance = readBalance(userId))
+        }
+        addToBalance(userId, SIGNUP_BONUS_CREDITS, now)
+        PurchaseOutcome(granted = SIGNUP_BONUS_CREDITS, balance = readBalance(userId))
+    }
+
+    /**
+     * 잡 시작 전 선차감. atomic 흐름:
+     *   1) (kind='consume', ref_id="consume-<jobId>") 멱등 체크 — 이미 차감됐으면 그 결과 반환
+     *   2) `SELECT balance FROM user_credits WHERE user_id=? FOR UPDATE` — row 잠금
+     *   3) 부족하면 [InsufficientCreditsException]
+     *   4) 충분하면 balance -= [credits] + ledger row insert
+     *
+     * **멱등 보장**: 같은 [jobId] 로 두 번 호출하면 두 번째는 첫 번째 결과를 그대로 반환 —
+     * 잔액 두 번 빠지지 않음. 라우트 핸들러가 멱등 재시도(같은 dedupKey 로 두 번째 요청)해도
+     * 안전. **단** SELECT 의 결과로 consume 존재 확인은 동일 트랜잭션 안 — UNIQUE 가
+     * insert-time 안전망.
+     *
+     * `SELECT ... FOR UPDATE` 가 row 가 없으면 잠글 게 없어 차감 불가 — user_credits row 부재 시
+     * (가입 직후 보너스 grant 도 안 받은 사용자) InsufficientCreditsException(required, 0).
+     */
+    fun reserve(
+        userId: UUID,
+        jobId: String,
+        credits: Int,
+    ): ReserveOutcome = transaction {
+        require(credits > 0) { "credits must be positive" }
+        val refId = "consume-$jobId"
+        val now = Instant.now()
+
+        // 멱등 check: 같은 jobId 가 이미 차감됐으면 다시 차감하지 않음 (UNIQUE 가 한 번 더
+        // 막아주지만 명시 분기로 InsufficientCredits 가 잘못 뜨지 않게 함).
+        val alreadyConsumed = CreditLedgerTable
+            .select(CreditLedgerTable.credits)
+            .where {
+                (CreditLedgerTable.kind eq "consume") and
+                    (CreditLedgerTable.refId eq refId)
+            }
+            .singleOrNull()
+        if (alreadyConsumed != null) {
+            return@transaction ReserveOutcome(
+                charged = alreadyConsumed[CreditLedgerTable.credits],
+                balance = readBalance(userId),
+            )
+        }
+
+        // FOR UPDATE row lock — 같은 사용자의 두 동시 reserve 가 직렬화. 다른 사용자는 영향 X.
+        val current = UserCreditsTable
+            .select(UserCreditsTable.balance)
+            .where { UserCreditsTable.userId eq userId }
+            .forUpdate()
+            .singleOrNull()
+            ?.get(UserCreditsTable.balance)
+            ?: 0
+
+        if (current < credits) {
+            throw InsufficientCreditsException(required = credits, balance = current)
+        }
+
+        UserCreditsTable.update({ UserCreditsTable.userId eq userId }) {
+            with(SqlExpressionBuilder) {
+                it[UserCreditsTable.balance] = UserCreditsTable.balance - credits
+            }
+            it[UserCreditsTable.updatedAt] = now
+        }
+
+        CreditLedgerTable.insertIgnore {
+            it[CreditLedgerTable.userId] = userId
+            it[CreditLedgerTable.kind] = "consume"
+            it[CreditLedgerTable.refId] = refId
+            it[CreditLedgerTable.credits] = credits
+            it[CreditLedgerTable.createdAt] = now
+        }
+
+        ReserveOutcome(charged = credits, balance = readBalance(userId))
+    }
+
+    /**
+     * [reserve] 가 차감한 만큼 잔액 복원. 잡 실패/취소 시 호출.
+     *
+     * **이중 환불 차단**: refund ledger UNIQUE (kind='refund', ref_id="refund-<jobId>") 가
+     * 두 번째 환불을 막는다 (insertIgnore → insertedCount=0). 동일 잡이 두 번 환불 트리거를
+     * 발생시켜도 잔액은 정확히 한 번만 복원.
+     *
+     * consume row 가 없으면 (애초에 차감되지 않은 잡 — 미인증 caller 분기 등) no-op (null).
+     * 미인증 / 무료 잡 분기에서 환불 콜백이 무해하게 통과.
+     */
+    fun refund(jobId: String): PurchaseOutcome? = transaction {
+        val consume = CreditLedgerTable
+            .select(
+                CreditLedgerTable.userId,
+                CreditLedgerTable.credits,
+            )
+            .where {
+                (CreditLedgerTable.kind eq "consume") and
+                    (CreditLedgerTable.refId eq "consume-$jobId")
+            }
+            .singleOrNull()
+            ?: return@transaction null
+
+        val userId = consume[CreditLedgerTable.userId] ?: return@transaction null
+        val credits = consume[CreditLedgerTable.credits]
+        val now = Instant.now()
+
+        val inserted = CreditLedgerTable.insertIgnore {
+            it[CreditLedgerTable.userId] = userId
+            it[CreditLedgerTable.kind] = "refund"
+            it[CreditLedgerTable.refId] = "refund-$jobId"
+            it[CreditLedgerTable.credits] = credits
+            it[CreditLedgerTable.createdAt] = now
+        }.insertedCount
+        if (inserted == 0) {
+            // 이미 환불됨 — 잔액은 그대로.
+            return@transaction PurchaseOutcome(granted = 0, balance = readBalance(userId))
+        }
+
+        addToBalance(userId, credits, now)
+        PurchaseOutcome(granted = credits, balance = readBalance(userId))
+    }
+
+    /**
+     * user_credits row 가 없으면 [credits] 로 새로 만들고, 있으면 더한다. updated_at 도 갱신.
+     * grantPurchase / grantSignupBonus / refund 가 공유.
+     */
+    private fun addToBalance(userId: UUID, credits: Int, now: Instant) {
         UserCreditsTable.upsert(
             UserCreditsTable.userId,
             onUpdate = {
-                with(org.jetbrains.exposed.sql.SqlExpressionBuilder) {
+                with(SqlExpressionBuilder) {
                     it[UserCreditsTable.balance] = UserCreditsTable.balance + credits
                 }
                 it[UserCreditsTable.updatedAt] = now
@@ -77,7 +268,6 @@ class CreditRepository {
             it[UserCreditsTable.balance] = credits
             it[UserCreditsTable.updatedAt] = now
         }
-        PurchaseOutcome(granted = credits, balance = readBalance(userId))
     }
 
     private fun readBalance(userId: UUID): Int =

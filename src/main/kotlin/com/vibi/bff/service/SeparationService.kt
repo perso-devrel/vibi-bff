@@ -115,6 +115,12 @@ class SeparationService(
      *  손실 차단. null 이면 eager upload skip — 로컬 dev / R2 미사용 분기에서만 허용 (인스턴스
      *  churn 손실 위험 감수). */
     private val objectStore: ObjectStore? = null,
+    /** 잡 FAILED 진입 시 호출 — 라우트가 선차감한 크레딧을 환불하는 hook. 인자는 jobId.
+     *  CreditRepository.refund 가 (platform='consume', txId='consume-<jobId>') 를 찾아
+     *  매칭 시 환불 + (platform='refund', txId='refund-<jobId>') row 기록. 멱등 (이중 환불
+     *  차단) 이므로 enqueue 실패 / pipeline catch / dispatcher orphan 어디서 불러도 안전.
+     *  null 이면 환불 skip — 테스트 / dev 분기. */
+    private val onJobFailed: (suspend (String) -> Unit)? = null,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
@@ -206,9 +212,22 @@ class SeparationService(
     }
 
     /**
-     * [dedupKey] 가 non-null 이면 atomic check-and-claim — 같은 키의 active 잡이
-     * 있으면 [sourceFile] 을 삭제하고 기존 jobId 를 반환한다. dispose() 가 같은
+     * [submit] 의 결과 — 새 잡인지 dedup-hit 기존 잡 참조인지 caller 가 분기.
+     *
+     * 라우트의 크레딧 선차감 흐름은 submit 호출 전에 [providedJobId] 를 미리 생성해 차감
+     * ledger 의 idempotency key 로 사용한다. submit 이 isNew=false 를 돌려주면 다른 동시
+     * caller 가 같은 dedupKey 로 먼저 등록된 것 → 우리가 선차감한 만큼은 환불해야 한다.
+     */
+    data class SubmitResult(val jobId: String, val isNew: Boolean)
+
+    /**
+     * [dedupKey] 가 non-null 이면 atomic check-and-claim — 같은 키의 active 잡이 있으면
+     * [sourceFile] 을 삭제하고 기존 jobId 를 isNew=false 로 반환한다. dispose() 가 같은
      * 키 entry 를 정리하므로 disposed 잡의 키는 자유롭게 재사용된다.
+     *
+     * [providedJobId] 가 non-null 이면 해당 ID 로 잡을 등록 — 라우트가 크레딧 선차감 ledger 의
+     * 키로 미리 생성한 경우. null 이면 내부에서 "sep-<UUID>" 생성. dedup-hit 분기에서는 무시
+     * (기존 잡 ID 를 그대로 반환).
      *
      * [userId] / [sourceDurationMs] / [renderJobId] 는 admin 대시보드 분석 row 용.
      * userId == null 이면 분석 write skip (테스트 등). renderJobId 는 spec.editedRenderJobId
@@ -222,7 +241,8 @@ class SeparationService(
         userId: UUID? = null,
         sourceDurationMs: Long = 0L,
         renderJobId: String? = null,
-    ): String {
+        providedJobId: String? = null,
+    ): SubmitResult {
         if (dedupKey != null) {
             // synchronized(dedupIndex) 로 (check, claim) 을 원자화 — 두 동시 호출이
             // 동일 키로 들어와도 한 쪽만 새 잡 생성, 다른 쪽은 기존 jobId 반환.
@@ -231,14 +251,21 @@ class SeparationService(
                 findActiveJob(dedupKey)?.let { existing ->
                     sourceFile.delete()
                     log.info("Separation dedup hit: key={} → existing jobId={}", dedupKey, existing)
-                    return existing
+                    return SubmitResult(existing, isNew = false)
                 }
-                val jobId = createAndLaunch(sourceFile, spec, audioPreExtracted, dedupKey, userId, sourceDurationMs, renderJobId)
+                val jobId = createAndLaunch(
+                    sourceFile, spec, audioPreExtracted, dedupKey,
+                    userId, sourceDurationMs, renderJobId, providedJobId,
+                )
                 dedupIndex[dedupKey] = jobId
-                return jobId
+                return SubmitResult(jobId, isNew = true)
             }
         }
-        return createAndLaunch(sourceFile, spec, audioPreExtracted, dedupKey = null, userId, sourceDurationMs, renderJobId)
+        val jobId = createAndLaunch(
+            sourceFile, spec, audioPreExtracted, dedupKey = null,
+            userId, sourceDurationMs, renderJobId, providedJobId,
+        )
+        return SubmitResult(jobId, isNew = true)
     }
 
     private fun createAndLaunch(
@@ -249,8 +276,9 @@ class SeparationService(
         userId: UUID? = null,
         sourceDurationMs: Long = 0L,
         renderJobId: String? = null,
+        providedJobId: String? = null,
     ): String {
-        val jobId = "sep-${UUID.randomUUID()}"
+        val jobId = providedJobId ?: "sep-${UUID.randomUUID()}"
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
         val job = SeparationJob(
             jobId = jobId,
@@ -277,6 +305,9 @@ class SeparationService(
                     job.status = "FAILED"
                     job.error = "enqueue failed"
                     dedupKey?.let { dedupIndex.remove(it, jobId) }
+                    // 선차감 환불 — 라우트에서 reserve 한 크레딧이 있다면 복원.
+                    runCatching { onJobFailed?.invoke(jobId) }
+                        .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", jobId, ex.message) }
                 }
                 onJobChange?.invoke()
             }
@@ -300,6 +331,9 @@ class SeparationService(
         if (job == null) {
             log.warn("Dispatcher claimed unknown in-memory jobId={} — marking FAILED", jobId)
             queue?.markFailed(jobId)
+            // 인스턴스 재시작 후의 stale claim — 라우트가 선차감했을 가능성 있음. 환불 시도.
+            runCatching { onJobFailed?.invoke(jobId) }
+                .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", jobId, ex.message) }
             onJobChange?.invoke()
             return
         }
@@ -348,6 +382,8 @@ class SeparationService(
                 job.error = e.message
                 job.dedupKey?.let { dedupIndex.remove(it, jobId) }
                 queue?.markFailed(jobId)
+                runCatching { onJobFailed?.invoke(jobId) }
+                    .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", jobId, ex.message) }
                 log.error("Resumed separation pipeline failed: jobId={}", jobId, e)
             } finally {
                 onJobChange?.invoke()
@@ -375,6 +411,10 @@ class SeparationService(
             // 그동안 mobile 이 재시도해도 실패한 잡 ID 만 받게 됨).
             job.dedupKey?.let { dedupIndex.remove(it, job.jobId) }
             queue?.markFailed(job.jobId)
+            // 선차감 환불 — 라우트에서 reserve 한 크레딧이 있다면 복원. 환불 자체가 throw 해도
+            // pipeline 의 FAILED 마킹은 그대로 유지 (runCatching).
+            runCatching { onJobFailed?.invoke(job.jobId) }
+                .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", job.jobId, ex.message) }
             // Leave sourceFile on disk — caller can retry; cleanupAbandoned
             // reaps it via dispose() once FAILED_JOB_TTL_MS passes.
             log.error("Separation pipeline failed: jobId={}", job.jobId, e)

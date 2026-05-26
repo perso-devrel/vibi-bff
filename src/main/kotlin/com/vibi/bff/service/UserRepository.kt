@@ -24,7 +24,12 @@ import org.jetbrains.exposed.sql.upsert
  * role 은 upsert 시 보존된다 — onUpdate 에 명시 안 함. 운영자가 SQL `UPDATE` 로
  * 'admin' 으로 승격한 row 가 재로그인으로 'user' 로 강등되지 않도록.
  */
-data class UpsertedUser(val id: UUID, val role: String)
+/**
+ * isNewUser: true 면 이번 upsert 가 신규 row INSERT (재로그인은 false). 호출자가 신규 가입
+ * 보너스(크레딧 그랜트) 같은 1회성 사이드이펙트를 분기하기 위해 노출. createdAt == updatedAt
+ * 으로 판별 — onUpdate 에서 updatedAt 만 갱신하므로 INSERT 직후 한 번만 둘이 일치한다.
+ */
+data class UpsertedUser(val id: UUID, val role: String, val isNewUser: Boolean)
 
 class UserRepository {
 
@@ -44,6 +49,7 @@ class UserRepository {
                 it[UsersTable.picture] = picture
                 it[UsersTable.updatedAt] = now
                 // role 은 의도적으로 미터치 — 운영자가 admin 으로 올린 row 가 재로그인으로 강등되지 않도록.
+                // createdAt 도 미터치 — 신규 가입 판별 기준이라 INSERT 시점에 고정돼야 함.
             },
         ) {
             it[UsersTable.id] = UUID.randomUUID()
@@ -58,10 +64,17 @@ class UserRepository {
         }
         // RETURNING 은 dialect 차이가 커 별도 SELECT 로 안정성 우선 (UNIQUE 인덱스라 단일 row).
         val row = UsersTable
-            .select(UsersTable.id, UsersTable.role)
+            .select(UsersTable.id, UsersTable.role, UsersTable.createdAt, UsersTable.updatedAt)
             .where { (UsersTable.provider eq provider.dbValue) and (UsersTable.providerSub eq providerSub) }
             .single()
-        UpsertedUser(id = row[UsersTable.id].value, role = row[UsersTable.role])
+        // INSERT 면 onUpdate 가 안 돌아 createdAt == updatedAt (둘 다 위의 now). UPDATE 면
+        // onUpdate 가 updatedAt 만 갱신하므로 createdAt != updatedAt. 동시 가입 race 의
+        // ON CONFLICT loser 도 UPDATE 분기라 false 로 안전하게 떨어진다.
+        UpsertedUser(
+            id = row[UsersTable.id].value,
+            role = row[UsersTable.role],
+            isNewUser = row[UsersTable.createdAt] == row[UsersTable.updatedAt],
+        )
     }
 
     /**
