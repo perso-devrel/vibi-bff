@@ -10,13 +10,13 @@ import java.io.File
 import kotlin.test.*
 
 /**
- * Unit tests for the reservation state machine in SeparationService. Uses a
- * tiny reflection helper to seed a READY job without running the real Perso
- * pipeline — the pipeline itself is integration-level and excluded here.
+ * Unit tests for the dispose path on SeparationService — cleanupAbandoned 가
+ * abandon TTL 지난 READY 잡을 reap 할 때 outputDir 까지 같이 지워지는지 회귀 가드.
+ * mix 잡 / reservation 상태머신은 모바일 로컬 mix 로 이관되며 제거됨.
  */
-class SeparationServiceReservationTest {
+class SeparationServiceDisposeTest {
 
-    private val testDir = File(System.getProperty("java.io.tmpdir"), "sep-reservation-test")
+    private val testDir = File(System.getProperty("java.io.tmpdir"), "sep-dispose-test")
     private lateinit var service: SeparationService
 
     @BeforeTest
@@ -48,8 +48,7 @@ class SeparationServiceReservationTest {
             jobId = jobId,
             outputDir = outputDir,
             sourceFile = sourceFile,
-            spec = com.vibi.bff.model.SeparationSpec(mediaType = "AUDIO"),
-            audioPreExtracted = true,
+            spec = com.vibi.bff.model.SeparationSpec(),
         ).apply {
             status = "READY"
             stems = listOf(LocalStem("background", "배경음", stem))
@@ -60,35 +59,6 @@ class SeparationServiceReservationTest {
         val jobs = field.get(service) as java.util.concurrent.ConcurrentHashMap<String, SeparationJob>
         jobs[jobId] = job
         return job
-    }
-
-    @Test
-    fun `first reserve succeeds and second returns null`() {
-        seedReadyJob("sep-1")
-        val first = service.reserveForMix("sep-1", "mix-a")
-        val second = service.reserveForMix("sep-1", "mix-b")
-        assertNotNull(first)
-        assertNull(second, "second concurrent reservation must be rejected")
-    }
-
-    @Test
-    fun `reserve on unknown job returns null`() {
-        assertNull(service.reserveForMix("missing", "mix-a"))
-    }
-
-    @Test
-    fun `reserve on non-READY job returns null`() {
-        val job = seedReadyJob("sep-2")
-        job.status = "PROCESSING"
-        assertNull(service.reserveForMix("sep-2", "mix-a"))
-    }
-
-    @Test
-    fun `releaseReservation lets the next reserve succeed`() {
-        seedReadyJob("sep-3")
-        assertNotNull(service.reserveForMix("sep-3", "mix-a"))
-        service.releaseReservation("sep-3")
-        assertNotNull(service.reserveForMix("sep-3", "mix-b"))
     }
 
     @Test

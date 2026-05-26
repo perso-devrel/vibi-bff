@@ -71,7 +71,7 @@ class RenderServiceAudioCommandTest {
     fun `buildAudioConcatCommand amix uses normalize=0 and alimiter`() {
         // Regression guard: default amix normalize=1 은 silent input 도 N 으로 카운트해 base 와
         // BGM 을 1/N 으로 나눠 의도 대비 −6 dB(2개) ~ −9.5 dB(3개) 작아진다. normalize=0 합산 후
-        // alimiter 로 천장만 squash 하는 패턴이 운영 정책 (StemMixCommandTest 와 동일).
+        // alimiter 로 천장만 squash 하는 패턴이 운영 정책.
         val tmp = File(System.getProperty("java.io.tmpdir"), "vibi-test-rsac-norm").apply { mkdirs() }
         val seg = File(tmp, "seg.m4a").apply { writeText("x") }
         val bgm = File(tmp, "bgm.mp3").apply { writeText("x") }

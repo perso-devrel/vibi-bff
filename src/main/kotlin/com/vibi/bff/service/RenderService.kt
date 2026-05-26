@@ -2,6 +2,9 @@ package com.vibi.bff.service
 
 import com.vibi.bff.model.BgmClip
 import com.vibi.bff.model.Segment
+import com.vibi.bff.routes.ObjectKey
+import com.vibi.bff.routes.contentTypeForExtension
+import io.ktor.http.ContentType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.async
@@ -114,6 +117,9 @@ class RenderService(
     /** admin 대시보드용 Postgres 영속화. null 이면 분석 write skip (테스트 / DB-less dev).
      * 운영에선 Application.kt 가 항상 주입한다. */
     private val analytics: JobAnalyticsRepository? = null,
+    /** R2 eager push 용. null 이면 lazy fallback 만 동작 (기존 DownloadResponder.respondDownload
+     * 의 uploadIfAbsent 가 다운로드 시점에 안전망). */
+    private val objectStore: ObjectStore? = null,
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, RenderJob>()
@@ -139,79 +145,25 @@ class RenderService(
     fun getJob(jobId: String): RenderJob? = jobs[jobId]
 
     /**
-     * Test seam: register a fully-formed [RenderJob] without going through
-     * ffmpeg. Used by `MediaSourceResolverTest` to exercise
-     * acquireRenderOutputCopy / cleanupExpiredJobs without spawning a real
-     * render. Production code never calls this.
-     */
-    internal fun registerJobForTest(job: RenderJob) {
-        jobs[job.jobId] = job
-    }
-
-    /** Test seam: exposes the otherwise-private cleanup pass. */
-    internal fun cleanupExpiredJobsForTest() = cleanupExpiredJobs()
-
-    /**
-     * Phase 1: returns the completed render output file for [jobId], or null
-     * when the job is missing / not yet COMPLETED / its file no longer
-     * exists on disk. Callers that consume this output as source for the
-     * separation pipeline should pair this with [touchJob] so cleanup
-     * defers GC.
+     * 렌더 완료 직후 R2 에 결과물을 즉시 푸시. Cloud Run idle scale-down 시 로컬 outputFile
+     * 손실 위험을 제거하고, `/download` 호출 시 R2 HEAD 만으로 즉시 presigned URL 발급되게 한다.
      *
-     * Prefer [acquireRenderOutputCopy] for downstream source resolution —
-     * that copies the bytes and bumps lastAccessedAt under a single lock,
-     * so cleanup can't race with the consumer and the consumer can freely
-     * delete/rename its returned file.
+     * 실패는 swallow — [com.vibi.bff.routes.respondDownload] 의 `uploadIfAbsent` 가
+     * 다운로드 시점에 lazy 재시도. 잡 자체는 COMPLETED 유지.
      */
-    fun getRenderOutputFile(jobId: String): File? {
-        val job = jobs[jobId] ?: return null
-        if (job.status != "COMPLETED") return null
-        if (!job.outputFile.exists()) return null
-        return job.outputFile
-    }
-
-    /**
-     * Bump [RenderJob.lastAccessedAt] so the cleanup sweep treats the job
-     * as recently used. No-op when the jobId is unknown.
-     */
-    fun touchJob(jobId: String) {
-        jobs[jobId]?.lastAccessedAt = System.currentTimeMillis()
-    }
-
-    /**
-     * Returns an **owned copy** of the completed render output for [jobId]
-     * under [copyTargetDir], or null when the job is missing / not yet
-     * COMPLETED / its file has been reaped. The caller owns the returned
-     * file — it is safe to delete, rename, or feed into a pipeline that
-     * does so (separation).
-     *
-     * The exists-check, the byte copy, and the lastAccessedAt bump all run
-     * inside `synchronized(job)`. [cleanupExpiredJobs] takes the same lock
-     * before deleting outputFile, so the two can never interleave: either
-     * the copy completes (and lastAccessedAt is bumped, deferring cleanup)
-     * or cleanup wins entirely and we return null.
-     *
-     * The copy file is named `source-<uuid>.<ext>` to keep the original
-     * outputFile name and any sibling sticky-state files unambiguous.
-     */
-    fun acquireRenderOutputCopy(jobId: String, copyTargetDir: File, callerUserId: UUID? = null): File? {
-        val job = jobs[jobId] ?: return null
-        // owner 가 set 된 잡은 caller 도 반드시 매칭 — caller null 이라도 reject 해
-        // jwtSecret 미주입 분기에서 owned-job 으로 fall-through 되는 회귀 차단.
-        // owner null (test 시드 / 미인증 잡) 인 잡은 caller 무관 통과.
-        // mismatch 는 not-found 와 동일 응답 경로 (null) 로 두어 IDOR existence oracle 방지.
-        if (job.ownerUserId != null && job.ownerUserId != callerUserId) {
-            return null
-        }
-        synchronized(job) {
-            if (job.status != "COMPLETED") return null
-            if (!job.outputFile.exists()) return null
-            copyTargetDir.mkdirs()
-            val ext = job.outputFile.extension.ifEmpty { "bin" }
-            val copy = File(copyTargetDir, "source-${UUID.randomUUID()}.$ext")
-            job.outputFile.copyTo(copy, overwrite = false)
-            job.lastAccessedAt = System.currentTimeMillis()
-            return copy
+    private suspend fun maybeEagerPushToR2(job: RenderJob) {
+        val store = objectStore ?: return
+        runCatching {
+            val ext = job.outputFile.extension.ifBlank { "mp4" }
+            val fileName = "${job.jobId}.$ext"
+            val key = ObjectKey.renderOutput(job.jobId, fileName)
+            val ct = contentTypeForExtension(ext, ContentType.Application.OctetStream).toString()
+            withContext(Dispatchers.IO) { store.uploadIfAbsent(job.outputFile, key, ct) }
+        }.onFailure { e ->
+            log.warn(
+                "Eager R2 push failed (lazy fallback on download): jobId={} err={}",
+                job.jobId, e.message,
+            )
         }
     }
 
@@ -324,6 +276,7 @@ class RenderService(
                         // shouldn't shrink the downstream-reference window.
                         job.lastAccessedAt = System.currentTimeMillis()
                         log.info("Render completed: jobId={}, size={}", jobId, outputFile.length())
+                        maybeEagerPushToR2(job)
                     } else {
                         job.status = "FAILED"
                         job.error = "ffmpeg exited with code $exitCode"
@@ -428,6 +381,7 @@ class RenderService(
                         "Audio-only render completed: jobId={} size={}",
                         job.jobId, job.outputFile.length(),
                     )
+                    maybeEagerPushToR2(job)
                 } else {
                     job.status = "FAILED"
                     job.error = "ffmpeg audio-only step exited with code $exitCode"
@@ -687,6 +641,7 @@ class RenderService(
                     // Phase 1: see submitRender — start the TTL window at completion.
                     job.lastAccessedAt = System.currentTimeMillis()
                     log.info("Multi-segment render completed: jobId={}", job.jobId)
+                    maybeEagerPushToR2(job)
                 } else {
                     job.status = "FAILED"
                     job.error = "ffmpeg final step exited with code $exitCode"
@@ -974,17 +929,10 @@ class RenderService(
         val now = System.currentTimeMillis()
         jobs.entries
             .filter { (_, job) ->
-                // Phase 1: lastAccessedAt 기반 — touchJob() 으로 referencing pipeline 이
-                // 살아있다고 신호하면 GC 가 미뤄진다. 미참조 job 만 자연스럽게 만료.
                 (job.status == "COMPLETED" || job.status == "FAILED") &&
                     (now - job.lastAccessedAt) > jobTtlMs
             }
             .forEach { (id, job) ->
-                // Phase 1 follow-up: take the same per-job lock as
-                // acquireRenderOutputCopy so a downstream consumer can never
-                // be handed an outputFile that we're about to delete. Re-check
-                // lastAccessedAt inside the lock — if a copy raced ahead and
-                // bumped the timestamp, abort the GC for this round.
                 val deleted = synchronized(job) {
                     if ((now - job.lastAccessedAt) > jobTtlMs) {
                         job.outputFile.delete()

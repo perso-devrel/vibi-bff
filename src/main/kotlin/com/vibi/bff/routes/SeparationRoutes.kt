@@ -1,6 +1,6 @@
 package com.vibi.bff.routes
 
-import com.vibi.bff.MAX_UPLOAD_FILE_SIZE
+import com.vibi.bff.MAX_SEPARATION_AUDIO_SIZE
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.model.*
 import com.vibi.bff.plugins.ApiErrorException
@@ -10,18 +10,15 @@ import com.vibi.bff.service.CreditCost
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.InsufficientCreditsException
-import com.vibi.bff.service.ObjectStore
-import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.MediaTrimmer
+import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
-import com.vibi.bff.service.StemMixService
 import io.ktor.http.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
-import io.ktor.utils.io.discard
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
@@ -30,13 +27,17 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("SeparationRoutes")
 
+/** Perso audio-separation 이 받는 모든 audio 포맷 — m4a (AAC), mp3, wav (PCM). 모바일이 trim
+ * + audio extract 까지 끝낸 m4a 가 신규 경로의 default. mp3/wav 는 사용자가 직접 갖고 있는
+ * audio 파일 (녹음, 외부 다운로드 등) 을 재인코딩 없이 그대로 보내는 케이스. video / flac /
+ * ogg 등은 모두 reject — flac 은 Perso 가 silent fail 하는 회귀 (CLAUDE.md 참조). */
+private val SEPARATION_AUDIO_EXTENSIONS = setOf("m4a", "mp3", "wav")
+
 fun Route.separationRoutes(
     separationService: SeparationService,
-    stemMixService: StemMixService,
     signer: SignedUrlService,
     fileStorage: FileStorageService,
     appConfig: AppConfig,
-    mediaSourceResolver: MediaSourceResolver,
     objectStore: ObjectStore?,
     /** 큐 상태 조회용 — null 이면 queuePosition 응답 안 함 (DB-less dev / 테스트). */
     queueRepository: SeparationQueueRepository? = null,
@@ -47,62 +48,59 @@ fun Route.separationRoutes(
 ) {
     route("/separate") {
         // POST /api/v2/separate — submit job
-        // Accepts either multipart `file` (legacy) or `spec.editedRenderJobId`
-        // referencing a completed /api/v2/render output. See MediaSourceResolver.
+        // 모바일이 trim + audio extract 까지 끝낸 audio (m4a/mp3/wav) 만 받는다.
+        // BFF 는 file 을 그대로 Perso 에 forward — ffmpeg 단계 없음.
         post {
             val principal = jwtSecret?.let { call.requireUser(it) }
             val (filePart, specOpt) = parseOptionalUploadAndSpec<SeparationSpec>(
-                call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE),
+                call.receiveMultipart(formFieldLimit = MAX_SEPARATION_AUDIO_SIZE),
                 fileStorage,
-                MAX_UPLOAD_FILE_SIZE,
+                MAX_SEPARATION_AUDIO_SIZE,
             )
             val spec = specOpt ?: run {
                 filePart?.delete()
                 throw IllegalArgumentException("spec is required")
             }
+            val sourceFile = filePart ?: throw IllegalArgumentException("file is required")
 
-            // Pre-check: 같은 (caller+source+spec) 의 active 잡이 이미 있으면
-            // resolve/trim 으로 디스크 낭비하지 말고 바로 기존 jobId 반환 — "이 구간
-            // 음원분리" 버튼 연타 방어. dedup 키에 userId 를 포함해 cross-user
-            // collision 으로 다른 사용자의 jobId 가 노출되는 IDOR 오라클 차단.
-            // submit 의 atomic claim 이 진짜 safety net 이라 pre-check miss 해도
-            // 정확성은 유지되지만 IO 절약 효과 큼.
-            val dedupKey = buildSeparationDedupKey(spec, principal?.userId)
-            if (dedupKey != null) {
-                separationService.findActiveJob(dedupKey)?.let { existing ->
-                    filePart?.delete()
-                    call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = existing))
-                    return@post
-                }
+            // 화이트리스트 검증 2-단:
+            //   1) 확장자 (caller-controlled — 1차 차단 + UX-friendly error)
+            //   2) ffprobe stream-kind (실 byte content — 확장자 위조 우회 차단)
+            // m4a 는 mp4 container 라 video track 동봉도 가능 → 확장자만으론 부족하다. probe 실패 /
+            // video stream 동봉 / audio stream 부재면 즉시 reject.
+            val ext = sourceFile.extension.lowercase()
+            if (ext !in SEPARATION_AUDIO_EXTENSIONS) {
+                sourceFile.delete()
+                throw ApiErrorException(
+                    HttpStatusCode.BadRequest,
+                    "unsupported_audio_format",
+                    "audio extension must be one of $SEPARATION_AUDIO_EXTENSIONS (got '$ext')",
+                )
+            }
+            val streamKinds = MediaTrimmer.probeStreamKinds(sourceFile)
+            if (streamKinds == null || "video" in streamKinds || "audio" !in streamKinds) {
+                sourceFile.delete()
+                throw ApiErrorException(
+                    HttpStatusCode.BadRequest,
+                    "unsupported_audio_format",
+                    "file must contain exactly an audio track (probed streams=$streamKinds)",
+                )
             }
 
-            // resolve() 는 항상 owned copy(또는 caller-owned upload)를 돌려준다 —
-            // 따라서 maybeTrim 의 deleteOriginalOnFailure 분기가 필요 없다.
-            // resolve / maybeTrim / submit 어느 단계든 throw 시 caller-owned source
-            // 파일이 디스크에 남는 것을 막기 위해 try-catch. submit 성공 후엔 service
-            // 가 owner.
+            // submit / 크레딧 reserve 어느 단계든 throw 시 caller-owned source 파일이
+            // 디스크에 남는 것을 막기 위해 try-catch. submit 성공 후엔 service 가 owner —
+            // [sourceOwned]=false 로 flip 해서 catch 의 sourceFile.delete() 가 service 의
+            // upload 와 race 하는 것 차단. call.respond 가 client disconnect 로 throw 해도
+            // 잡은 비동기 계속 — 라우트가 file 을 지우면 안 됨.
             //
             // 크레딧 선차감 — caller=null (인증 안 됨, 테스트/dev) 또는 creditRepository=null
-            // (dev) 면 skip. 차감 후 submit 이 dedup-hit (다른 동시 caller race) 을 돌려주면
-            // 우리가 차감한 만큼 환불 — SeparationService 의 FAILED 환불 hook 과는 별개 (이건
-            // 잡 자체가 생성되지 않은 경로).
-            var source: File? = null
-            var pipelineInput: File? = null
-            var audioPreExtracted = false
+            // (dev) 면 skip. SeparationService 의 FAILED 환불 hook 은 별개 (잡이 생성된 경로용).
             var reservedJobId: String? = null
+            var sourceOwned = true
             try {
-                source = mediaSourceResolver.resolve(filePart, spec.editedRenderJobId, principal?.userId)
-                val trimmed = maybeTrim(source, spec)
-                pipelineInput = trimmed.file
-                // maybeTrim 이 명시 Boolean 으로 반환 — reference equality (pipelineInput !== source)
-                // 대신 캡슐화. 미래 리팩토링이 maybeTrim 의 no-trim 분기에서 같은 file 을
-                // wrap 한 새 인스턴스를 반환해도 silent flip 안 됨.
-                audioPreExtracted = trimmed.audioPreExtracted
-                val sourceDurationMs = computeSeparationSourceDurationMs(pipelineInput, spec)
+                val sourceDurationMs = computeSeparationSourceDurationMs(sourceFile)
 
-                // 라우트가 jobId 를 미리 생성해 차감 ledger 의 키로 사용. 차감 → submit 순서로
-                // 진행. submit 이 dedup-hit (isNew=false) 면 우리 jobId 는 어디에도 등록되지
-                // 않고 기존 잡 jobId 가 반환됨 — 우리 차감 ledger 만 환불해야 함.
+                // 라우트가 jobId 를 미리 생성해 차감 ledger 의 키로 사용.
                 val newJobId = "sep-${UUID.randomUUID()}"
                 val cost = CreditCost.forSeparation(sourceDurationMs)
                 if (principal != null && creditRepository != null) {
@@ -112,46 +110,30 @@ fun Route.separationRoutes(
                     reservedJobId = newJobId
                 }
 
-                val result = separationService.submit(
-                    sourceFile = pipelineInput,
+                val resultJobId = separationService.submit(
+                    sourceFile = sourceFile,
                     spec = spec,
-                    audioPreExtracted = audioPreExtracted,
-                    dedupKey = dedupKey,
                     userId = principal?.userId,
                     sourceDurationMs = sourceDurationMs,
-                    renderJobId = spec.editedRenderJobId,
                     providedJobId = newJobId,
                 )
-                // dedup-hit (race) — 우리 차감 ledger 환불. 운영상 거의 발생 안 함 (pre-check 가
-                // 99% 차단) 이지만 발생 시 사용자에게 두 번 비용 청구되는 것 방지.
-                if (!result.isNew && reservedJobId != null && creditRepository != null) {
-                    withContext(Dispatchers.IO) {
-                        runCatching { creditRepository.refund(reservedJobId!!) }
-                            .onFailure { e ->
-                                log.warn("dedup-hit refund failed jobId={}: {}", reservedJobId, e.message)
-                            }
-                    }
-                }
                 // submit 성공 후엔 잡 lifecycle 의 owner 가 SeparationService — 실패 시 환불은
-                // onJobFailed hook 이 담당. 라우트의 catch 가 더 이상 환불해선 안 됨 (call.respond
-                // 가 client disconnect 등으로 throw 했을 때 잡은 비동기로 계속 돌아 사용자에게
-                // 결과물이 가는데 라우트 catch 가 환불하면 무료 사용이 되는 회귀 차단).
+                // onJobFailed hook 이 담당. 파일 ownership 도 transfer — 라우트 catch 는 더 이상
+                // sourceFile 을 건드리면 안 됨 (call.respond throw 시 service 가 upload 중일 수 있음).
                 reservedJobId = null
-                call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = result.jobId))
+                sourceOwned = false
+                call.respond(HttpStatusCode.Accepted, SeparationResponse(jobId = resultJobId))
             } catch (e: InsufficientCreditsException) {
-                runCatching { pipelineInput?.delete() }
-                if (audioPreExtracted) runCatching { source?.delete() }
+                if (sourceOwned) runCatching { sourceFile.delete() }
                 throw ApiErrorException(
                     HttpStatusCode.PaymentRequired,
                     "insufficient_credits",
                     "required=${e.required} balance=${e.balance}",
                 )
             } catch (e: Throwable) {
-                runCatching { pipelineInput?.delete() }
-                if (audioPreExtracted) runCatching { source?.delete() }
-                // submit 진입 전 단계 (resolve / maybeTrim / submit 호출 자체) 가 throw 했을 때만
-                // 환불. reservedJobId 는 submit 성공 직후 null 로 비워지므로 (위 분기 참조),
-                // 본 블록에 도달한 시점에 non-null 이면 잡이 생성되지 않은 경로 — 안전하게 환불.
+                if (sourceOwned) runCatching { sourceFile.delete() }
+                // submit 진입 전 단계가 throw 했을 때만 환불. reservedJobId 는 submit 성공
+                // 직후 null 로 비워지므로 본 블록에 non-null 이면 잡이 생성되지 않은 경로.
                 if (reservedJobId != null && creditRepository != null) {
                     val toRefund = reservedJobId!!
                     withContext(Dispatchers.IO) {
@@ -206,7 +188,6 @@ fun Route.separationRoutes(
                 progressReason = job.progressReason,
                 error = job.error,
                 stems = stems,
-                mixJobId = job.consumedByMixJobId,
                 actualDurationMs = job.actualDurationMs,
                 queuePosition = queuePosition,
                 estimatedWaitSec = estimatedWaitSec,
@@ -256,163 +237,30 @@ fun Route.separationRoutes(
                 store = objectStore,
             )
         }
-
-        // POST /api/v2/separate/{jobId}/mix — kick off mixing; on success, stems are disposed
-        post("/{jobId}/mix") {
-            val principal = jwtSecret?.let { call.requireUser(it) }
-            val jobId = call.parameters["jobId"]
-                ?: throw NotFoundException("jobId required")
-
-            // mix 는 separation 잡의 stems 를 reserve → 성공 시 dispose. 다른 사용자가
-            // 남의 잡을 mix command 로 소비/삭제시키는 IDOR 막기 위해 reserveForMix
-            // 호출 전에 ownerUserId 검증. mismatch 는 not-found 로 응답.
-            //
-            // **body 파싱보다 먼저** 검증 — IDOR-rejected 요청이 비싼 JSON deserialize
-            // 비용을 지불하지 않도록 (DoS 증폭 방지). missing-job (typo / dispose) 도
-            // body 파싱 전에 409 로 차단해 미사용 JSON deserialize 도 막음.
-            val existing = separationService.getJob(jobId)
-            if (existing == null) {
-                // 응답 전 incoming body drain — Ktor 3.x 가 자동 drain 안 함, client
-                // 가 body 송신 중인데 server 가 먼저 respond + close 하면 TCP RST 로
-                // client 가 broken-pipe IOException 봄 (409 body 못 읽음).
-                runCatching { call.receiveChannel().discard() }
-                return@post call.respond(
-                    HttpStatusCode.Conflict,
-                    ErrorResponse(error = "Separation job not ready or already consumed"),
-                )
-            }
-            if (existing.ownerUserId != null && existing.ownerUserId != principal?.userId) {
-                runCatching { call.receiveChannel().discard() }
-                throw NotFoundException("Separation job not found: $jobId")
-            }
-
-            val req = call.receive<StemMixRequest>()
-
-            val mixJobId = stemMixService.newJobId()
-            val job = separationService.reserveForMix(jobId, mixJobId)
-                ?: return@post call.respond(
-                    HttpStatusCode.Conflict,
-                    ErrorResponse(
-                        error = "Separation job not ready or already consumed",
-                    ),
-                )
-
-            val stemByIdLocal = job.stems.associateBy { it.stemId }
-            val unknownStemId = req.stems.firstOrNull { it.stemId !in stemByIdLocal }?.stemId
-            if (unknownStemId != null) {
-                separationService.releaseReservation(jobId)
-                throw IllegalArgumentException("Unknown stemId: $unknownStemId")
-            }
-            val selected = req.stems.map { sel ->
-                sel to stemByIdLocal.getValue(sel.stemId).file
-            }
-
-            // mix 잡의 owner = caller principal. 운영에서는 owner 검증 위에서 통과한
-            // principal 이 보장됨. principal null (jwtSecret 미주입 분기) 이면 owner null
-            // 잡으로 등록 — 그래야 같은 caller 가 mix status 폴링 시 owner null 분기로
-            // 통과 (이전엔 existing.ownerUserId 로 fallback 해 caller=null 인데 owner=set
-            // 인 잡이 만들어져 자기 mix 잡에 접근 못하는 lockout 회귀 발생).
-            stemMixService.submit(mixJobId, selected, ownerUserId = principal?.userId) { completed ->
-                when (completed.status) {
-                    "COMPLETED" -> separationService.dispose(jobId)
-                    "FAILED" -> separationService.releaseReservation(jobId)
-                    else -> { /* still PROCESSING — leave alone */ }
-                }
-            }
-
-            call.respond(HttpStatusCode.Accepted, StemMixResponse(mixJobId = mixJobId))
-        }
-
-        // GET /api/v2/separate/mix/{mixJobId} — mix status
-        get("/mix/{mixJobId}") {
-            val mixJobId = call.parameters["mixJobId"]
-                ?: throw NotFoundException("mixJobId required")
-            val job = stemMixService.getJob(mixJobId)
-                ?: throw NotFoundException("Mix job not found: $mixJobId")
-
-            // owner 매칭 — Authorization 헤더가 있으면 강제, 없으면 token-only polling
-            // 호환을 위해 통과 (모바일 background worker / webview 가 헤더 없이 폴링
-            // 가능). 헤더가 있는데 invalid 면 capability 단독 분기 (mixJobId 자체가
-            // unguessable v4 UUID 라 추측 불가능).
-            if (jwtSecret != null && call.request.header(HttpHeaders.Authorization) != null) {
-                val principal = runCatching { call.requireUser(jwtSecret) }.getOrNull()
-                if (principal != null && job.ownerUserId != null && job.ownerUserId != principal.userId) {
-                    throw NotFoundException("Mix job not found: $mixJobId")
-                }
-            }
-
-            val downloadUrl = if (job.status == "COMPLETED") {
-                val token = signer.sign(mixJobId, "download", appConfig.separation.mixUrlTtlSec)
-                "/api/v2/separate/mix/$mixJobId/download?token=$token"
-            } else null
-
-            call.respond(HttpStatusCode.OK, StemMixStatusResponse(
-                mixJobId = mixJobId,
-                status = job.status,
-                progress = job.progress,
-                error = job.error,
-                downloadUrl = downloadUrl,
-            ))
-        }
-
-        // GET /api/v2/separate/mix/{mixJobId}/download?token=... — streamed mix
-        get("/mix/{mixJobId}/download") {
-            val mixJobId = call.parameters["mixJobId"]
-                ?: throw NotFoundException("mixJobId required")
-            val token = call.request.queryParameters["token"]
-                ?: throw IllegalArgumentException("token required")
-
-            if (!signer.verify(mixJobId, "download", token)) {
-                call.respond(HttpStatusCode.Forbidden)
-                return@get
-            }
-
-            val job = stemMixService.getJob(mixJobId)
-                ?: throw NotFoundException("Mix job not found: $mixJobId")
-
-            // capability(HMAC) + identity(JWT 헤더) 이중. 헤더가 있고 valid 면 owner
-            // 매칭 강제. 헤더가 invalid 면 capability 단독 fallback — stem 다운로드와 동일.
-            if (jwtSecret != null && call.request.header(HttpHeaders.Authorization) != null) {
-                val principal = runCatching { call.requireUser(jwtSecret) }.getOrNull()
-                if (principal != null && job.ownerUserId != null && job.ownerUserId != principal.userId) {
-                    throw NotFoundException("Mix job not found: $mixJobId")
-                }
-            }
-
-            if (job.status != "COMPLETED" || !job.outputFile.exists()) {
-                throw NotFoundException("Mix not ready: status=${job.status}")
-            }
-            call.respondDownload(
-                file = job.outputFile,
-                objectKey = ObjectKey.separationMix(mixJobId),
-                contentType = ContentType("audio", "mpeg"),
-                downloadFilename = "$mixJobId.mp3",
-                store = objectStore,
-            )
-        }
     }
 }
 
 /**
- * 클라(iOS AVAsset / Android MediaMetadataRetriever)와 BFF(ffprobe) 사이의
- * 영상 길이 측정 ms 단위 오차 허용치. 100ms 이내면 자동 clamp.
- */
-private const val TRIM_DURATION_TOLERANCE_MS = 100L
-
-/**
- * admin 대시보드의 "영상 당 분리 사용량" KPI 원본. spec 에 trim 윈도우가 있으면 그 길이,
- * 없으면 source 파일을 ffprobe 로 측정. probe 실패하면 0 (대시보드에서 길이 모름으로 표시).
+ * admin 대시보드의 "분리 사용량" KPI 원본 + 크레딧 차감 입력. 모바일이 이미 trim 한 audio 를
+ * 보내므로 받은 파일 그대로 ffprobe.
  *
- * [MediaTrimmer.probeDurationMs] 는 suspend (내부 withContext(Dispatchers.IO)) 라 본 함수도
- * suspend. ffprobe 실패는 분석 손실로만 끝나고 separation 잡 자체는 계속 — runCatching 으로 흡수.
+ * ffprobe 실패 시 conservative size-based fallback — `MIN_AUDIO_BITRATE_BYTES_PER_SEC` 로 나눠
+ * 분 단위 추정. 이걸 안 하면 corrupt header 로 probe 만 막힌 60분 파일이 0ms 로 평가돼 1 credit
+ * (floor) 만 차감되는 undercharge 우회가 가능 — Perso 처리 비용은 그대로 발생하므로 BFF 손실.
+ *
+ * AAC 64kbps 모노 (Perso 가 받는 최저 품질대) ≈ 8KB/s. 이보다 낮은 bitrate 는 일반 m4a/mp3/wav
+ * 시나리오에 없으므로 fallback duration 이 실제보다 길게 추정되지는 않는다 (= overcharge 위험 없음,
+ * undercharge 만 막음).
  */
-internal suspend fun computeSeparationSourceDurationMs(pipelineInput: File, spec: SeparationSpec): Long {
-    if (spec.trimStartMs != null && spec.trimEndMs != null) {
-        return (spec.trimEndMs - spec.trimStartMs).coerceAtLeast(0L)
-    }
-    return runCatching { MediaTrimmer.probeDurationMs(pipelineInput) ?: 0L }
-        .getOrDefault(0L)
-        .coerceAtLeast(0L)
+private const val MIN_AUDIO_BITRATE_BYTES_PER_SEC = 8_000L
+
+internal suspend fun computeSeparationSourceDurationMs(audioFile: File): Long {
+    val probed = runCatching { MediaTrimmer.probeDurationMs(audioFile) }.getOrNull()
+    if (probed != null && probed > 0L) return probed
+    // probe 실패 / 0 → file size 기반 conservative 추정. delete 실패 / 0-byte 파일 등 edge
+    // 케이스도 0L 로 떨어져 floor 1 credit 이 적용.
+    val sizeBytes = runCatching { audioFile.length() }.getOrDefault(0L)
+    return (sizeBytes / MIN_AUDIO_BITRATE_BYTES_PER_SEC * 1000L).coerceAtLeast(0L)
 }
 
 /**
@@ -421,102 +269,3 @@ internal suspend fun computeSeparationSourceDurationMs(pipelineInput: File, spec
  * 약간 길게 보이고 일찍 완료되는 편이 UX 안전.
  */
 private const val DEFAULT_ESTIMATED_PROCESSING_SEC: Long = 180
-
-/**
- * Idempotency 키. 같은 (caller, editedRenderJobId, trim 구간, 언어, mediaType) 으로
- * 들어온 요청은 같은 키 → SeparationService.submit 이 기존 active jobId 반환.
- *
- * **userId 필수**: 같은 spec 이라도 caller 가 다르면 다른 키 → 다른 사용자의 active
- * 잡 ID 가 dedup-hit 으로 노출되는 IDOR 오라클 차단. 미인증 호출 (운영에서는 발생
- * 안 함, 테스트 호환) 은 "anon" 으로 묶임.
- *
- * **editedRenderJobId path 만 지원**. legacy multipart upload 는 source 식별이 file
- * 바이트 hash 라 별도 비용 (대용량 영상 stream hash). 현재 "이 구간 음원분리" 버튼은
- * 항상 edited render 결과를 source 로 쓰므로 이 한정으로 충분. upload 경로 dedup 이
- * 필요해지면 RenderInputCacheService 의 sha256 prefix 패턴 재사용 가능.
- */
-internal fun buildSeparationDedupKey(spec: SeparationSpec, userId: UUID?): String? {
-    val editedId = spec.editedRenderJobId ?: return null
-    // 미인증 caller 는 dedup 비활성화 — "anon" 단일 버킷에 묶이면 jwtSecret 미주입
-    // 분기 (테스트 / dev) 에서 동시 caller 들이 cross-pollute (다른 캐서가 같은 spec 으로
-    // 첫 caller 의 jobId 를 dedup-hit 으로 받음). 운영은 항상 userId set 이라 영향 없음.
-    if (userId == null) return null
-    val start = spec.trimStartMs ?: 0L
-    val end = spec.trimEndMs ?: 0L
-    return "user=$userId|edited=$editedId|trim=$start-$end|" +
-        "lang=${spec.sourceLanguageCode}|type=${spec.mediaType}"
-}
-
-/**
- * **Caller-owned single-use** — `file` 의 owner 는 caller (SeparationRoutes 의 submit
- * 핸들러). maybeTrim 은 trim 이 발생하면 원본을 delete 하고 새 trimmed 파일을 owner 로
- * 양도. trim 이 없으면 동일 [file] 을 그대로 반환 — 그래도 caller 는 단일 ownership.
- * 두 케이스 모두 호출 후엔 [file] 을 다시 사용하면 안 됨 (지워졌거나 service 가 가져감).
- *
- * If [spec] carries a trim range, probe the file, validate against its
- * actual duration, then stream-copy cut the window with ffmpeg. The
- * trimmed file replaces the source (the source is deleted to free disk
- * before the upstream upload begins). Blocking ffprobe / ffmpeg calls
- * run on [Dispatchers.IO] so the Netty worker isn't held while a 500 MB
- * file is being cut. Throws [ApiErrorException] with error codes the
- * client can branch on.
- *
- * Phase 1 follow-up: [MediaSourceResolver] now always returns a
- * caller-owned file (a copy of the render output for editedRenderJobId,
- * or the upload itself for legacy uploads), so we can unconditionally
- * delete it on success/failure without risk of clobbering shared state.
- */
-/**
- * maybeTrim 결과 — file 은 다운스트림 파이프라인 입력, audioPreExtracted 는
- * MediaTrimmer 가 PCM WAV 로 audio 추출 했는지 여부. SeparationService.runPipeline 이
- * 이 flag 로 MP3 추출 단계 skip 결정. reference equality 가 아닌 명시 Boolean 으로
- * 캡슐화.
- */
-internal data class MaybeTrimResult(val file: File, val audioPreExtracted: Boolean)
-
-internal suspend fun maybeTrim(
-    file: File,
-    spec: SeparationSpec,
-): MaybeTrimResult = withContext(Dispatchers.IO) {
-    val start = spec.trimStartMs
-    val rawEnd = spec.trimEndMs
-    if (start == null || rawEnd == null) return@withContext MaybeTrimResult(file, audioPreExtracted = false)
-
-    val durationMs = MediaTrimmer.probeDurationMs(file)
-        ?: run {
-            file.delete()
-            throw ApiErrorException(
-                HttpStatusCode.InternalServerError,
-                "ffmpeg_error",
-                "Could not probe source duration",
-            )
-        }
-    // iOS AVAsset / Android MediaMetadataRetriever vs ffprobe 사이 ms 단위 측정 오차 (보통 1~수십ms).
-    // "전체 구간" 자동 선택 시 clientEnd > durationMs 가 흔함 — TRIM_DURATION_TOLERANCE_MS 이내면
-    // 자동 clamp, 초과면 client bug 신호로 보고 reject.
-    val end = if (rawEnd > durationMs && rawEnd - durationMs <= TRIM_DURATION_TOLERANCE_MS) {
-        durationMs
-    } else if (rawEnd > durationMs) {
-        file.delete()
-        throw ApiErrorException(
-            HttpStatusCode.BadRequest,
-            "trim_end_exceeds_duration",
-            "trimEndMs=$rawEnd but file duration=$durationMs",
-        )
-    } else rawEnd
-
-    // MediaTrimmer.trim 출력은 sample-accurate PCM WAV (lossless, audio-only, Perso 호환).
-    // 다운스트림은 audioPreExtracted=true 로 별도 MP3 추출 단계 skip.
-    val trimmed = File(file.parentFile, "${file.nameWithoutExtension}.trimmed.${MediaTrimmer.OUTPUT_EXTENSION}")
-    val ok = MediaTrimmer.trim(file, start, end, trimmed)
-    if (!ok) {
-        file.delete()
-        throw ApiErrorException(
-            HttpStatusCode.InternalServerError,
-            "ffmpeg_error",
-            "Trim extraction failed",
-        )
-    }
-    file.delete()
-    MaybeTrimResult(trimmed, audioPreExtracted = true)
-}

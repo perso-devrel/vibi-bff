@@ -14,8 +14,11 @@ import software.amazon.awssdk.services.s3.model.PutObjectRequest
 import software.amazon.awssdk.services.s3.model.S3Exception
 import software.amazon.awssdk.services.s3.presigner.S3Presigner
 import software.amazon.awssdk.services.s3.presigner.model.GetObjectPresignRequest
+import software.amazon.awssdk.services.s3.presigner.model.PutObjectPresignRequest
 import java.io.File
 import java.net.URI
+import java.nio.file.Files
+import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.util.concurrent.ConcurrentHashMap
 
@@ -43,6 +46,10 @@ class ObjectStore(
     /** 같은 instance 가 같은 jobId 를 반복 처리할 때 HEAD RPC 도 0회로. cold start 시
      * 비어있어 첫 요청은 정상 흐름. */
     private val uploadedKeys = ConcurrentHashMap<String, Long>()
+
+    /** asset-by-reference 흐름의 다운로드 캐시. 같은 인스턴스가 같은 R2 객체를 두 번
+     * 다운로드 안 하기 위함 — multi-variant 렌더에서 동일 source 영상/BGM 을 N 번 받지 않음. */
+    private val downloadedKeys = ConcurrentHashMap<String, Long>()
 
     init { require(bucket.isNotBlank()) { "ObjectStore bucket must not be blank" } }
 
@@ -91,6 +98,106 @@ class ObjectStore(
         )
         uploadedKeys[objectKey] = fileLen
         log.info("Uploaded to R2: r2://{}/{} ({} bytes)", bucket, objectKey, fileLen)
+    }
+
+    /**
+     * R2 에 객체가 존재하는지 HEAD 로 확인. asset-by-reference 흐름이 모바일 PUT 직전에
+     * dedup 체크하는 용도. uploadedKeys 캐시 hit 도 hit 으로 본다 — 같은 인스턴스에서
+     * 직전에 올렸으면 R2 HEAD 도 skip.
+     *
+     * 권한 부족(403) 도 missing 으로 간주. presigned PUT 발급 후 모바일이 PUT 실패하면
+     * 그쪽에서 surface 되므로 안전.
+     */
+    fun objectExists(objectKey: String): Boolean {
+        if (uploadedKeys.containsKey(objectKey)) return true
+        return try {
+            val len = s3.headObject(
+                HeadObjectRequest.builder().bucket(bucket).key(objectKey).build()
+            ).contentLength()
+            if (len >= 0) {
+                uploadedKeys[objectKey] = len
+                true
+            } else false
+        } catch (_: NoSuchKeyException) {
+            false
+        } catch (e: S3Exception) {
+            if (e.statusCode() in MISSING_KEY_STATUS_CODES) false else throw e
+        }
+    }
+
+    /**
+     * SigV4 presigned PUT URL — 모바일이 R2 에 직접 업로드할 수 있게 한다.
+     *
+     * [contentType] 과 [contentLengthBytes] 는 sign 시점에 고정되므로 클라가 PUT 시
+     * 동일 값을 전송해야 한다. 다른 값을 보내면 R2 가 401. 짧은 TTL ([ttlSec] 기본 300s) 로
+     * leak 윈도우 최소화.
+     */
+    fun presignedPutUrl(
+        objectKey: String,
+        contentType: String,
+        contentLengthBytes: Long,
+        ttlSec: Long = 300L,
+    ): String {
+        require(contentLengthBytes > 0) { "contentLengthBytes must be positive" }
+        require(ttlSec in 60..3600) { "ttlSec out of safe range: $ttlSec" }
+        val putRequest = PutObjectRequest.builder()
+            .bucket(bucket)
+            .key(objectKey)
+            .contentType(contentType)
+            .contentLength(contentLengthBytes)
+            .build()
+        val presigned = presigner.presignPutObject(
+            PutObjectPresignRequest.builder()
+                .signatureDuration(Duration.ofSeconds(ttlSec))
+                .putObjectRequest(putRequest)
+                .build()
+        )
+        return presigned.url().toString()
+    }
+
+    /**
+     * R2 객체를 로컬 [targetFile] 로 다운로드. 멱등 — 같은 인스턴스가 이미 받은 적이 있고
+     * (downloadedKeys cache) 로컬 file 도 존재하면 즉시 반환. 디스크에 file 만 있고
+     * cache 가 stale 인 경우 (인스턴스 재시작) R2 HEAD 로 size 비교 후 일치하면 통과.
+     *
+     * 다운로드는 `.tmp` 로 받아 ATOMIC_MOVE 로 rename — 동시 다운로드 race 에서도 partial
+     * file 노출 없음.
+     */
+    fun downloadIfAbsent(objectKey: String, targetFile: File): File {
+        val cachedLen = downloadedKeys[objectKey]
+        if (cachedLen != null && targetFile.exists() && targetFile.length() == cachedLen) {
+            return targetFile
+        }
+        if (targetFile.exists()) {
+            val localLen = targetFile.length()
+            val remoteLen = try {
+                s3.headObject(HeadObjectRequest.builder().bucket(bucket).key(objectKey).build()).contentLength()
+            } catch (_: NoSuchKeyException) {
+                -1L
+            } catch (e: S3Exception) {
+                if (e.statusCode() in MISSING_KEY_STATUS_CODES) -1L else throw e
+            }
+            if (remoteLen >= 0 && remoteLen == localLen) {
+                downloadedKeys[objectKey] = localLen
+                return targetFile
+            }
+        }
+        targetFile.parentFile?.mkdirs()
+        val tmpFile = File(targetFile.parentFile, "${targetFile.name}.tmp.${System.nanoTime()}")
+        try {
+            s3.getObject(
+                GetObjectRequest.builder().bucket(bucket).key(objectKey).build(),
+                tmpFile.toPath(),
+            )
+            Files.move(tmpFile.toPath(), targetFile.toPath(), StandardCopyOption.REPLACE_EXISTING, StandardCopyOption.ATOMIC_MOVE)
+        } catch (e: Throwable) {
+            tmpFile.delete()
+            throw e
+        }
+        val len = targetFile.length()
+        downloadedKeys[objectKey] = len
+        log.info("Downloaded from R2: r2://{}/{} ({} bytes)", bucket, objectKey, len)
+        return targetFile
     }
 
     /** SigV4 presigned GET URL. [ttlSec] 미지정 시 ctor 의 [defaultSignedUrlTtlSec] 사용. */

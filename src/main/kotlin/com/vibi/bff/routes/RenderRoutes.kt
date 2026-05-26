@@ -1,10 +1,13 @@
 package com.vibi.bff.routes
 
 import com.vibi.bff.MAX_UPLOAD_FILE_SIZE
+import com.vibi.bff.model.BgmClip
 import com.vibi.bff.model.RenderConfig
+import com.vibi.bff.model.RenderConfigV3
 import com.vibi.bff.model.RenderInputCacheResponse
 import com.vibi.bff.model.RenderResponse
 import com.vibi.bff.model.RenderStatusResponse
+import com.vibi.bff.model.Segment
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
@@ -22,6 +25,8 @@ import io.ktor.http.content.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
 
@@ -244,6 +249,104 @@ fun Route.renderRoutes(
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
         }
 
+        // v3 — asset-by-reference. 모바일이 R2 에 사전 PUT 한 segment 영상/BGM 의 키만 JSON
+        // 으로 전송. BFF 가 R2 에서 다운로드 후 ffmpeg. Cloud Run body 한도 회피 + 재편집 시
+        // 재업로드 제거 + BGM dedup 자동 해결.
+        post("/v3") {
+            val principal = jwtSecret?.let { call.requireUser(it) }
+            if (objectStore == null) {
+                throw ApiErrorException(
+                    HttpStatusCode.ServiceUnavailable,
+                    errorCode = "r2_disabled",
+                    detail = "v3 render path requires R2",
+                )
+            }
+            val config = call.receive<RenderConfigV3>()
+
+            // R2 → 로컬 asset 캐시 다운로드 (멱등). 같은 인스턴스에서 같은 키는 다운로드 skip.
+            val videoFiles = mutableMapOf<String, File>()
+            val bgmAudioFiles = mutableMapOf<String, File>()
+            withContext(Dispatchers.IO) {
+                for (key in config.segments.map { it.sourceAssetKey }.distinct()) {
+                    val local = File(fileStorage.assetCacheDir, key.substringAfterLast('/'))
+                    objectStore.downloadIfAbsent(key, local)
+                    videoFiles[key] = local
+                }
+                for (key in config.bgmClips.map { it.audioAssetKey }.distinct()) {
+                    val local = File(fileStorage.assetCacheDir, key.substringAfterLast('/'))
+                    objectStore.downloadIfAbsent(key, local)
+                    bgmAudioFiles[key] = local
+                }
+            }
+
+            // v3 → v2 매핑. sourceFileKey 에 assetKey 그대로 사용해 videoFiles/bgmAudioFiles
+            // 맵 key 와 정합. 기존 RenderService.submitRender 시그니처 재사용.
+            val segments = config.segments.map { s ->
+                Segment(
+                    sourceFileKey = s.sourceAssetKey,
+                    order = s.order,
+                    durationMs = s.durationMs,
+                    trimStartMs = s.trimStartMs,
+                    trimEndMs = s.trimEndMs,
+                    volumeScale = s.volumeScale,
+                    speedScale = s.speedScale,
+                )
+            }
+            val bgmClips = config.bgmClips.map { c ->
+                BgmClip(
+                    audioFileKey = c.audioAssetKey,
+                    startMs = c.startMs,
+                    volume = c.volume,
+                    sourceTrimStartMs = c.sourceTrimStartMs,
+                    sourceTrimEndMs = c.sourceTrimEndMs,
+                )
+            }
+
+            val resolvedDirectives = mutableListOf<DirectiveWithStemFiles>()
+            for (directive in config.separationDirectives) {
+                val resolvedStems = mutableListOf<DirectiveStem>()
+                for (selection in directive.selections) {
+                    val file = resolveStemUrlToFile(
+                        audioUrl = selection.audioUrl,
+                        separationService = separationService,
+                        signedUrlService = signedUrlService,
+                        callerUserId = principal?.userId,
+                    )
+                    resolvedStems.add(DirectiveStem(file = file, volume = selection.volume))
+                }
+                if (resolvedStems.isNotEmpty() || directive.muteOriginalSegmentAudio) {
+                    resolvedDirectives.add(
+                        DirectiveWithStemFiles(
+                            rangeStartMs = directive.rangeStartMs,
+                            rangeEndMs = directive.rangeEndMs,
+                            muteOriginalSegmentAudio = directive.muteOriginalSegmentAudio,
+                            stems = resolvedStems,
+                            sourceOffsetMs = directive.sourceOffsetMs,
+                        )
+                    )
+                }
+            }
+
+            // asset cache 의 파일은 모든 job 의 공유 소유물 — 다른 동시 render 가 같은 키
+            // 재사용 가능하므로 job 완료 시 cleanup 대상에서 제외. assetCacheDir TTL sweep
+            // 가 별도로 회수.
+            val jobId = renderService.submitRender(
+                legacyVideoFile = null,
+                videoFiles = videoFiles,
+                bgmAudioFiles = bgmAudioFiles,
+                bgmClips = bgmClips,
+                videoDurationMs = null,
+                segments = segments,
+                separationDirectives = resolvedDirectives,
+                inputFilesToCleanup = emptyList(),
+                outputKind = config.outputKind,
+                quality = config.quality,
+                userId = principal?.userId,
+                sourceDurationMs = computeRenderSourceDurationMsV3(config),
+            )
+            call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
+        }
+
         get("/{jobId}/status") {
             val principal = jwtSecret?.let { call.requireUser(it) }
             val jobId = call.parameters["jobId"]
@@ -282,8 +385,15 @@ fun Route.renderRoutes(
                 throw NotFoundException("Render job not found: $jobId")
             }
 
-            if (job.status != "COMPLETED" || !job.outputFile.exists()) {
+            if (job.status != "COMPLETED") {
                 throw NotFoundException("Render not ready: status=${job.status}")
+            }
+            // R2 backend 가 있으면 outputFile 부재도 통과 — uploadIfAbsent 가 R2 hit 확인 후
+            // presigned URL 로 redirect. Cloud Run idle scale-down 후 또는 TTL cleanup 후
+            // 로컬 file 만 사라진 케이스에서도 다운로드 유지. R2 도 없고 file 도 없으면
+            // uploadIfAbsent 가 IllegalStateException → 500 (운영상 R2 lifecycle 만료된 옛 잡).
+            if (objectStore == null && !job.outputFile.exists()) {
+                throw NotFoundException("Render output missing: $jobId")
             }
 
             val ext = job.outputFile.extension.ifBlank { "mp4" }
@@ -398,3 +508,10 @@ internal fun computeRenderSourceDurationMs(config: com.vibi.bff.model.RenderConf
     }
     return (config.videoDurationMs ?: 0L).coerceAtLeast(0L)
 }
+
+internal fun computeRenderSourceDurationMsV3(config: RenderConfigV3): Long =
+    config.segments.sumOf { seg ->
+        val ts = seg.trimStartMs ?: 0L
+        val te = seg.trimEndMs?.takeIf { it > 0L } ?: seg.durationMs
+        (te - ts).coerceAtLeast(0L)
+    }

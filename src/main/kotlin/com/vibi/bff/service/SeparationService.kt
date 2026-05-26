@@ -36,10 +36,10 @@ import java.util.concurrent.TimeUnit
 // READY/FAILED) — 인메모리 fine-grained 상태가 사용자 progress UI source, DB 는 dispatcher 의
 // capacity 카운트 source.
 //
-// READY + consumedByMixJobId=null → eligible for mix reservation.
-// READY + consumedByMixJobId=set  → mix in flight; blocks re-submit.
-// COMPLETED mix triggers dispose(jobId); FAILED is kept briefly so clients
-// can read the error before the cleanup task reaps it.
+// READY 잡은 abandonTtlMs 가 지나면 cleanupAbandoned 가 dispose 로 회수. FAILED 도
+// FAILED_JOB_TTL_MS 짧은 grace 후 회수. 모바일이 stem URL 들을 받아 로컬 mix 하므로
+// 서버 측 mix 잡 / reservation 상태머신은 없음 — stem 들은 클라가 다 받은 뒤 abandon TTL
+// 으로만 reap.
 
 /** speaker stem id = "$SPEAKER_STEM_PREFIX$idx" (idx 0-based). 모바일 Stem.SPEAKER_PREFIX 와 일치. */
 internal const val SPEAKER_STEM_PREFIX = "speaker_"
@@ -52,24 +52,18 @@ data class SeparationJob(
     @Volatile var error: String? = null,
     val outputDir: File,
     @Volatile var stems: List<LocalStem> = emptyList(),
-    @Volatile var consumedByMixJobId: String? = null,
     val createdAt: Long = System.currentTimeMillis(),
-    /** SeparationService.dedupIndex 와 1:1 — 버튼 연타로 동일 (source+spec) 가
-     * 다시 들어와도 같은 jobId 를 돌려주기 위한 키. null 이면 dedup 대상 외
-     * (legacy upload path). dispose() 가 이 키로 index 정리. */
-    val dedupKey: String? = null,
     /** READY 시 ffprobe 로 잰 stem FLAC 의 실측 길이 (ms). 클라이언트가 timeline 막대 길이를
      * 사용자 선택값 대신 이 값으로 보정해 stem 파일과 1:1 매칭. null = 측정 실패 또는 미-READY. */
     @Volatile var actualDurationMs: Long? = null,
     /** submit 의 principal.userId 가 그대로 보존. null 이면 미인증 잡 (테스트 / jwtSecret
-     * 미주입 분기). 라우트가 status/mix 호출 시 caller principal 과 매칭 — mismatch 면
-     * 다른 사용자가 남의 잡을 mix command 로 소비/dispose 시키는 IDOR 차단. */
+     * 미주입 분기). 라우트가 status 호출 시 caller principal 과 매칭 — mismatch 는 IDOR
+     * existence oracle 차단을 위해 not-found 로 응답. */
     val ownerUserId: UUID? = null,
     // ── Dispatcher 가 QUEUED row 를 pickup 한 뒤 runPipeline 에 넘기는 입력 ────────────
     // submit() 가 받은 그대로 보존. claim 시점에 dispatcher 가 in-memory lookup 으로 꺼냄.
     val sourceFile: File,
     val spec: SeparationSpec,
-    val audioPreExtracted: Boolean,
     val sourceDurationMs: Long = 0L,
     val renderJobId: String? = null,
 )
@@ -124,11 +118,6 @@ class SeparationService(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
-    /** dedupKey → jobId. submit 의 atomic check-and-claim 으로 같은 키 중복 submit
-     * 차단 (버튼 연타 방어). 키는 SeparationRoutes.buildSeparationDedupKey 가 계산.
-     * dispose() 가 SeparationJob.dedupKey 로 entry 정리. FAILED 잡은 dedup 대상
-     * 아님 (재시도 허용). */
-    private val dedupIndex = ConcurrentHashMap<String, String>()
     private val cleanup = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "separation-cleanup").apply { isDaemon = true }
     }
@@ -162,8 +151,8 @@ class SeparationService(
     }
 
     /**
-     * In-memory 전용 lookup — DB fallback 없음. dispatcher / dedup / mix 예약 등 본 인스턴스가
-     * 소유 중인 잡만 다루는 분기에서 사용 (재구축된 잡은 source/spec 이 placeholder 라 쓸모없음).
+     * In-memory 전용 lookup — DB fallback 없음. dispatcher / mix 예약 등 본 인스턴스가 소유 중인
+     * 잡만 다루는 분기에서 사용 (재구축된 잡은 source/spec 이 placeholder 라 쓸모없음).
      */
     private fun getInMemoryJob(jobId: String): SeparationJob? = jobs[jobId]
 
@@ -184,8 +173,7 @@ class SeparationService(
             outputDir = outputDir,
             ownerUserId = ready.ownerUserId,
             sourceFile = File(outputDir, ".rebuilt-no-source"),
-            spec = SeparationSpec(mediaType = "AUDIO"),
-            audioPreExtracted = true,
+            spec = SeparationSpec(),
         ).apply {
             status = "READY"
             progress = 100
@@ -198,81 +186,16 @@ class SeparationService(
     }
 
     /**
-     * 주어진 [dedupKey] 로 등록된 jobId 중 still-active 한 것을 반환. active 는
-     * READY 직전까지의 진행 상태 + READY-but-not-yet-consumed-by-mix. FAILED 나
-     * 이미 mix 에 소비된 READY 잡은 active 가 아니므로 null 반환 → caller 는 새
-     * 잡을 만들면 됨. SeparationRoutes 의 pre-check 가 disk 낭비 회피 용도로 사용.
-     */
-    fun findActiveJob(dedupKey: String): String? {
-        val jobId = dedupIndex[dedupKey] ?: return null
-        val job = jobs[jobId] ?: return null
-        val active = job.status != "FAILED" &&
-            !(job.status == "READY" && job.consumedByMixJobId != null)
-        return if (active) jobId else null
-    }
-
-    /**
-     * [submit] 의 결과 — 새 잡인지 dedup-hit 기존 잡 참조인지 caller 가 분기.
+     * 새 분리 잡을 등록하고 비동기 파이프라인을 시작. 반환은 jobId. 라우트의 크레딧 선차감
+     * 흐름은 [providedJobId] 로 미리 생성한 ID 를 차감 ledger key 로 사용 — null 이면 내부에서
+     * "sep-<UUID>" 생성.
      *
-     * 라우트의 크레딧 선차감 흐름은 submit 호출 전에 [providedJobId] 를 미리 생성해 차감
-     * ledger 의 idempotency key 로 사용한다. submit 이 isNew=false 를 돌려주면 다른 동시
-     * caller 가 같은 dedupKey 로 먼저 등록된 것 → 우리가 선차감한 만큼은 환불해야 한다.
-     */
-    data class SubmitResult(val jobId: String, val isNew: Boolean)
-
-    /**
-     * [dedupKey] 가 non-null 이면 atomic check-and-claim — 같은 키의 active 잡이 있으면
-     * [sourceFile] 을 삭제하고 기존 jobId 를 isNew=false 로 반환한다. dispose() 가 같은
-     * 키 entry 를 정리하므로 disposed 잡의 키는 자유롭게 재사용된다.
-     *
-     * [providedJobId] 가 non-null 이면 해당 ID 로 잡을 등록 — 라우트가 크레딧 선차감 ledger 의
-     * 키로 미리 생성한 경우. null 이면 내부에서 "sep-<UUID>" 생성. dedup-hit 분기에서는 무시
-     * (기존 잡 ID 를 그대로 반환).
-     *
-     * [userId] / [sourceDurationMs] / [renderJobId] 는 admin 대시보드 분석 row 용.
-     * userId == null 이면 분석 write skip (테스트 등). renderJobId 는 spec.editedRenderJobId
-     * 경유 시 RenderJobsTable 의 PK 와 동일 텍스트, legacy 업로드 경로면 null.
+     * [userId] / [sourceDurationMs] / [renderJobId] 는 admin 대시보드 분석 row 용. userId == null
+     * 이면 분석 write skip (테스트 등).
      */
     fun submit(
         sourceFile: File,
         spec: SeparationSpec,
-        audioPreExtracted: Boolean,
-        dedupKey: String? = null,
-        userId: UUID? = null,
-        sourceDurationMs: Long = 0L,
-        renderJobId: String? = null,
-        providedJobId: String? = null,
-    ): SubmitResult {
-        if (dedupKey != null) {
-            // synchronized(dedupIndex) 로 (check, claim) 을 원자화 — 두 동시 호출이
-            // 동일 키로 들어와도 한 쪽만 새 잡 생성, 다른 쪽은 기존 jobId 반환.
-            // findActiveJob 자체는 비-원자이지만 critical section 안에서 호출하므로 OK.
-            synchronized(dedupIndex) {
-                findActiveJob(dedupKey)?.let { existing ->
-                    sourceFile.delete()
-                    log.info("Separation dedup hit: key={} → existing jobId={}", dedupKey, existing)
-                    return SubmitResult(existing, isNew = false)
-                }
-                val jobId = createAndLaunch(
-                    sourceFile, spec, audioPreExtracted, dedupKey,
-                    userId, sourceDurationMs, renderJobId, providedJobId,
-                )
-                dedupIndex[dedupKey] = jobId
-                return SubmitResult(jobId, isNew = true)
-            }
-        }
-        val jobId = createAndLaunch(
-            sourceFile, spec, audioPreExtracted, dedupKey = null,
-            userId, sourceDurationMs, renderJobId, providedJobId,
-        )
-        return SubmitResult(jobId, isNew = true)
-    }
-
-    private fun createAndLaunch(
-        sourceFile: File,
-        spec: SeparationSpec,
-        audioPreExtracted: Boolean,
-        dedupKey: String?,
         userId: UUID? = null,
         sourceDurationMs: Long = 0L,
         renderJobId: String? = null,
@@ -283,11 +206,9 @@ class SeparationService(
         val job = SeparationJob(
             jobId = jobId,
             outputDir = outputDir,
-            dedupKey = dedupKey,
             ownerUserId = userId,
             sourceFile = sourceFile,
             spec = spec,
-            audioPreExtracted = audioPreExtracted,
             sourceDurationMs = sourceDurationMs,
             renderJobId = renderJobId,
         )
@@ -304,7 +225,6 @@ class SeparationService(
                     log.error("Failed to enqueue separation jobId={}: {}", jobId, e.message, e)
                     job.status = "FAILED"
                     job.error = "enqueue failed"
-                    dedupKey?.let { dedupIndex.remove(it, jobId) }
                     // 선차감 환불 — 라우트에서 reserve 한 크레딧이 있다면 복원.
                     runCatching { onJobFailed?.invoke(jobId) }
                         .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", jobId, ex.message) }
@@ -353,15 +273,14 @@ class SeparationService(
      */
     fun resumePollingForJob(jobId: String, persoProjectSeq: Long, ownerUserId: UUID?) {
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
-        // sourceFile/spec/audioPreExtracted 는 본 경로에서 사용 안 함 — placeholder 로 주입.
+        // sourceFile/spec 는 본 경로에서 사용 안 함 — placeholder 로 주입.
         val placeholderSource = File(outputDir, ".resumed-no-source")
         val job = SeparationJob(
             jobId = jobId,
             outputDir = outputDir,
             ownerUserId = ownerUserId,
             sourceFile = placeholderSource,
-            spec = SeparationSpec(mediaType = "AUDIO"),
-            audioPreExtracted = true,
+            spec = SeparationSpec(),
         ).apply {
             status = "PROCESSING"
             progressReason = "Resumed after restart"
@@ -380,7 +299,6 @@ class SeparationService(
             } catch (e: Exception) {
                 job.status = "FAILED"
                 job.error = e.message
-                job.dedupKey?.let { dedupIndex.remove(it, jobId) }
                 queue?.markFailed(jobId)
                 runCatching { onJobFailed?.invoke(jobId) }
                     .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", jobId, ex.message) }
@@ -398,7 +316,7 @@ class SeparationService(
     private suspend fun executePipeline(job: SeparationJob) {
         try {
             externalCalls.withExternalCall("perso", "audio-separation") {
-                runPipeline(job, job.sourceFile, job.spec, job.audioPreExtracted) { projectSeq ->
+                runPipeline(job, job.sourceFile) { projectSeq ->
                     // Perso 가 projectSeq 발급한 직후 → DB 를 SUBMITTING → PROCESSING 으로.
                     queue?.markProcessing(job.jobId, projectSeq)
                 }
@@ -406,17 +324,11 @@ class SeparationService(
         } catch (e: Exception) {
             job.status = "FAILED"
             job.error = e.message
-            // FAILED 상태에선 같은 키 재submit 이 새 잡을 만들어야 하므로 즉시
-            // dedup entry 정리 (cleanupAbandoned 의 FAILED_JOB_TTL 까지 기다리면
-            // 그동안 mobile 이 재시도해도 실패한 잡 ID 만 받게 됨).
-            job.dedupKey?.let { dedupIndex.remove(it, job.jobId) }
             queue?.markFailed(job.jobId)
             // 선차감 환불 — 라우트에서 reserve 한 크레딧이 있다면 복원. 환불 자체가 throw 해도
             // pipeline 의 FAILED 마킹은 그대로 유지 (runCatching).
             runCatching { onJobFailed?.invoke(job.jobId) }
                 .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", job.jobId, ex.message) }
-            // Leave sourceFile on disk — caller can retry; cleanupAbandoned
-            // reaps it via dispose() once FAILED_JOB_TTL_MS passes.
             log.error("Separation pipeline failed: jobId={}", job.jobId, e)
         } finally {
             // 끝 → capacity 한 칸 비움. dispatcher 가 즉시 다음 QUEUED 를 pickup 하도록.
@@ -424,30 +336,8 @@ class SeparationService(
         }
     }
 
-    // Atomically reserve stems for a given mix. Returns null if the job is
-    // not READY or has already been consumed, ensuring stems can never be
-    // double-deleted by two concurrent mix submissions.
-    fun reserveForMix(jobId: String, mixJobId: String): SeparationJob? {
-        val job = jobs[jobId] ?: return null
-        synchronized(job) {
-            if (job.status != "READY" || job.consumedByMixJobId != null) return null
-            job.consumedByMixJobId = mixJobId
-            return job
-        }
-    }
-
-    fun releaseReservation(jobId: String) {
-        val job = jobs[jobId] ?: return
-        synchronized(job) {
-            if (job.status == "READY") job.consumedByMixJobId = null
-        }
-    }
-
     fun dispose(jobId: String) {
         val job = jobs.remove(jobId) ?: return
-        // remove(key, expectedValue) 로 stale entry (이미 다른 잡이 같은 키로 교체된 경우)
-        // 는 건드리지 않음. FAILED 경로에서도 동일 정리가 일어나지만 멱등 안전.
-        job.dedupKey?.let { dedupIndex.remove(it, jobId) }
         job.outputDir.deleteRecursively()
         log.info("Disposed separation job: {}", jobId)
     }
@@ -457,50 +347,19 @@ class SeparationService(
     private suspend fun runPipeline(
         job: SeparationJob,
         sourceFile: File,
-        spec: SeparationSpec,
-        audioPreExtracted: Boolean,
         onPersoProjectSeq: suspend (Long) -> Unit = {},
     ) {
-        val isVideo = spec.mediaType == "VIDEO"
-
-        // Perso 는 audio-only 업로드만 받음. MediaTrimmer.trim 을 거친 입력은 이미 sample-accurate
-        // PCM WAV (Perso 분리 파이프라인이 받는 포맷) 이라 그대로 보내고, no-trim 영상 fallback 만
-        // MP3 추출이 필요.
-        // audioPreExtracted 는 caller 가 명시한 신호 (라우트의 maybeTrim 결과 추론).
-        // 이전엔 sourceFile.extension 으로 sniff 했으나, 멀티파트 originalFileName 이
-        // attacker-controlled 라 video 를 trimmed 확장자로 박아 MP3 추출 단계를 우회 가능했음 — 명시 flag 로 단절.
+        // 모바일이 항상 audio (m4a/mp3/wav) 를 보내므로 sourceFile 그대로 Perso 에 업로드.
+        // 라우트가 화이트리스트 검증 + size 제한 적용. video → audio 추출은 모바일 책임.
         job.status = "PROCESSING"
-        val uploadFile = when {
-            audioPreExtracted -> sourceFile
-            isVideo -> {
-                job.progressReason = "Extracting audio"
-                val mp3 = File(job.outputDir, "audio.mp3")
-                extractAudioForUpload(sourceFile, mp3)
-                sourceFile.delete()
-                mp3
-            }
-            else -> sourceFile
-        }
-
         job.status = "UPLOADING_UPSTREAM"
         job.progressReason = "Uploading"
-        // uploadFile cleanup 정책:
-        //  - audioPreExtracted=true → uploadFile = editedSourceDir/*.trimmed.wav (caller-owned
-        //    PCM WAV). 실패해도 무조건 정리 — dispose() 는 outputDir 만 reap 하므로 finally 필요.
-        //    원본 mp4 는 maybeTrim 이 이미 삭제했으므로 retry 도 불가, 누수 방지가 옳음.
-        //  - 그 외 (legacy AUDIO upload, video→MP3 extract) → 성공 시에만 delete.
-        //    실패 시 sourceFile (legacy: caller-owned 업로드 / video: outputDir 안 mp3) 을
-        //    보존해 caller 가 동일 잡으로 retry 가능 ("Leave sourceFile on disk — caller can retry").
-        val registration = if (audioPreExtracted) {
-            try {
-                persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
-            } finally {
-                uploadFile.delete()
-            }
-        } else {
-            val r = persoClient.uploadMedia(PersoMediaType.AUDIO, uploadFile)
-            uploadFile.delete()
-            r
+        // sourceFile 은 라우트가 caller-owned 로 넘긴 audio. 업로드 성공/실패 무관하게 finally
+        // 로 정리 — dispose() 는 outputDir 만 reap 하므로 따로 닦지 않으면 디스크 누수.
+        val registration = try {
+            persoClient.uploadMedia(PersoMediaType.AUDIO, sourceFile)
+        } finally {
+            sourceFile.delete()
         }
 
         // Perso 전용 audio-separation 프로젝트 생성. audio-only 업로드라 isVideoProject=false.
@@ -517,9 +376,7 @@ class SeparationService(
         // 폴링 전략: 음성분리 처리 시간 ≈ 구간 길이 × 3. 매우 긴 영상이면 5분으로 cap —
         // 그 이상 sleep 하면 client 가 PROCESSING 상태에서 progressReason 변화 없이
         // 멈춰있는 것처럼 보여 timeout 으로 의심받음. 5분 후엔 정상 polling 으로 진입.
-        val rangeMs = if (spec.trimStartMs != null && spec.trimEndMs != null) {
-            spec.trimEndMs - spec.trimStartMs
-        } else 0L
+        val rangeMs = job.sourceDurationMs
         val initialDelayMs = (if (rangeMs > 0) rangeMs * 3 else 30_000L)
             .coerceAtMost(5 * 60_000L)
         runPipelineDownloadPhase(job, projectSeq, initialDelayMs)
@@ -827,12 +684,13 @@ class SeparationService(
         // normalize=0: voice_all 은 화자 stem 들을 원본 발화 bus 로 재조립하는 것 →
         // 원본 = sum(speaker stems) 이므로 평균(default normalize=1) 이 아니라 합산이
         // 맞음. 평균을 내면 voice_all 자체가 -6dB(2 화자) 이상 작아지고, 그걸 또
-        // StemMixService 가 다시 amix 하면 누적 -12dB ~ 까지 떨어짐.
+        // downstream (RenderService.buildFfmpegCommand 의 separation amix) 가 다시
+        // 입력으로 받으면 누적 -12dB ~ 까지 떨어짐.
         cmd += listOf(
             "-filter_complex",
             "${labels}amix=inputs=${inputs.size}:duration=longest:dropout_transition=0:normalize=0[out]"
         )
-        // FLAC lossless — voice_all 은 downstream StemMixService 가 다시 amix 의 입력으로 쓰므로
+        // FLAC lossless — voice_all 은 downstream render amix 의 입력으로 쓰므로
         // mp3 같은 lossy 단계가 끼면 음질 손실 누적. compression_level 5 는 ffmpeg default,
         // encode 시간/크기 균형.
         cmd += listOf("-map", "[out]", "-c:a", "flac", "-compression_level", "5", output.absolutePath)
@@ -858,15 +716,6 @@ class SeparationService(
         if (!output.exists()) throw RuntimeException("ffmpeg flac transcode produced no output: ${input.name}")
     }
 
-    /**
-     * 영상 → mp3 audio 추출. 음성분리는 audio 만 필요하므로 video 트랙 통째로 버림.
-     */
-    private suspend fun extractAudioForUpload(input: File, output: File) {
-        extractMp3(input, output, quality = 5, timeoutMinutes = 10, label = "ffmpeg audio extract")
-        log.info("ffmpeg audio extract done: input={} ({}B) output={} ({}B)",
-            input.name, input.length(), output.name, output.length())
-    }
-
     private suspend fun drainAndAwait(process: Process, label: String) {
         FfmpegRunner.drainAndAwait(process, label, timeoutMinutes = 10)
     }
@@ -876,8 +725,7 @@ class SeparationService(
         jobs.entries
             .filter { (_, j) ->
                 val age = now - j.createdAt
-                val abandoned = j.status == "READY" && j.consumedByMixJobId == null &&
-                    age > config.abandonTtlMs
+                val abandoned = j.status == "READY" && age > config.abandonTtlMs
                 // FAILED jobs get a short grace period so clients can observe
                 // the error once, then are reaped independently of the longer
                 // abandoned-READY TTL.

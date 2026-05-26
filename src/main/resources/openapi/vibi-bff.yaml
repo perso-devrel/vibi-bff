@@ -5,7 +5,7 @@ info:
     vibi Backend-For-Frontend API.
 
     - Perso AI 프록시 — 음성분리
-    - 로컬 ffmpeg 파이프라인 — segment concat / BGM mix / 음원분리 stem mix
+    - 로컬 ffmpeg 파이프라인 — segment concat + BGM mix + 음원분리 stem amix
     - Google / Apple Sign In 검증 + Postgres user upsert + HS256 access token 발급
 
     모든 운영 endpoint 는 `/api/v2` 아래에 마운트된다. 1MB 이상 binary 응답
@@ -32,7 +32,7 @@ tags:
   - name: Render
     description: ffmpeg 기반 렌더 파이프라인 (segments / bgm / 음원분리 directive)
   - name: Separation
-    description: Perso 음성분리 → stem 다운로드 + 사용자 mix 합성
+    description: Perso 음성분리 → stem 다운로드 (사용자 mix 는 모바일 로컬에서)
   - name: Testdata
     description: 개발/QA 용 mock 음원분리 데이터 — production 비활성 권장
 
@@ -387,21 +387,22 @@ paths:
       tags: [Separation]
       summary: 음성분리 잡 제출
       description: |
-        source 는 두 가지 중 하나:
-        - multipart `file` — 새 영상/오디오 업로드
-        - `spec.editedRenderJobId` — 완료된 `/render` 출력 재사용 (파일 파트 없이 spec 만)
+        모바일이 trim + audio extract 까지 끝낸 audio (m4a / mp3 / wav) 만 받는다.
+        BFF 는 받은 file 을 그대로 Perso 에 forward — ffmpeg 가공 단계 없음.
+        Perso 비호환 포맷 (video/*, flac, ogg 등) 은 400 `unsupported_audio_format` 으로 reject.
+        최대 100MB.
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [spec]
+              required: [file, spec]
               properties:
                 file:
                   type: string
                   format: binary
-                  description: editedRenderJobId 가 spec 에 없을 때 필수
+                  description: audio bytes (m4a/mp3/wav). 최대 100MB.
                 spec:
                   type: string
                   description: SeparationSpec JSON
@@ -412,7 +413,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SeparationResponse' }
         '400':
-          description: spec 누락 / trim 범위 invalid / source 없음
+          description: |
+            spec 누락 / file 누락 / `unsupported_audio_format` (video, flac 등) /
+            multipart 100MB 초과
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -472,85 +475,6 @@ paths:
           description: 토큰 검증 실패
         '404':
           description: 잡/stem/파일 없음
-
-  /api/v2/separate/{jobId}/mix:
-    post:
-      tags: [Separation]
-      summary: 사용자 선택 stem 들을 단일 mp3 로 mix
-      description: |
-        성공 시 원본 separation stems 는 dispose (디스크에서 제거). 호출 후엔 동일
-        separation jobId 의 stem 다운로드 불가. 실패 시엔 reservation 해제 후 stems 유지.
-      parameters:
-        - in: path
-          name: jobId
-          required: true
-          schema: { type: string }
-      requestBody:
-        required: true
-        content:
-          application/json:
-            schema: { $ref: '#/components/schemas/StemMixRequest' }
-      responses:
-        '202':
-          description: mix 잡 접수
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StemMixResponse' }
-        '400':
-          description: stems 비어 있음 / unknown stemId
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-        '409':
-          description: separation 미완료 또는 이미 다른 mix 가 점유 중
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-
-  /api/v2/separate/mix/{mixJobId}:
-    get:
-      tags: [Separation]
-      summary: mix 잡 상태
-      parameters:
-        - in: path
-          name: mixJobId
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: status=COMPLETED 일 때 downloadUrl 동봉
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/StemMixStatusResponse' }
-        '404':
-          description: mix 잡 없음
-          content:
-            application/json:
-              schema: { $ref: '#/components/schemas/ErrorResponse' }
-
-  /api/v2/separate/mix/{mixJobId}/download:
-    get:
-      tags: [Separation]
-      summary: mix 결과 mp3 다운로드 (HMAC 토큰 필수)
-      parameters:
-        - in: path
-          name: mixJobId
-          required: true
-          schema: { type: string }
-        - in: query
-          name: token
-          required: true
-          schema: { type: string }
-      responses:
-        '200':
-          description: mix mp3
-          content:
-            audio/mpeg:
-              schema: { type: string, format: binary }
-        '403':
-          description: 토큰 검증 실패
-        '404':
-          description: mix 미완료 / 파일 없음
 
   # ---------------------------------------------------------------- Testdata (mock)
   /api/v2/testdata/separation/list:
@@ -869,27 +793,13 @@ components:
     # -------------------------- Separation
     SeparationSpec:
       type: object
-      required: [mediaType]
+      description: |
+        BFF 가 받는 audio 의 메타. 모바일이 trim + audio extract 까지 끝내고 보내므로
+        trim window / mediaType / editedRenderJobId 등 옛 필드는 surface 에서 제거.
       properties:
-        mediaType:
-          type: string
-          enum: [VIDEO, AUDIO]
         sourceLanguageCode:
           type: string
           default: auto
-        trimStartMs:
-          type: integer
-          format: int64
-          nullable: true
-          description: trimStartMs / trimEndMs 는 함께 지정해야 함 (≥500ms 구간)
-        trimEndMs:
-          type: integer
-          format: int64
-          nullable: true
-        editedRenderJobId:
-          type: string
-          nullable: true
-          description: 완료된 `/render` 출력 재사용. file part 와 동시 지정 시 이 값이 우선.
 
     SeparationResponse:
       type: object
@@ -930,10 +840,6 @@ components:
         stems:
           type: array
           items: { $ref: '#/components/schemas/StemInfo' }
-        mixJobId:
-          type: string
-          nullable: true
-          description: mix 가 이 separation 을 점유했을 때 그 mix jobId
         actualDurationMs:
           type: integer
           format: int64
@@ -955,43 +861,6 @@ components:
           description: |
             queuePosition × 최근 평균 처리 시간(초) 추정 대기. 표본 부족 시 보수적 fallback.
             QUEUED 가 아니거나 추정 불가면 null.
-
-    StemMixSelection:
-      type: object
-      required: [stemId]
-      properties:
-        stemId: { type: string }
-        volume: { type: number, format: float, default: 1.0 }
-
-    StemMixRequest:
-      type: object
-      required: [stems]
-      properties:
-        stems:
-          type: array
-          minItems: 1
-          items: { $ref: '#/components/schemas/StemMixSelection' }
-
-    StemMixResponse:
-      type: object
-      required: [mixJobId]
-      properties:
-        mixJobId: { type: string }
-
-    StemMixStatusResponse:
-      type: object
-      required: [mixJobId, status]
-      properties:
-        mixJobId: { type: string }
-        status:
-          type: string
-          enum: [PROCESSING, COMPLETED, FAILED]
-        progress: { type: integer, nullable: true }
-        error: { type: string, nullable: true }
-        downloadUrl:
-          type: string
-          nullable: true
-          description: status=COMPLETED 일 때 signed BFF URL
 
     # -------------------------- Testdata
     TestdataSeparationFolder:

@@ -13,13 +13,9 @@ private val multipartLog = LoggerFactory.getLogger("MultipartUtils")
 
 /**
  * Parse a "single file + JSON spec" multipart that tolerates a missing `file`
- * part — used by the separation submit endpoint, which accepts either a
- * fresh upload **or** a reference to an already-rendered output via the
- * spec (`editedRenderJobId`). Caller resolves the final source file via
- * [com.vibi.bff.service.MediaSourceResolver].
- *
- * Still requires the spec — without it we can't know which path the
- * caller intended.
+ * part. The caller decides whether the missing file is an error (it is for
+ * the separation submit endpoint today) — this helper just hands back the
+ * pair, plus disk cleanup if spec parsing throws.
  */
 internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
     multipart: MultiPartData,

@@ -47,10 +47,8 @@ fun testAppConfig(
     ),
     separation = SeparationConfig(
         abandonTtlMs = 1_800_000,
-        mixTtlMs = 600_000,
         signingSecret = "a".repeat(64),
         urlTtlSec = 1_800,
-        mixUrlTtlSec = 600,
         maxPersoInFlight = 2,
     ),
     auth = AuthConfig(

@@ -44,6 +44,10 @@ jobs:
 
       - name: Build admin-ui (vite)
         working-directory: admin-ui
+        env:
+          # Vite 는 `VITE_*` 를 빌드 타임에 번들에 인라인 — Cloud Run runtime env 로는 닿지 않는다.
+          # 누락 시 LoginPage 가 "VITE_GOOGLE_OAUTH_CLIENT_ID_ADMIN 빌드 env 가 없습니다." 로 표시.
+          VITE_GOOGLE_OAUTH_CLIENT_ID_ADMIN: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID_ADMIN }}
         run: |
           npm ci --silent
           npm run build
