@@ -387,21 +387,22 @@ paths:
       tags: [Separation]
       summary: 음성분리 잡 제출
       description: |
-        source 는 두 가지 중 하나:
-        - multipart `file` — 새 영상/오디오 업로드
-        - `spec.editedRenderJobId` — 완료된 `/render` 출력 재사용 (파일 파트 없이 spec 만)
+        모바일이 trim + audio extract 까지 끝낸 audio (m4a / mp3 / wav) 만 받는다.
+        BFF 는 받은 file 을 그대로 Perso 에 forward — ffmpeg 가공 단계 없음.
+        Perso 비호환 포맷 (video/*, flac, ogg 등) 은 400 `unsupported_audio_format` 으로 reject.
+        최대 100MB.
       requestBody:
         required: true
         content:
           multipart/form-data:
             schema:
               type: object
-              required: [spec]
+              required: [file, spec]
               properties:
                 file:
                   type: string
                   format: binary
-                  description: editedRenderJobId 가 spec 에 없을 때 필수
+                  description: audio bytes (m4a/mp3/wav). 최대 100MB.
                 spec:
                   type: string
                   description: SeparationSpec JSON
@@ -412,7 +413,9 @@ paths:
             application/json:
               schema: { $ref: '#/components/schemas/SeparationResponse' }
         '400':
-          description: spec 누락 / trim 범위 invalid / source 없음
+          description: |
+            spec 누락 / file 누락 / `unsupported_audio_format` (video, flac 등) /
+            multipart 100MB 초과
           content:
             application/json:
               schema: { $ref: '#/components/schemas/ErrorResponse' }
@@ -869,27 +872,13 @@ components:
     # -------------------------- Separation
     SeparationSpec:
       type: object
-      required: [mediaType]
+      description: |
+        BFF 가 받는 audio 의 메타. 모바일이 trim + audio extract 까지 끝내고 보내므로
+        trim window / mediaType / editedRenderJobId 등 옛 필드는 surface 에서 제거.
       properties:
-        mediaType:
-          type: string
-          enum: [VIDEO, AUDIO]
         sourceLanguageCode:
           type: string
           default: auto
-        trimStartMs:
-          type: integer
-          format: int64
-          nullable: true
-          description: trimStartMs / trimEndMs 는 함께 지정해야 함 (≥500ms 구간)
-        trimEndMs:
-          type: integer
-          format: int64
-          nullable: true
-        editedRenderJobId:
-          type: string
-          nullable: true
-          description: 완료된 `/render` 출력 재사용. file part 와 동시 지정 시 이 값이 우선.
 
     SeparationResponse:
       type: object

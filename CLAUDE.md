@@ -33,7 +33,7 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 - `plugins/` — CORS, Serialization (`AppJson = Json { ignoreUnknownKeys=true, encodeDefaults=true }`), `ErrorHandling` (StatusPages), `Routing`.
 - `routes/` — `/api/v2` (`AuthRoutes` · `LanguageRoutes` · `RenderRoutes` (+ `/inputs`) · `SeparationRoutes` · `DownloadResponder`·`MultipartUtils` 헬퍼). dev mock 으로 `/testdata/separation/*`.
 - `model/` — `AuthModels` · `BffModels` · `PersoModels`. BFF DTO 와 Perso upstream DTO 분리, `@SerialName` 으로 snake_case ↔ camelCase 매핑.
-- `service/` — `PersoClient`, `PersoPolling`, `FileStorageService`, `MediaSourceResolver`, `MediaTrimmer`, `RenderService`, `RenderInputCacheService`, `SeparationService`, `StemMixService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
+- `service/` — `PersoClient`, `PersoPolling`, `FileStorageService`, `MediaTrimmer` (audio duration probe 전용), `RenderService`, `RenderInputCacheService`, `SeparationService`, `StemMixService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
 
 > 과거 `AutoSubtitleService` / `AutoDubService` / `LipSyncService` + 관련 route·DTO 는 **commit `52f8d7c refactor(bff): sticker/자막/더빙 surface 절단`** 으로 일괄 제거. 모바일에 잔존하는 caller (BffApi 메서드들 + Auto*RepositoryImpl) 는 호출 시 404 — 재도입 작업 시 본 commit 의 디프를 base 로 복원하지 말고 새로 설계할 것.
 
@@ -44,7 +44,7 @@ POST /api/v2/auth/{google,apple}        # ID Token → BFF JWT 교환
 POST /api/v2/render/inputs              # video bytes 한 번만 업로드 → inputId
 POST /api/v2/render                     # multipart, multi-segment 합성 (inputId 재사용)
 GET  /api/v2/render/{id}/{status,download}
-POST /api/v2/separate                   # source = multipart file or spec.editedRenderJobId
+POST /api/v2/separate                   # audio-only multipart (m4a/mp3/wav, ≤100MB)
 GET  /api/v2/separate/{id}              # stem + 서명 URL
 GET  /api/v2/separate/{id}/stem/{stemId}        # token=*** 필수
 POST /api/v2/separate/{id}/mix          # 사용자 stem 선택 → amix (normalize=0)
@@ -82,7 +82,7 @@ GET  /api/v2/testdata/separation/*      # (dev mock)
 
 **원인**: Perso 분리 파이프라인이 FLAC 파일은 받아 두기만 하고 실제 처리 단계에서 거절. `hasFailed` 플래그가 false 라 단순 status 만 봐서는 안 잡힘. WAV PCM / MP3 는 정상 처리 (`Transcribing → Completed`).
 
-**해결 패턴**: `MediaTrimmer.OUTPUT_EXTENSION = "wav"` + `-c:a pcm_s16le`. sample-accurate 유지 + Perso 호환. 회귀 가드는 `PersoLiveSeparationIT` (env opt-in, fixture 부재 시 skip). 한때 FLAC 으로 통일 시도했다가 (`997c683`) 본 회귀로 되돌림.
+**해결 패턴**: BFF surface 화이트리스트 = m4a / mp3 / wav (Perso 호환 audio). flac / video / ogg 등은 400 `unsupported_audio_format` 으로 즉시 reject. 모바일이 `AudioExtractor` (iOS `AVAssetExportPresetAppleM4A`) 로 추출하므로 신규 경로 default = m4a AAC. `PersoLiveSeparationIT` 가 회귀 가드 (env opt-in, fixture 부재 시 skip).
 
 ### Perso API path prefix — `/video-translator` 통일 (단, 일부 endpoint 만 `/file`)
 
@@ -110,9 +110,9 @@ GET  /api/v2/testdata/separation/*      # (dev mock)
 
 **해결**: `AppJson = Json { ignoreUnknownKeys=true, encodeDefaults=true }` 를 single source 로 두고, route 들이 `AppJson.decodeFromString` 사용. RenderConfig 도 동일 (`d865f19 fix(bff): /render 의 RenderConfig 파싱을 AppJson 으로`).
 
-### Separation idempotency — 버튼 연타로 같은 구간 중복 submit 차단
+### Separation idempotency — 현재 미지원
 
-같은 (sourceHash, trim window, spec) 조합은 in-flight 잡에 join — 중복 Perso 호출 안 함. (commit `e34d666 fix(separation): /separate idempotency`)
+이전엔 `editedRenderJobId + trim` 키 기반 dedup 이 있었으나 audio-only contract 로 surface 단순화되며 dead path 가 됨. 버튼 연타 방어는 일단 클라 측 책임 (모바일이 `submitting` flag 로 차단). 필요해지면 RenderInputCacheService 의 `sha256(bytes)[:16]` 패턴을 audio 에도 적용 가능.
 
 ### Separation amix `normalize=0` — stem 합칠 때 원본 loudness 보존
 
@@ -126,9 +126,9 @@ normalize 단계에서 이미 output 해상도·codec 으로 맞췄으므로 최
 
 모바일 `BgmTrimSheet` 의 sub-range (start/end ms) 선택을 BgmClip 의 `sourceTrimStartMs/EndMs` 로 보내고, BFF 가 `atrim`+`asetpts` 로 sub-range 만 잘라 amix. (commit `0148a44 feat(render): BGM atrim 적용`)
 
-### `/separate` 의 source — multipart file vs editedRenderJobId
+### `/separate` 의 source — 모바일이 trim + audio extract → m4a 송신
 
-`MediaSourceResolver` 가 둘 중 하나로 source 해석. `editedRenderJobId` 경유 시 RenderService 산출물을 별도 디렉터리 (`edited-source/`) 로 owned-copy → downstream delete/rename 으로부터 원본 보호. 모바일은 segment 원본을 그대로 `/separate` 에 직접 보내는 흐름이 default (commit `3d94e95 refactor(separation): /render 선행 호출 제거`).
+모바일이 `AudioExtractor` (iOS `AVAssetExportPresetAppleM4A`) 로 trim + audio extract 까지 끝낸 m4a 를 multipart 로 보냄. BFF 는 받은 file 을 그대로 Perso 에 forward — 라우트에 ffmpeg / `MediaTrimmer.trim` / `extractAudioForUpload` 단계 없음. video / flac / ogg 등 화이트리스트 외는 400 `unsupported_audio_format`. 옛 `editedRenderJobId` / `MediaSourceResolver` 경로는 모바일 미사용이라 제거됨.
 
 ### Cloud Run egress 분리 — `R2_BUCKET` 설정 시 SigV4 presigned URL redirect
 
@@ -151,7 +151,7 @@ Render outputs · separation stems · stem-mix outputs **never static-mounted**.
 
 ## Testing
 
-Ktor `testApplication` + MockK. 테스트 파일은 라우트·서비스와 1:1 (`SeparationRoutesTest.kt` ↔ `SeparationRoutes.kt`). `RenderService` 는 unit test 없음 — 실제 ffmpeg 스폰. `MediaTrimmerTest` / `MediaSourceResolverTest` / `RenderServiceUtilsTest` / `UserRepositoryTest` / `SignedUrlServiceTest` / `RenderInputCacheServiceTest` 등 헬퍼 단위는 unit test 활발.
+Ktor `testApplication` + MockK. 테스트 파일은 라우트·서비스와 1:1 (`SeparationRoutesTest.kt` ↔ `SeparationRoutes.kt`). `RenderService` 는 unit test 없음 — 실제 ffmpeg 스폰. `MediaTrimmerTest` / `RenderServiceUtilsTest` / `UserRepositoryTest` / `SignedUrlServiceTest` / `RenderInputCacheServiceTest` 등 헬퍼 단위는 unit test 활발.
 
 ## Task-specific skills
 

@@ -11,7 +11,6 @@ import com.vibi.bff.service.ExternalApiCallsRepository
 import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.JobAnalyticsRepository
-import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.RenderInputCacheService
 import com.vibi.bff.service.SeparationDispatcher
@@ -159,6 +158,9 @@ fun Application.module() {
         fileStorage.renderDir,
         maxConcurrentRenders = renderMaxConcurrent,
         analytics = jobAnalyticsRepository,
+        // R2 가 set 이면 렌더 완료 직후 결과 mp4 를 eager upload — Cloud Run idle scale-down
+        // 시에도 다운로드 가능. 로컬 dev (R2 미설정) 분기에선 null 그대로 통과.
+        objectStore = objectStore,
     )
 
     // Shared input cache. RENDER_INPUT_CACHE_TTL_HOURS overrides the 24h default
@@ -170,11 +172,13 @@ fun Application.module() {
         ttlMs = TimeUnit.HOURS.toMillis(renderInputCacheTtlHours),
     )
     val cacheCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+    val assetCacheTtlHours = System.getenv("ASSET_CACHE_TTL_HOURS")?.toLongOrNull() ?: 24L
     cacheCleanupScope.launch {
         // Sweep once on startup (recover from crash-leftover entries), then
         // hourly. Sleeping 1h between sweeps is fine — TTL is 24h, slop tolerated.
         while (isActive) {
             runCatching { renderInputCache.cleanExpired() }
+            runCatching { fileStorage.sweepAssetCacheOlderThan(TimeUnit.HOURS.toMillis(assetCacheTtlHours)) }
             delay(TimeUnit.HOURS.toMillis(1))
         }
     }
@@ -246,12 +250,6 @@ fun Application.module() {
     val appleReceiptVerifier = appConfig.iap.apple?.let { AppleReceiptVerifier(it, httpClient) }
     val googleReceiptVerifier = appConfig.iap.google?.let { GoogleReceiptVerifier(it, httpClient) }
 
-    // Phase 1: separation 의 source 결정자.
-    // multipart `file` 또는 spec.editedRenderJobId 둘 중 하나로 source 해석.
-    // editedRenderJobId 경유 시 RenderService 가 owner — resolver 가 별도 디렉터리에
-    // 복사한 owned-copy 를 반환해 downstream 의 delete/rename 으로부터 원본 보호.
-    val mediaSourceResolver = MediaSourceResolver(renderService, fileStorage.editedSourceDir)
-
     install(CallLogging) {
         level = Level.INFO
         // Never log signed-URL tokens / OAuth secrets in plain text — log
@@ -278,7 +276,7 @@ fun Application.module() {
         separationService, separationQueueRepository,
         stemMixService, signedUrlService,
         renderInputCache,
-        mediaSourceResolver, authService, objectStore,
+        authService, objectStore,
         adminRepository,
         userRepository, creditRepository,
         appleReceiptVerifier, googleReceiptVerifier,

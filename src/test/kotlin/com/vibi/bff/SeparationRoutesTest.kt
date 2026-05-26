@@ -7,9 +7,7 @@ import com.vibi.bff.routes.separationRoutes
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.InsufficientCreditsException
-import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.MediaTrimmer
-import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationJob
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
@@ -34,8 +32,6 @@ class SeparationRoutesTest {
     private lateinit var stemMixService: StemMixService
     private lateinit var signer: SignedUrlService
     private lateinit var fileStorage: FileStorageService
-    private lateinit var renderService: RenderService
-    private lateinit var mediaSourceResolver: MediaSourceResolver
 
     @BeforeTest
     fun setup() {
@@ -44,12 +40,6 @@ class SeparationRoutesTest {
         separationService = mockk(relaxed = true)
         stemMixService = mockk(relaxed = true)
         signer = SignedUrlService(appConfig.separation.signingSecret)
-        renderService = mockk(relaxed = true)
-        mediaSourceResolver = MediaSourceResolver(renderService, fileStorage.editedSourceDir)
-        // dedup pre-check 가 라우트 진입 시 항상 도는데, relaxed mock 의 String?
-        // default 가 "" (non-null) 이라 모든 요청이 dedup hit 으로 빠짐 — 명시적으로
-        // null 반환 stub. 개별 테스트가 dedup-hit 시나리오를 검증하려면 override.
-        every { separationService.findActiveJob(any()) } returns null
     }
 
     @AfterTest
@@ -71,7 +61,7 @@ class SeparationRoutesTest {
             route("/api/v2") {
                 separationRoutes(
                     separationService, stemMixService, signer, fileStorage,
-                    appConfig, mediaSourceResolver, objectStore = null,
+                    appConfig, objectStore = null,
                     jwtSecret = jwtSecret,
                     creditRepository = creditRepository,
                 )
@@ -80,7 +70,8 @@ class SeparationRoutesTest {
         block()
     }
 
-    // GET /separate/{jobId} with unknown id → 404
+    // ── GET / mix smoke tests ────────────────────────────────────────────────
+
     @Test
     fun `GET unknown separation job returns 404`() = testApp {
         coEvery { separationService.getJob("no-such") } returns null
@@ -88,21 +79,18 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
 
-    // GET stem with missing token → 400 (IllegalArgumentException)
     @Test
     fun `GET stem without token returns 400`() = testApp {
         val response = client.get("/api/v2/separate/sep-x/stem/background")
         assertEquals(HttpStatusCode.BadRequest, response.status)
     }
 
-    // GET stem with invalid token → 403
     @Test
     fun `GET stem with invalid token returns 403`() = testApp {
         val response = client.get("/api/v2/separate/sep-x/stem/background?token=bogus.sig")
         assertEquals(HttpStatusCode.Forbidden, response.status)
     }
 
-    // GET stem with valid token but missing job → 404
     @Test
     fun `GET stem with valid token but missing job returns 404`() = testApp {
         val token = signer.sign("sep-y", "background", 60)
@@ -111,11 +99,8 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.NotFound, response.status)
     }
 
-    // POST mix when separation is not READY → 409
     @Test
     fun `POST mix on non-ready job returns 409`() = testApp {
-        // owner 검증 추가 후 mix 라우트가 reserveForMix 전에 getJob 부터 호출 — 미인증
-        // 분기 (jwtSecret null) 라 owner 무관하게 통과시키려면 잡이 존재만 하면 됨.
         coEvery { separationService.getJob("sep-z") } returns separationJob("sep-z", ownerUserId = null)
         every { separationService.reserveForMix("sep-z", any()) } returns null
         every { stemMixService.newJobId() } returns "mix-abcd"
@@ -129,27 +114,18 @@ class SeparationRoutesTest {
 
     private fun separationJob(jobId: String, ownerUserId: UUID?): SeparationJob {
         val outDir = File(testDir, "sep-out-$jobId").apply { mkdirs() }
-        val src = File(testDir, "src-$jobId.wav").apply { writeText("dummy") }
+        val src = File(testDir, "src-$jobId.m4a").apply { writeText("dummy") }
         return SeparationJob(
             jobId = jobId,
             outputDir = outDir,
             ownerUserId = ownerUserId,
             sourceFile = src,
-            spec = com.vibi.bff.model.SeparationSpec(mediaType = "AUDIO"),
-            audioPreExtracted = true,
+            spec = com.vibi.bff.model.SeparationSpec(),
         )
     }
 
-    // SeparationSpec 생성자 검증 — mediaType 오류
-    @Test
-    fun `SeparationSpec rejects invalid mediaType`() {
-        val ex = assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(mediaType = "AUDIOVIDEO")
-        }
-        assertTrue(ex.message!!.contains("mediaType"))
-    }
+    // ── StemMixRequest 검증 ──────────────────────────────────────────────────
 
-    // StemMixRequest 검증 — volume 음수
     @Test
     fun `StemMixRequest rejects negative volume`() {
         assertFailsWith<IllegalArgumentException> {
@@ -159,7 +135,6 @@ class SeparationRoutesTest {
         }
     }
 
-    // StemMixRequest 검증 — 빈 stems
     @Test
     fun `StemMixRequest rejects empty stems`() {
         assertFailsWith<IllegalArgumentException> {
@@ -167,270 +142,154 @@ class SeparationRoutesTest {
         }
     }
 
-    // SeparationSpec trim 검증 — 한쪽만 지정하면 partial_trim_range
-    @Test
-    fun `SeparationSpec rejects partial trim (only start)`() {
-        val ex = assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO", trimStartMs = 1000
-            )
-        }
-        assertEquals("partial_trim_range", ex.message)
-    }
-
-    @Test
-    fun `SeparationSpec rejects partial trim (only end)`() {
-        val ex = assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO", trimEndMs = 1000
-            )
-        }
-        assertEquals("partial_trim_range", ex.message)
-    }
-
-    // SeparationSpec trim 검증 — 역순 / 너무 짧음 / 음수
-    @Test
-    fun `SeparationSpec rejects reversed trim range`() {
-        val ex = assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO",
-                trimStartMs = 5000, trimEndMs = 2000,
-            )
-        }
-        assertEquals("trim_range_invalid", ex.message)
-    }
-
-    @Test
-    fun `SeparationSpec rejects trim range shorter than 500ms`() {
-        val ex = assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO",
-                trimStartMs = 1000, trimEndMs = 1200,
-            )
-        }
-        assertEquals("trim_range_too_short", ex.message)
-    }
-
-    @Test
-    fun `SeparationSpec rejects negative trimStartMs`() {
-        val ex = assertFailsWith<IllegalArgumentException> {
-            com.vibi.bff.model.SeparationSpec(
-                mediaType = "VIDEO",
-                trimStartMs = -1, trimEndMs = 1000,
-            )
-        }
-        assertEquals("trim_start_negative", ex.message)
-    }
-
-    @Test
-    fun `SeparationSpec accepts valid trim range`() {
-        val spec = com.vibi.bff.model.SeparationSpec(
-            mediaType = "VIDEO",
-            trimStartMs = 2000, trimEndMs = 8500,
-        )
-        assertEquals(2000L, spec.trimStartMs)
-        assertEquals(8500L, spec.trimEndMs)
-    }
-
-    // SeparationSpec — trim 필드 없으면 기존과 동일 (backward compatible)
-    @Test
-    fun `SeparationSpec without trim fields is valid`() {
-        val spec = com.vibi.bff.model.SeparationSpec(
-            mediaType = "VIDEO",
-        )
-        assertNull(spec.trimStartMs)
-        assertNull(spec.trimEndMs)
-    }
-
-    // ── POST /separate trim error wire format ────────────────────────────────
+    // ── POST /separate audio-only contract ───────────────────────────────────
 
     private suspend fun postSeparate(
         client: io.ktor.client.HttpClient,
-        specJson: String,
+        specJson: String = """{}""",
+        fileName: String = "t.m4a",
+        contentType: String = "audio/mp4",
+        fileBytes: ByteArray = "fake".toByteArray(),
     ) = client.post("/api/v2/separate") {
         setBody(MultiPartFormDataContent(formData {
-            append("file", "fake".toByteArray(), Headers.build {
-                append(HttpHeaders.ContentType, "audio/mpeg")
-                append(HttpHeaders.ContentDisposition, "filename=\"t.mp3\"")
+            append("file", fileBytes, Headers.build {
+                append(HttpHeaders.ContentType, contentType)
+                append(HttpHeaders.ContentDisposition, "filename=\"$fileName\"")
             })
             append("spec", specJson)
         }))
     }
 
-    // trimEndMs > probed duration → 400 trim_end_exceeds_duration with detail
     @Test
-    fun `POST separate with trim exceeding duration returns structured 400`() = testApp {
+    fun `POST separate m4a happy path forwards to SeparationService`() = testApp {
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 5_000L
+        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
+        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 30_000L
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+            "sep-ok"
 
-        val response = postSeparate(
-            client,
-            """{"mediaType":"AUDIO","trimStartMs":1000,"trimEndMs":10000}""",
-        )
+        val response = postSeparate(client)
+
+        assertEquals(HttpStatusCode.Accepted, response.status)
+        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("sep-ok", body["jobId"]!!.jsonPrimitive.content)
+        verify(exactly = 1) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+    }
+
+    /** 확장자만 .m4a 인 video bytes 는 ffprobe stream-kind 검증에서 reject — Perso 가 silent fail
+     *  하는 회귀 차단 (확장자 위조 공격 / 클라 버그 양쪽에 대한 BFF 측 방어). */
+    @Test
+    fun `POST separate rejects file labeled m4a whose probe shows video track`() = testApp {
+        mockkObject(MediaTrimmer)
+        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("video", "audio")
+
+        val response = postSeparate(client)
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        assertEquals("trim_end_exceeds_duration", body["error"]!!.jsonPrimitive.content)
-        val detail = body["detail"]!!.jsonPrimitive.content
-        assertTrue(detail.contains("trimEndMs=10000"), "detail should echo trimEndMs")
-        assertTrue(detail.contains("duration=5000"), "detail should echo probed duration")
-        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        assertEquals("unsupported_audio_format", body["error"]!!.jsonPrimitive.content)
+        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
     }
 
-    // probe returns null (ffprobe unavailable / corrupt file) → 500 ffmpeg_error
+    /** probe 자체 실패 (corrupt header, unrecognized container 등) 도 reject — fail-closed. */
     @Test
-    fun `POST separate with probe failure returns 500 ffmpeg_error`() = testApp {
+    fun `POST separate rejects when probeStreamKinds fails`() = testApp {
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns null
+        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns null
 
-        val response = postSeparate(
-            client,
-            """{"mediaType":"AUDIO","trimStartMs":0,"trimEndMs":2000}""",
-        )
-
-        assertEquals(HttpStatusCode.InternalServerError, response.status)
-        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        assertEquals("ffmpeg_error", body["error"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
-    }
-
-    // ffmpeg trim itself fails → 500 ffmpeg_error
-    @Test
-    fun `POST separate with trim failure returns 500 ffmpeg_error`() = testApp {
-        mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 10_000L
-        coEvery { MediaTrimmer.trim(any(), any(), any(), any()) } returns false
-
-        val response = postSeparate(
-            client,
-            """{"mediaType":"AUDIO","trimStartMs":1000,"trimEndMs":3000}""",
-        )
-
-        assertEquals(HttpStatusCode.InternalServerError, response.status)
-        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        assertEquals("ffmpeg_error", body["error"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
-    }
-
-    // No trim fields → trim() is not called (no cut needed). probeDurationMs 는 admin
-    // analytics 의 sourceDurationMs 측정용으로 trim 유무와 무관하게 호출 — runCatching 으로
-    // 감싸여 실패해도 잡 진행에 영향 없음.
-    @Test
-    fun `POST separate without trim skips MediaTrimmer trim but still probes for analytics`() = testApp {
-        mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 5_000L
-        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) } returns SeparationService.SubmitResult("sep-ok", isNew = true)
-
-        val response = postSeparate(
-            client,
-            """{"mediaType":"AUDIO"}""",
-        )
-
-        assertEquals(HttpStatusCode.Accepted, response.status)
-        coVerify(exactly = 0) { MediaTrimmer.trim(any(), any(), any(), any()) }
-        verify(exactly = 1) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
-    }
-
-    // ── Phase 1: editedRenderJobId branch ──────────────────────────────────────
-
-    /** spec.editedRenderJobId 가 unknown → 400 (resolver throws IllegalArgumentException) */
-    @Test
-    fun `POST separate with unknown editedRenderJobId returns 400`() = testApp {
-        every { renderService.acquireRenderOutputCopy("render-missing", any(), any()) } returns null
-
-        val response = client.post("/api/v2/separate") {
-            setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO","editedRenderJobId":"render-missing"}""")
-            }))
-        }
+        val response = postSeparate(client)
 
         assertEquals(HttpStatusCode.BadRequest, response.status)
-        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("unsupported_audio_format", body["error"]!!.jsonPrimitive.content)
     }
 
-    /** spec.editedRenderJobId 가 valid → owned copy 가 separationService 로 전달 */
+    /** probe 가 audio stream 은 확인했지만 duration 측정 실패한 경우 — file size 기반 conservative
+     *  추정으로 분 단위 차감. probe-fail 만으로 1 credit floor 로 떨어지는 undercharge 우회 차단. */
     @Test
-    fun `POST separate with editedRenderJobId uses render output copy`() = testApp {
-        // mediaSourceResolver 가 acquireRenderOutputCopy 로부터 받아오는 copy 파일.
-        val copy = File(fileStorage.editedSourceDir, "source-fixture.mp4").apply {
-            parentFile.mkdirs()
-            writeText("fake-mp4-bytes")
-        }
-        every { renderService.acquireRenderOutputCopy("render-ok", any(), any()) } returns copy
-        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) } returns SeparationService.SubmitResult("sep-from-render", isNew = true)
-
-        val response = client.post("/api/v2/separate") {
-            setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO","editedRenderJobId":"render-ok"}""")
-            }))
-        }
-
-        assertEquals(HttpStatusCode.Accepted, response.status)
-        verify(exactly = 1) {
-            renderService.acquireRenderOutputCopy("render-ok", fileStorage.editedSourceDir, any())
-        }
-        verify(exactly = 1) { separationService.submit(copy, any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
-    }
-
-    /** 버튼 연타 방어: 같은 (caller+source+spec) 으로 두 번째 submit 이 들어오면
-     * findActiveJob 가 기존 jobId 를 반환 → 라우트는 resolve / submit 호출 없이
-     * 바로 그 jobId 를 돌려줘야 함. dedupKey 는 미인증 caller (userId=null) 면 null
-     * 이라 미인증 환경에선 dedup 비활성 — 본 테스트는 인증 caller 분기로 검증. */
-    @Test
-    fun `POST separate dedup hit returns existing jobId without resolve or submit`() = testApp(jwtSecret = testJwtSecret) {
-        every { separationService.findActiveJob(any()) } returns "sep-already-running"
+    fun `POST separate uses size-based duration fallback when probeDurationMs fails`() {
         val callerId = UUID.randomUUID()
-
-        val response = client.post("/api/v2/separate") {
-            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
-            setBody(MultiPartFormDataContent(formData {
-                append(
-                    "spec",
-                    """{"mediaType":"VIDEO","editedRenderJobId":"render-x","trimStartMs":1000,"trimEndMs":3000}""",
-                )
-            }))
-        }
-
-        assertEquals(HttpStatusCode.Accepted, response.status)
-        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        assertEquals("sep-already-running", body["jobId"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { renderService.acquireRenderOutputCopy(any(), any(), any()) }
-        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
-    }
-
-    /** dedupKey 는 editedRenderJobId path 에서만 계산 — legacy multipart upload
-     * 는 source 식별이 어려워 dedup 대상 외. findActiveJob 가 호출조차 되면 안 됨. */
-    @Test
-    fun `POST separate upload path skips dedup index (no findActiveJob call)`() = testApp {
+        val creditRepo = mockk<CreditRepository>(relaxed = true)
+        // 8MB 가짜 audio bytes → 8000_000 / 8000 = 1000초 → ceil(1_000_000ms / 60_000) = 17 credits.
+        val bigBytes = ByteArray(8_000_000) { 0 }
+        // reserve 가 호출됐는지 + cost 인자만 검증 → 17 credit.
+        every { creditRepo.reserve(eq(callerId), any(), eq(17)) } returns
+            CreditRepository.ReserveOutcome(charged = 17, balance = 100)
         mockkObject(MediaTrimmer)
-        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) } returns SeparationService.SubmitResult("sep-upload", isNew = true)
+        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
+        coEvery { MediaTrimmer.probeDurationMs(any()) } returns null
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+            "sep-fallback"
 
-        val response = postSeparate(client, """{"mediaType":"AUDIO"}""")
-        assertEquals(HttpStatusCode.Accepted, response.status)
-        // upload path 는 spec.editedRenderJobId==null → buildSeparationDedupKey returns null
-        // → findActiveJob 호출 자체가 일어나면 안 됨 (그리고 submit 호출은 dedupKey=null
-        // 으로 들어가야 함).
-        verify(exactly = 0) { separationService.findActiveJob(any()) }
-        verify(exactly = 1) { separationService.submit(any(), any(), any(), null, anyNullable(), any(), anyNullable(), anyNullable()) }
+        testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
+            val response = client.post("/api/v2/separate") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+                setBody(MultiPartFormDataContent(formData {
+                    append("file", bigBytes, Headers.build {
+                        append(HttpHeaders.ContentType, "audio/mp4")
+                        append(HttpHeaders.ContentDisposition, "filename=\"t.m4a\"")
+                    })
+                    append("spec", """{}""")
+                }))
+            }
+            assertEquals(HttpStatusCode.Accepted, response.status)
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(17)) }
+        }
     }
 
-    /** spec / file 둘 다 없으면 400 */
     @Test
-    fun `POST separate without file or editedRenderJobId returns 400`() = testApp {
+    fun `POST separate without file returns 400`() = testApp {
         val response = client.post("/api/v2/separate") {
             setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO"}""")
+                append("spec", """{}""")
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
-        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
     }
 
-    // ── 자원 소유권 검증 ────────────────────────────────────────────────────────
-    //
-    // SeparationJob.ownerUserId 가 set 된 잡을 다른 user 가 status / mix 호출 시 404.
-    // editedRenderJobId 경유는 RenderService.acquireRenderOutputCopy 가 callerUserId
-    // 검증 — owner mismatch 시 null → resolver IllegalArgumentException → 400.
+    @Test
+    fun `POST separate rejects video upload with unsupported_audio_format`() = testApp {
+        val response = postSeparate(
+            client,
+            fileName = "vid.mp4",
+            contentType = "video/mp4",
+        )
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("unsupported_audio_format", body["error"]!!.jsonPrimitive.content)
+        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+    }
+
+    @Test
+    fun `POST separate rejects flac (Perso silent-fail regression guard)`() = testApp {
+        val response = postSeparate(
+            client,
+            fileName = "audio.flac",
+            contentType = "audio/flac",
+        )
+        assertEquals(HttpStatusCode.BadRequest, response.status)
+        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
+        assertEquals("unsupported_audio_format", body["error"]!!.jsonPrimitive.content)
+    }
+
+    @Test
+    fun `POST separate accepts mp3 and wav extensions`() = testApp {
+        mockkObject(MediaTrimmer)
+        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
+        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 10_000L
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+            "sep-mp3" andThen
+            "sep-wav"
+
+        val mp3Response = postSeparate(client, fileName = "a.mp3", contentType = "audio/mpeg")
+        assertEquals(HttpStatusCode.Accepted, mp3Response.status)
+
+        val wavResponse = postSeparate(client, fileName = "a.wav", contentType = "audio/wav")
+        assertEquals(HttpStatusCode.Accepted, wavResponse.status)
+    }
+
+    // ── 자원 소유권 검증 ─────────────────────────────────────────────────────
 
     private val testJwtSecret = "a".repeat(64)
 
@@ -458,14 +317,11 @@ class SeparationRoutesTest {
             setBody("""{"stems":[{"stemId":"background","volume":1.0}]}""")
         }
         assertEquals(HttpStatusCode.NotFound, response.status)
-        // 다른 사용자가 reserve 시켜서 dispose 트리거하는 것 차단 — reserveForMix 호출 자체
-        // 가 일어나면 안 됨.
         verify(exactly = 0) { separationService.reserveForMix(any(), any()) }
     }
 
     // ── 크레딧 게이트 ─────────────────────────────────────────────────────────
 
-    /** 잔액 부족 시 402 + insufficient_credits — 모바일 팝업이 표시하는 정확한 에러 매핑. */
     @Test
     fun `POST separate returns 402 when balance insufficient`() {
         val callerId = UUID.randomUUID()
@@ -474,135 +330,54 @@ class SeparationRoutesTest {
             InsufficientCreditsException(required = 1, balance = 0)
 
         testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
+            mockkObject(MediaTrimmer)
+            coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
+            coEvery { MediaTrimmer.probeDurationMs(any()) } returns 30_000L
+
             val response = client.post("/api/v2/separate") {
                 header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
                 setBody(MultiPartFormDataContent(formData {
                     append("file", "fake".toByteArray(), Headers.build {
-                        append(HttpHeaders.ContentType, "audio/mpeg")
-                        append(HttpHeaders.ContentDisposition, "filename=\"t.mp3\"")
+                        append(HttpHeaders.ContentType, "audio/mp4")
+                        append(HttpHeaders.ContentDisposition, "filename=\"t.m4a\"")
                     })
-                    append("spec", """{"mediaType":"AUDIO"}""")
+                    append("spec", """{}""")
                 }))
             }
             assertEquals(HttpStatusCode.PaymentRequired, response.status)
             val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
             assertEquals("insufficient_credits", body["error"]!!.jsonPrimitive.content)
-            // 차감 throw 후 submit 으로 진행되면 안 됨.
-            verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
+            verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
         }
     }
 
-    /** dedup-hit (route pre-check) 시 reserve 자체가 호출되지 않아야 — 같은 잡 join 이므로 비-차감. */
     @Test
-    fun `POST separate dedup-hit skips credit reserve`() {
-        val callerId = UUID.randomUUID()
-        val creditRepo = mockk<CreditRepository>(relaxed = true)
-        every { separationService.findActiveJob(any()) } returns "sep-already-running"
-
-        testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
-            val response = client.post("/api/v2/separate") {
-                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
-                setBody(MultiPartFormDataContent(formData {
-                    append(
-                        "spec",
-                        """{"mediaType":"VIDEO","editedRenderJobId":"render-x","trimStartMs":1000,"trimEndMs":3000}""",
-                    )
-                }))
-            }
-            assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 0) { creditRepo.reserve(any(), any(), any()) }
-        }
-    }
-
-    /** 정상 흐름: reserve(cost) 가 호출되고 submit 도 providedJobId 와 함께 호출. */
-    @Test
-    fun `POST separate charges expected cost based on duration`() {
+    fun `POST separate charges expected cost based on audio duration`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
         every { creditRepo.reserve(any(), any(), any()) } returns
             CreditRepository.ReserveOutcome(charged = 2, balance = 1)
-        // trim 윈도우 2분 → ceil(120000/60000)=2 크레딧. trim 자체는 ffmpeg 호출이라 mock.
+        // 클라가 보낸 audio 가 120s → ceil(120000/60000)=2 크레딧.
         mockkObject(MediaTrimmer)
+        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
         coEvery { MediaTrimmer.probeDurationMs(any()) } returns 120_000L
-        coEvery { MediaTrimmer.trim(any(), any(), any(), any()) } returns true
-
-        val copy = File(fileStorage.editedSourceDir, "fixture.mp4").apply {
-            parentFile.mkdirs()
-            writeText("fake")
-        }
-        every { renderService.acquireRenderOutputCopy("render-x", any(), any()) } returns copy
-        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
-            SeparationService.SubmitResult("sep-new", isNew = true)
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+            "sep-new"
 
         testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
             val response = client.post("/api/v2/separate") {
                 header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
                 setBody(MultiPartFormDataContent(formData {
-                    append(
-                        "spec",
-                        """{"mediaType":"VIDEO","editedRenderJobId":"render-x","trimStartMs":0,"trimEndMs":120000}""",
-                    )
+                    append("file", "fake".toByteArray(), Headers.build {
+                        append(HttpHeaders.ContentType, "audio/mp4")
+                        append(HttpHeaders.ContentDisposition, "filename=\"t.m4a\"")
+                    })
+                    append("spec", """{}""")
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            // 차감 정확히 1번 + 비용 2 크레딧 (2분).
             verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(2)) }
-            // 환불은 호출되면 안 됨 (성공 경로).
             verify(exactly = 0) { creditRepo.refund(any()) }
         }
-    }
-
-    /** submit 내부 dedup-hit (race): 우리는 차감했는데 submit 이 isNew=false 돌려준 케이스 → 환불 1회. */
-    @Test
-    fun `POST separate refunds when submit returns dedup-hit`() {
-        val callerId = UUID.randomUUID()
-        val creditRepo = mockk<CreditRepository>(relaxed = true)
-        every { creditRepo.reserve(any(), any(), any()) } returns
-            CreditRepository.ReserveOutcome(charged = 1, balance = 2)
-        mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 60_000L
-        coEvery { MediaTrimmer.trim(any(), any(), any(), any()) } returns true
-
-        val copy = File(fileStorage.editedSourceDir, "fixture2.mp4").apply {
-            parentFile.mkdirs()
-            writeText("fake")
-        }
-        every { renderService.acquireRenderOutputCopy("render-y", any(), any()) } returns copy
-        // pre-check 는 null (no early-return) 이지만 submit 내부 dedup-hit 시뮬레이션:
-        every { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
-            SeparationService.SubmitResult("sep-existing", isNew = false)
-
-        testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
-            val response = client.post("/api/v2/separate") {
-                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
-                setBody(MultiPartFormDataContent(formData {
-                    append(
-                        "spec",
-                        """{"mediaType":"VIDEO","editedRenderJobId":"render-y","trimStartMs":0,"trimEndMs":60000}""",
-                    )
-                }))
-            }
-            assertEquals(HttpStatusCode.Accepted, response.status)
-            // 차감 1회 → race dedup-hit → 환불 1회.
-            verify(exactly = 1) { creditRepo.reserve(any(), any(), any()) }
-            verify(exactly = 1) { creditRepo.refund(any()) }
-        }
-    }
-
-    @Test
-    fun `POST separate with editedRenderJobId owned by another user returns 400`() = testApp(jwtSecret = testJwtSecret) {
-        val otherId = UUID.randomUUID()
-        // RenderService.acquireRenderOutputCopy 가 owner mismatch 시 null 반환 →
-        // MediaSourceResolver 가 IllegalArgumentException → ErrorHandling 이 400 매핑.
-        every { renderService.acquireRenderOutputCopy("render-owned-by-A", any(), otherId) } returns null
-
-        val response = client.post("/api/v2/separate") {
-            header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(otherId, testJwtSecret)}")
-            setBody(MultiPartFormDataContent(formData {
-                append("spec", """{"mediaType":"VIDEO","editedRenderJobId":"render-owned-by-A"}""")
-            }))
-        }
-        assertEquals(HttpStatusCode.BadRequest, response.status)
-        verify(exactly = 0) { separationService.submit(any(), any(), any(), anyNullable(), anyNullable(), any(), anyNullable(), anyNullable()) }
     }
 }

@@ -2,6 +2,7 @@ package com.vibi.bff.plugins
 
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.routes.adminRoutes
+import com.vibi.bff.routes.assetRoutes
 import com.vibi.bff.routes.authRoutes
 import com.vibi.bff.routes.creditRoutes
 import com.vibi.bff.routes.renderRoutes
@@ -11,7 +12,6 @@ import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.ObjectStore
-import com.vibi.bff.service.MediaSourceResolver
 import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.RenderInputCacheService
 import com.vibi.bff.service.RenderService
@@ -40,7 +40,6 @@ fun Application.configureRouting(
     stemMixService: StemMixService,
     signedUrlService: SignedUrlService,
     renderInputCache: RenderInputCacheService,
-    mediaSourceResolver: MediaSourceResolver,
     authService: AuthService,
     objectStore: ObjectStore?,
     adminRepository: AdminRepository,
@@ -83,6 +82,7 @@ fun Application.configureRouting(
                 googleVerifier = googleReceiptVerifier,
                 jwtSecret = appConfig.auth.jwtSecret,
             )
+            assetRoutes(objectStore, jwtSecret = appConfig.auth.jwtSecret)
             renderRoutes(
                 renderService, fileStorage,
                 separationService, signedUrlService, renderInputCache,
@@ -91,7 +91,7 @@ fun Application.configureRouting(
             )
             separationRoutes(
                 separationService, stemMixService, signedUrlService, fileStorage,
-                appConfig, mediaSourceResolver, objectStore,
+                appConfig, objectStore,
                 queueRepository = separationQueue,
                 jwtSecret = appConfig.auth.jwtSecret,
                 creditRepository = creditRepository,

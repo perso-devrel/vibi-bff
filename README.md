@@ -139,7 +139,7 @@ v1 has been retired.
 | POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint)). Optional `inputId` form field replaces the video file part. |
 | GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`. |
 | GET    | `/api/v2/render/{jobId}/download`            | Binary mp4. With `R2_BUCKET`, `302` to an R2 presigned URL.   |
-| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Source resolves from multipart `file` *or* `spec.editedRenderJobId`. |
+| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Audio-only upload (`m4a` / `mp3` / `wav`, ≤100MB). |
 | GET    | `/api/v2/separate/{jobId}`                   | Status + signed stem URLs when `READY`.                       |
 | GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream (requires `?token=…`).                      |
 | POST   | `/api/v2/separate/{jobId}/mix`               | Mix selected stems with `amix normalize=0`; disposes source stems on success. |
@@ -207,48 +207,35 @@ ffprobe on the source (legacy).
 
 ### Separation endpoints
 
-`POST /api/v2/separate` uploads a video or audio file, submits it to Perso's
-dubbing pipeline, and exposes the byproduct stems for the mobile client to
-pick and remix.
+`POST /api/v2/separate` accepts an **already-trimmed audio file** (m4a / mp3 / wav),
+submits it to Perso's dubbing pipeline, and exposes the byproduct stems for the
+mobile client to pick and remix. The mobile client handles trim + audio extract
+locally (iOS `AVAssetExportPresetAppleM4A`), so the BFF performs no ffmpeg work
+before the upstream upload.
 
 #### Multipart fields
 
 | Field  | Description                                                        |
 |--------|--------------------------------------------------------------------|
-| `file` | Source mp4 or mp3 (up to 500 MB)                                   |
+| `file` | Audio bytes — extension must be `m4a` / `mp3` / `wav`, ≤100MB. Video / flac / ogg are rejected with `400 unsupported_audio_format`. |
 | `spec` | JSON `SeparationSpec` (form item, not a file)                      |
 
 ```jsonc
 // SeparationSpec
 {
-  "mediaType": "VIDEO",          // "VIDEO" or "AUDIO"
-  "numberOfSpeakers": 2,         // 1..10 — Perso has no auto-detect
-  "sourceLanguageCode": "auto",  // "auto" or ISO code like "ko"
-  "trimStartMs": 2000,           // optional — see "Optional trim" below
-  "trimEndMs": 8500              // optional — must be present iff trimStartMs is
+  "sourceLanguageCode": "auto"   // "auto" or ISO code like "ko"
 }
 ```
 
-##### Optional trim (`trimStartMs` / `trimEndMs`)
+Errors:
 
-When both fields are supplied, the BFF stream-copy cuts the uploaded file
-with ffmpeg before handing it to Perso, so only the selected window is
-processed (and billed). Omitting both is backwards-compatible: Perso
-receives the whole file. Validation:
-
-| Condition                              | Response                                                                 |
-|----------------------------------------|--------------------------------------------------------------------------|
-| only one of the two is present         | `400 partial_trim_range`                                                 |
-| `trimStartMs < 0`                      | `400 trim_start_negative`                                                |
-| `trimEndMs <= trimStartMs`             | `400 trim_range_invalid`                                                 |
-| window `< 500 ms`                      | `400 trim_range_too_short`                                               |
-| `trimEndMs` exceeds probed duration    | `400 trim_end_exceeds_duration` with `detail="trimEndMs=… duration=…"` |
-| ffprobe / ffmpeg fails                 | `500 ffmpeg_error`                                                       |
-
-> Any non-2xx from the trim stage disposes the uploaded file. Clients must
-> re-upload the source with a corrected `spec` rather than retrying against
-> the same upload. (`500` instead of `501` because 501 is semantically
-> *Not Implemented* — the ffmpeg call is available, it just failed.)
+| Condition                                | Response                                  |
+|------------------------------------------|-------------------------------------------|
+| `file` missing                           | `400` (`file is required`)                |
+| `spec` missing                           | `400` (`spec is required`)                |
+| File extension outside whitelist         | `400 unsupported_audio_format`            |
+| Multipart > `MAX_SEPARATION_AUDIO_SIZE`  | `413` (Ktor multipart limit)              |
+| Balance insufficient                     | `402 insufficient_credits`                |
 
 #### Stems
 
@@ -349,9 +336,8 @@ src/main/kotlin/com/vibi/bff/
     ├── PersoPolling.kt         # Job-status polling primitive
     ├── AuthService.kt          # Google tokeninfo + Apple JWKS RS256 + JWT issuance
     ├── UserRepository.kt       # Exposed-backed user upsert
-    ├── FileStorageService.kt   # Local blob storage (uploads/, render/, separation/, edited-source/)
-    ├── MediaSourceResolver.kt  # /separate source = multipart file or editedRenderJobId (owned-copy)
-    ├── MediaTrimmer.kt         # ffmpeg stream-copy cut for optional trim
+    ├── FileStorageService.kt   # Local blob storage (uploads/, render/, separation/)
+    ├── MediaTrimmer.kt         # ffprobe-based audio duration probe (KPI / credit metering)
     ├── RenderService.kt        # ffmpeg orchestration (normalize → concat → final mix -c:v copy)
     ├── RenderInputCacheService.kt # /render/inputs slot (sha256 inputId, TTL sweep)
     ├── SeparationService.kt    # Perso-backed stem separation jobs (idempotency, TTL reap)

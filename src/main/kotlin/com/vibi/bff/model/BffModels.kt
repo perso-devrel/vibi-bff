@@ -138,6 +138,94 @@ data class SeparationStemSelectionDto(
     }
 }
 
+// --- Render v3 (asset-by-reference) ---
+@Serializable
+data class SegmentV3(
+    /** R2 asset key (`assets/<sha>.<ext>`). 라우트가 다운로드 후 로컬 파일로 해석. */
+    val sourceAssetKey: String,
+    val order: Int,
+    val durationMs: Long,
+    val trimStartMs: Long? = null,
+    val trimEndMs: Long? = null,
+    val volumeScale: Float = 1.0f,
+    val speedScale: Float = 1.0f,
+) {
+    init {
+        require(sourceAssetKey.startsWith("assets/")) {
+            "SegmentV3.sourceAssetKey must start with 'assets/' (got '$sourceAssetKey')"
+        }
+        require(speedScale > 0f) { "SegmentV3.speedScale must be > 0 (got $speedScale)" }
+        require(volumeScale >= 0f) { "SegmentV3.volumeScale must be >= 0 (got $volumeScale)" }
+    }
+}
+
+@Serializable
+data class BgmClipV3(
+    val audioAssetKey: String,
+    val startMs: Long,
+    val volume: Float = 1.0f,
+    val sourceTrimStartMs: Long = 0L,
+    val sourceTrimEndMs: Long = 0L,
+) {
+    init {
+        require(audioAssetKey.startsWith("assets/")) {
+            "BgmClipV3.audioAssetKey must start with 'assets/' (got '$audioAssetKey')"
+        }
+        requireValidVolume("BgmClipV3", volume)
+        require(sourceTrimStartMs >= 0L) { "BgmClipV3.sourceTrimStartMs must be >= 0" }
+        require(sourceTrimEndMs == 0L || sourceTrimEndMs > sourceTrimStartMs) {
+            "BgmClipV3.sourceTrimEndMs ($sourceTrimEndMs) must be 0 or > sourceTrimStartMs ($sourceTrimStartMs)"
+        }
+    }
+}
+
+@Serializable
+data class RenderConfigV3(
+    val segments: List<SegmentV3>,
+    val bgmClips: List<BgmClipV3> = emptyList(),
+    val separationDirectives: List<SeparationDirectiveDto> = emptyList(),
+    val outputKind: String = "video",
+    val quality: String = "medium",
+) {
+    init {
+        require(segments.isNotEmpty()) { "RenderConfigV3.segments must not be empty" }
+        require(outputKind == "video" || outputKind == "audio") {
+            "outputKind must be 'video' or 'audio' (got '$outputKind')"
+        }
+        require(quality == "high" || quality == "medium" || quality == "low") {
+            "quality must be 'high', 'medium', or 'low' (got '$quality')"
+        }
+    }
+}
+
+// --- Asset upload (v3 모바일 → R2 직접 PUT 흐름) ---
+@Serializable
+data class AssetUploadUrlRequest(
+    val sha256Hex: String,
+    val sizeBytes: Long,
+    val ext: String,
+    val contentType: String,
+) {
+    init {
+        require(sha256Hex.matches(SHA256_HEX_RE)) { "sha256Hex must be 64-char lower hex" }
+        require(sizeBytes > 0L) { "sizeBytes must be > 0" }
+        require(ext.isNotBlank()) { "ext must not be blank" }
+        require(contentType.isNotBlank()) { "contentType must not be blank" }
+    }
+
+    companion object {
+        private val SHA256_HEX_RE = Regex("^[0-9a-f]{64}$")
+    }
+}
+
+@Serializable
+data class AssetUploadUrlResponse(
+    val assetKey: String,
+    val alreadyExists: Boolean,
+    val uploadUrl: String? = null,
+    val expiresInSec: Long = 0L,
+)
+
 @Serializable
 data class RenderResponse(
     val jobId: String,
@@ -170,34 +258,15 @@ data class RenderInputCacheResponse(
 )
 
 // --- Separation ---
+/**
+ * 모바일이 trim + audio extract 까지 끝내고 보내는 audio bytes 의 메타. 본 BFF surface 는
+ * 모바일이 항상 audio (m4a/mp3/wav) 만 보낸다는 contract — trim 윈도우, mediaType, 그리고
+ * editedRenderJobId source 분기는 모두 모바일 측에서 처리되므로 spec 에 더 이상 들어오지 않는다.
+ */
 @Serializable
 data class SeparationSpec(
-    val mediaType: String,                  // "VIDEO" | "AUDIO"
     val sourceLanguageCode: String = "auto",
-    val trimStartMs: Long? = null,
-    val trimEndMs: Long? = null,
-    /** Phase 1: 모바일이 편집된 영상 jobId 를 source 로 재사용. multipart `file` 파트가
-     * 없으면 이 값으로 RenderService.getRenderOutputFile(jobId) 를 조회해 source 사용.
-     * 둘 다 있으면 이 값이 우선 (file 파트 무시). */
-    val editedRenderJobId: String? = null,
-) {
-    init {
-        require(mediaType == "VIDEO" || mediaType == "AUDIO") {
-            "mediaType must be VIDEO or AUDIO (got $mediaType)"
-        }
-        // Trim is optional; both must be present together. File-duration
-        // check lives in the route where ffprobe is available.
-        // NOTE: error messages are wire error codes — clients switch on
-        // `ErrorResponse.error`, so don't reword without updating the
-        // SeparationSpec contract in README + separation-pipeline skill.
-        require((trimStartMs == null) == (trimEndMs == null)) { "partial_trim_range" }
-        if (trimStartMs != null && trimEndMs != null) {
-            require(trimStartMs >= 0) { "trim_start_negative" }
-            require(trimEndMs > trimStartMs) { "trim_range_invalid" }
-            require(trimEndMs - trimStartMs >= 500) { "trim_range_too_short" }
-        }
-    }
-}
+)
 
 @Serializable
 data class SeparationResponse(val jobId: String)

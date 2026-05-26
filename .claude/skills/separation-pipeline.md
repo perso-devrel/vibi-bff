@@ -11,8 +11,10 @@ trigger: 분리
 
 ## 아키텍처 한 장 요약
 
+모바일이 trim + audio extract 까지 끝낸 audio (m4a/mp3/wav) 만 multipart 로 받음. BFF 는 받은 파일을 그대로 Perso 에 forward — ffmpeg 가공 단계 없음.
+
 ```
-클라이언트 업로드 ─▶ (spec.trim* 있으면 MediaTrimmer 로 ffmpeg stream-copy 컷)
+모바일 (AudioExtractor → m4a) ─▶ POST /separate (audio bytes)
                       │
                       ▼
                    PersoClient (SAS → Blob PUT → register)
@@ -132,25 +134,19 @@ ffmpeg -y -i a.mp3 -i b.mp3 -i c.mp3 \
 2. **ZIP 내부 파일명 컨벤션** — `extractSpeakerZip` 은 `.mp3` 만 필터해 순차 인덱스 배정. Perso 가 `speaker_A.mp3` 같은 이름을 주면 A→`speaker_0`, B→`speaker_1` 순으로 매핑됨. 화자별 정렬 유지되는지 실호출로 확인 권장.
 3. **Perso 쿼터** — translate 를 쿼터 차감 없이 분리만 하는 "separation-only" 모드는 문서에 없음. 사용량 모니터링 필요.
 
-## Pre-upload trim (`spec.trimStartMs` / `trimEndMs`)
+## 입력 포맷 화이트리스트
 
-`SeparationSpec` 에 두 필드 모두 있으면 `maybeTrim` (in `SeparationRoutes.kt`) 이
-`MediaTrimmer.probeDurationMs` 로 실제 duration 을 재 본 뒤 범위 초과면
-`400 trim_end_exceeds_duration` 로 거절, 통과하면 `MediaTrimmer.trim` 으로
-`-c copy` 스트림 카피 컷을 만들어 원본을 삭제하고 잘린 파일을 파이프라인에
-전달한다. static validation (범위/최소 500ms/부분 지정) 은 `SeparationSpec.init` 에서
-수행하며 에러 코드는 `partial_trim_range`, `trim_range_invalid`,
-`trim_range_too_short`, `trim_start_negative`. ffprobe/ffmpeg 실패는
-`500 ffmpeg_error`. 두 필드 모두 null 이면 기존과 완전히 동일 (backward compatible).
-비용은 제공자 쪽에서 duration-based 로 자동 감소 — 별도 청구 로직 없음.
+라우트가 multipart `file` 의 확장자를 `m4a` / `mp3` / `wav` 만 허용. 외이면 `400 unsupported_audio_format`. video/* / flac / ogg 도 reject — flac 은 Perso silent-fail 회귀 가드. 사이즈 제한 `MAX_SEPARATION_AUDIO_SIZE` (env override, 기본 100MB).
+
+`SeparationSpec` 의 trim window / mediaType / editedRenderJobId 필드는 surface 에서 제거됨. 모바일이 `AudioExtractor` (iOS `AVAssetExportPresetAppleM4A`) 로 trim + audio extract 까지 끝낸 m4a 를 보내므로 BFF 측 처리 단계가 없다.
 
 ## 주요 파일
 
-- `service/PersoClient.kt` — 업로드 3-step, translate, progress, download
+- `service/PersoClient.kt` — 업로드 3-step, submitAudioSeparation, polling, download
 - `service/SeparationService.kt` — Job 관리, 파이프라인 오케스트레이션, dispose
 - `service/StemMixService.kt` — ffmpeg amix 합성, `buildStemMixCommand`
 - `service/SignedUrlService.kt` — HMAC 서명
-- `service/MediaTrimmer.kt` — pre-upload ffprobe + ffmpeg stream-copy trim
-- `routes/SeparationRoutes.kt` — `/api/v2/separate/*` 엔드포인트 (maybeTrim 포함)
+- `service/MediaTrimmer.kt` — `probeDurationMs` (admin KPI / 크레딧 차감 입력 용)
+- `routes/SeparationRoutes.kt` — `/api/v2/separate/*` 엔드포인트
 - `model/PersoModels.kt` — 업스트림 DTO
 - `model/BffModels.kt` — `SeparationSpec`, `StemInfo`, `StemMixRequest` 등

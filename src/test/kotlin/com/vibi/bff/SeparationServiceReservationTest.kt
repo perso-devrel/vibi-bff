@@ -48,8 +48,7 @@ class SeparationServiceReservationTest {
             jobId = jobId,
             outputDir = outputDir,
             sourceFile = sourceFile,
-            spec = com.vibi.bff.model.SeparationSpec(mediaType = "AUDIO"),
-            audioPreExtracted = true,
+            spec = com.vibi.bff.model.SeparationSpec(),
         ).apply {
             status = "READY"
             stems = listOf(LocalStem("background", "배경음", stem))
