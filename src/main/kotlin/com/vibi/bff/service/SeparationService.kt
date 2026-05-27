@@ -291,10 +291,9 @@ class SeparationService(
         scope.launch {
             try {
                 externalCalls.withExternalCall("perso", "audio-separation-resume") {
-                    // 재시작 후엔 Perso 가 이미 처리 끝났을 가능성 높음 → initialDelay 짧게 (5s).
-                    // 아직 처리 중이면 normal pollIntervalMs 로 polling 진행.
-                    // markReady 는 runPipelineDownloadPhase 내부에서 stems 메타와 함께 처리됨.
-                    runPipelineDownloadPhase(job, persoProjectSeq, initialDelayMs = 5_000L)
+                    // 재시작 후엔 Perso 가 이미 처리 끝났을 가능성 높음 — 곧장 polling 진입해
+                    // 첫 호출에서 Completed 받고 download/markReady 흐름으로 진행.
+                    runPipelineDownloadPhase(job, persoProjectSeq)
                 }
             } catch (e: Exception) {
                 job.status = "FAILED"
@@ -373,13 +372,11 @@ class SeparationService(
         // resumption 의 entry point. 본 hook 호출 실패는 catch 안에서 throw → catch 단에서 FAILED.
         onPersoProjectSeq(projectSeq)
 
-        // 폴링 전략: 음성분리 처리 시간 ≈ 구간 길이 × 3. 매우 긴 영상이면 5분으로 cap —
-        // 그 이상 sleep 하면 client 가 PROCESSING 상태에서 progressReason 변화 없이
-        // 멈춰있는 것처럼 보여 timeout 으로 의심받음. 5분 후엔 정상 polling 으로 진입.
-        val rangeMs = job.sourceDurationMs
-        val initialDelayMs = (if (rangeMs > 0) rangeMs * 3 else 30_000L)
-            .coerceAtMost(5 * 60_000L)
-        runPipelineDownloadPhase(job, projectSeq, initialDelayMs)
+        // 곧장 polling 진입 — Perso 가 source 길이 × 3 보다 훨씬 빨리 끝나는 케이스가 잦아
+        // 이전 initialDelay(최대 5분) 동안 사용자 UI 가 progress=0 으로 멈춰있는 사고가 반복됨.
+        // pollIntervalMs(default 15s) 단위 getProgress 가 withTransientRetry 로 보호되므로
+        // submit 직후 한 번 추가로 친다고 안전성 비용 없음.
+        runPipelineDownloadPhase(job, projectSeq)
     }
 
     /**
@@ -390,12 +387,9 @@ class SeparationService(
     private suspend fun runPipelineDownloadPhase(
         job: SeparationJob,
         projectSeq: Long,
-        initialDelayMs: Long,
     ) {
         job.status = "PROCESSING"
-        log.info("Perso polling phase begin: jobId={} projectSeq={} initialDelay={}ms",
-            job.jobId, projectSeq, initialDelayMs)
-        delay(initialDelayMs)
+        log.info("Perso polling phase begin: jobId={} projectSeq={}", job.jobId, projectSeq)
         pollPersoUntilComplete(
             persoClient, scope, projectSeq,
             pollIntervalMs = pollIntervalMs,
