@@ -12,11 +12,8 @@ import io.ktor.client.statement.*
 import io.ktor.http.*
 import io.ktor.http.content.*
 import io.ktor.utils.io.*
-import kotlinx.io.asSource
-import kotlinx.io.buffered
 import org.slf4j.LoggerFactory
 import java.io.File
-import java.io.FileInputStream
 import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
@@ -92,24 +89,39 @@ class PersoClient(
     // ── Step 2: Upload raw bytes to Azure Blob via SAS URL ───────────────────
     // The SAS URL is pre-signed — must NOT send XP-API-KEY here, and must set
     // x-ms-blob-type so Azure accepts it as a block blob upload. Streamed via
-    // ReadChannelContent so 500 MB uploads don't pin the full file in heap.
+    // WriteChannelContent so 500 MB uploads don't pin the full file in heap.
     //
-    // Retry safety: Ktor 가 connect 재시도 시 readFrom() 을 다시 호출할 수 있는데
-    // 매 호출마다 fresh FileInputStream 을 여는 lambda 형태로 만들면 stream 이 이미
-    // close 된 상태에서 재사용되는 race 를 회피한다.
+    // 이전엔 `ByteReadChannel(FileInputStream(file).asSource().buffered())` 를 감싼
+    // ReadChannelContent 패턴을 썼는데 kotlinx-io Source → ByteReadChannel 변환이
+    // contentLength 만큼 바이트가 채워지기 전 source.exhausted()=true 를 시그널하는
+    // 회귀가 관측됨 → 엔진이 readByte 에서 `EOFException: Not enough data available`.
+    // 직접 InputStream 을 read 해 ByteWriteChannel 에 writeFully 하면 중간 변환을
+    // 우회한다.
+    //
+    // withTransientRetry 래핑 — Azure / 네트워크 일시 5xx, IOException (EOFException
+    // 포함), timeout 을 3회 backoff 재시도. writeTo 안에서 매 호출마다 fresh
+    // FileInputStream 을 열어 재시도 시 head 부터 다시 스트림.
     suspend fun uploadToBlob(sasUrl: String, file: File) {
-        val response = httpClient.put(sasUrl) {
-            header("x-ms-blob-type", "BlockBlob")
-            setBody(object : OutgoingContent.ReadChannelContent() {
-                override val contentLength: Long = file.length()
-                override val contentType: ContentType = ContentType.Application.OctetStream
-                override fun readFrom(): ByteReadChannel {
-                    // 매 호출마다 새 FileInputStream — retry 시에도 head 부터 다시 읽힘.
-                    return ByteReadChannel(FileInputStream(file).asSource().buffered())
-                }
-            })
+        withTransientRetry("uploadToBlob(${file.name})") {
+            val response = httpClient.put(sasUrl) {
+                header("x-ms-blob-type", "BlockBlob")
+                setBody(object : OutgoingContent.WriteChannelContent() {
+                    override val contentLength: Long = file.length()
+                    override val contentType: ContentType = ContentType.Application.OctetStream
+                    override suspend fun writeTo(channel: ByteWriteChannel) {
+                        file.inputStream().use { input ->
+                            val buffer = ByteArray(8192)
+                            while (true) {
+                                val read = input.read(buffer)
+                                if (read <= 0) break
+                                channel.writeFully(buffer, 0, read)
+                            }
+                        }
+                    }
+                })
+            }
+            checkResponse(response)
         }
-        checkResponse(response)
     }
 
     // ── Step 3: Register media with Perso backend ────────────────────────────
