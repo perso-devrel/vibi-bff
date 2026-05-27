@@ -30,13 +30,13 @@ jobs:
       id-token: write   # WIF OIDC 토큰 발급에 필수
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
       # admin-ui (Vite) 빌드 산출물은 .gitignore 됨 — 매 배포마다 fresh build 해서
       # src/main/resources/admin/ 로 떨어뜨려야 Ktor staticResources 가 마운트한다.
       # 빠뜨리면 ADMIN_SLUG 가 박혀도 부팅 로그에 WARN + admin URL 404.
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -53,13 +53,13 @@ jobs:
           npm run build
 
       - name: Authenticate to Google Cloud (WIF)
-        uses: google-github-actions/auth@v2
+        uses: google-github-actions/auth@v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SA_EMAIL }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v2
+        uses: google-github-actions/setup-gcloud@v3
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
