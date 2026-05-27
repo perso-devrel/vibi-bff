@@ -6,6 +6,7 @@ import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.PersoApiException
 import io.ktor.client.*
 import io.ktor.client.call.*
+import io.ktor.client.plugins.HttpRequestTimeoutException
 import io.ktor.client.request.*
 import io.ktor.client.statement.*
 import io.ktor.http.*
@@ -16,6 +17,7 @@ import kotlinx.io.buffered
 import org.slf4j.LoggerFactory
 import java.io.File
 import java.io.FileInputStream
+import java.io.IOException
 import java.net.URI
 import java.net.URLEncoder
 
@@ -40,14 +42,51 @@ class PersoClient(
         }
     }
 
+    /**
+     * Perso control-plane 호출의 transient 실패 retry 헬퍼.
+     * 재시도 대상:
+     *   - PersoApiException 5xx (Perso 가 종종 F5001 INTERNAL_SERVER_ERROR 던짐)
+     *   - IOException (EOFException = "server prematurely closed the connection" 등 connection drop)
+     *   - HttpRequestTimeoutException (request/socket timeout)
+     * 4xx 는 즉시 throw — 인증/요청 오류는 재시도해도 안 풀림.
+     *
+     * 대용량 PUT/GET (uploadToBlob / streamDownloadAuthorized) 은 별도 정책 (이미 caller 측
+     * `downloadFreshLinkWithRetry` 가 fresh-link backoff 으로 감쌈) — 본 helper 미사용.
+     */
+    private suspend fun <T> withTransientRetry(label: String, block: suspend () -> T): T {
+        var lastErr: Exception? = null
+        repeat(3) { attempt ->
+            try {
+                return block()
+            } catch (e: PersoApiException) {
+                if (e.statusCode in 400..499) throw e
+                lastErr = e
+                log.warn("{} {} (attempt {}/3) — retrying in 3s: {}",
+                    label, e.statusCode, attempt + 1, e.message)
+            } catch (e: HttpRequestTimeoutException) {
+                lastErr = e
+                log.warn("{} timeout (attempt {}/3) — retrying in 3s: {}",
+                    label, attempt + 1, e.message)
+            } catch (e: IOException) {
+                lastErr = e
+                log.warn("{} IO error (attempt {}/3) — retrying in 3s: {} ({})",
+                    label, attempt + 1, e::class.simpleName, e.message)
+            }
+            kotlinx.coroutines.delay(3000)
+        }
+        throw lastErr ?: RuntimeException("$label failed after 3 attempts")
+    }
+
     // ── Step 1: Get SAS token ────────────────────────────────────────────────
     suspend fun getSasToken(fileName: String): PersoSasTokenResponse {
         val encoded = URLEncoder.encode(fileName, Charsets.UTF_8)
-        val response = httpClient.get(url("/file/api/upload/sas-token?fileName=$encoded")) {
-            authHeader()
+        return withTransientRetry("getSasToken($fileName)") {
+            val response = httpClient.get(url("/file/api/upload/sas-token?fileName=$encoded")) {
+                authHeader()
+            }
+            checkResponse(response)
+            response.body()
         }
-        checkResponse(response)
-        return response.body()
     }
 
     // ── Step 2: Upload raw bytes to Azure Blob via SAS URL ───────────────────
@@ -76,7 +115,6 @@ class PersoClient(
     // ── Step 3: Register media with Perso backend ────────────────────────────
     // The `fileUrl` must be the SAS URL with the ?query-string stripped —
     // Perso stores the path-only form and signs its own reads internally.
-    // Perso 가 일시적 5xx (특히 F5001 INTERNAL_SERVER_ERROR) 던질 때가 있어 짧은 backoff 재시도.
     suspend fun registerMedia(
         mediaType: PersoMediaType,
         sasUrl: String,
@@ -87,29 +125,19 @@ class PersoClient(
             PersoMediaType.AUDIO -> "/file/api/upload/audio"
         }
         val fileUrl = sasUrl.substringBefore('?')
-        var lastErr: PersoApiException? = null
-        repeat(3) { attempt ->
-            try {
-                val response = httpClient.put(url(path)) {
-                    authHeader()
-                    contentType(ContentType.Application.Json)
-                    setBody(PersoRegisterMediaRequest(
-                        spaceSeq = config.spaceSeq,
-                        fileUrl = fileUrl,
-                        fileName = fileName,
-                    ))
-                }
-                checkResponse(response)
-                return response.body()
-            } catch (e: PersoApiException) {
-                lastErr = e
-                // 4xx (인증/요청 오류) 는 retry 의미 없음 — 즉시 throw.
-                if (e.statusCode in 400..499) throw e
-                log.warn("registerMedia {} (attempt {}/3) — retrying in 3s: {}", e.statusCode, attempt + 1, e.message)
-                kotlinx.coroutines.delay(3000)
+        return withTransientRetry("registerMedia($fileName)") {
+            val response = httpClient.put(url(path)) {
+                authHeader()
+                contentType(ContentType.Application.Json)
+                setBody(PersoRegisterMediaRequest(
+                    spaceSeq = config.spaceSeq,
+                    fileUrl = fileUrl,
+                    fileName = fileName,
+                ))
             }
+            checkResponse(response)
+            response.body()
         }
-        throw lastErr ?: RuntimeException("Perso registerMedia failed after retries")
     }
 
     // Convenience: SAS + blob upload + register in one call.
@@ -137,17 +165,19 @@ class PersoClient(
     ): Long {
         log.info("Perso submitAudioSeparation: mediaSeq={} isVideoProject={} title={}",
             mediaSeq, isVideoProject, title)
-        val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/audio-separation")) {
-            authHeader()
-            contentType(ContentType.Application.Json)
-            setBody(PersoAudioSeparationRequest(mediaSeq, isVideoProject, title))
+        return withTransientRetry("submitAudioSeparation(mediaSeq=$mediaSeq)") {
+            val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/audio-separation")) {
+                authHeader()
+                contentType(ContentType.Application.Json)
+                setBody(PersoAudioSeparationRequest(mediaSeq, isVideoProject, title))
+            }
+            checkResponse(response)
+            val env: PersoEnvelope<PersoTranslateResult> = response.body()
+            val first = env.result.startGenerateProjectIdList.firstOrNull()
+                ?: throw PersoApiException(500, "Perso audio-separation returned empty startGenerateProjectIdList")
+            log.info("Perso audio-separation project submitted: projectSeq={}, mediaSeq={}", first, mediaSeq)
+            first
         }
-        checkResponse(response)
-        val env: PersoEnvelope<PersoTranslateResult> = response.body()
-        val first = env.result.startGenerateProjectIdList.firstOrNull()
-            ?: throw PersoApiException(500, "Perso audio-separation returned empty startGenerateProjectIdList")
-        log.info("Perso audio-separation project submitted: projectSeq={}, mediaSeq={}", first, mediaSeq)
-        return first
     }
 
     /**
@@ -223,11 +253,13 @@ class PersoClient(
 
     // ── Progress poll ────────────────────────────────────────────────────────
     suspend fun getProgress(projectSeq: Long): PersoProgressResult {
-        val response = httpClient.get(url(
-            "/video-translator/api/v1/projects/$projectSeq/space/${config.spaceSeq}/progress"
-        )) { authHeader() }
-        checkResponse(response)
-        return response.body<PersoEnvelope<PersoProgressResult>>().result
+        return withTransientRetry("getProgress($projectSeq)") {
+            val response = httpClient.get(url(
+                "/video-translator/api/v1/projects/$projectSeq/space/${config.spaceSeq}/progress"
+            )) { authHeader() }
+            checkResponse(response)
+            response.body<PersoEnvelope<PersoProgressResult>>().result
+        }
     }
 
     /**
@@ -236,14 +268,16 @@ class PersoClient(
      *   - target=originalSubBackground → audioFile.originalSubBackgroundDownloadLink (.wav)
      */
     suspend fun getSeparationDownloadLinks(projectSeq: Long, target: String): PersoSeparationDownloadLinks {
-        val response = httpClient.get(url(
-            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download"
-        )) {
-            authHeader()
-            parameter("target", target)
+        return withTransientRetry("getSeparationDownloadLinks($projectSeq,$target)") {
+            val response = httpClient.get(url(
+                "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/download"
+            )) {
+                authHeader()
+                parameter("target", target)
+            }
+            checkResponse(response)
+            response.body<PersoEnvelope<PersoSeparationDownloadLinks>>().result
         }
-        checkResponse(response)
-        return response.body<PersoEnvelope<PersoSeparationDownloadLinks>>().result
     }
 
     /**
@@ -254,15 +288,17 @@ class PersoClient(
      * 두 형태 모두 받도록 JsonElement 로 먼저 받아서 envelope 이면 벗기고 아니면 그대로 파싱.
      */
     suspend fun getProjectInfo(projectSeq: Long): PersoProjectInfo {
-        val response = httpClient.get(url(
-            "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}"
-        )) { authHeader() }
-        checkResponse(response)
-        val element = response.body<kotlinx.serialization.json.JsonElement>()
-        val obj = element as? kotlinx.serialization.json.JsonObject
-            ?: throw PersoApiException(500, "getProjectInfo: expected JSON object, got $element")
-        val target = obj["result"] ?: obj
-        return AppJson.decodeFromJsonElement(PersoProjectInfo.serializer(), target)
+        return withTransientRetry("getProjectInfo($projectSeq)") {
+            val response = httpClient.get(url(
+                "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}"
+            )) { authHeader() }
+            checkResponse(response)
+            val element = response.body<kotlinx.serialization.json.JsonElement>()
+            val obj = element as? kotlinx.serialization.json.JsonObject
+                ?: throw PersoApiException(500, "getProjectInfo: expected JSON object, got $element")
+            val target = obj["result"] ?: obj
+            AppJson.decodeFromJsonElement(PersoProjectInfo.serializer(), target)
+        }
     }
 
 }
