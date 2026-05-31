@@ -26,6 +26,11 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.sync.Semaphore
+import kotlinx.coroutines.sync.withPermit
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -34,6 +39,10 @@ import java.util.UUID
 // to top-level vals avoids O(directives) regex compilation per render submit.
 // 자체 BFF URL: "/api/v2/separate/{jobId}/stem/{stemId}?token=..."
 private val SEP_URL_REGEX = Regex("""(?:.*?)/api/v2/separate/([^/?#]+)/stem/([^/?#]+)\??(.*)$""")
+
+// v3 렌더의 R2 asset 병렬 다운로드 동시 한도. 다운로드는 디스크 스트리밍이라 메모리 부담은 없으나
+// R2 커넥션/소켓 폭주를 막기 위해 상한을 둔다. 대부분 렌더는 에셋 1~3개라 4면 충분.
+private const val MAX_PARALLEL_ASSET_DOWNLOADS = 4
 
 fun Route.renderRoutes(
     renderService: RenderService,
@@ -264,18 +273,25 @@ fun Route.renderRoutes(
             val config = call.receive<RenderConfigV3>()
 
             // R2 → 로컬 asset 캐시 다운로드 (멱등). 같은 인스턴스에서 같은 키는 다운로드 skip.
+            // 세그먼트 영상 + BGM 오디오를 병렬 다운로드 — downloadIfAbsent 는 디스크 스트리밍이라
+            // RAM 부담 없고, 순차 루프 대비 멀티에셋 렌더의 다운로드 대기를 단축. 동시 커넥션 폭주를
+            // 막기 위해 Semaphore 로 제한. 결과는 awaitAll 후 단일 스레드에서 맵에 채워 동시쓰기 회피.
             val videoFiles = mutableMapOf<String, File>()
             val bgmAudioFiles = mutableMapOf<String, File>()
             withContext(Dispatchers.IO) {
-                for (key in config.segments.map { it.sourceAssetKey }.distinct()) {
+                val gate = Semaphore(MAX_PARALLEL_ASSET_DOWNLOADS)
+                suspend fun fetch(key: String): Pair<String, File> {
                     val local = File(fileStorage.assetCacheDir, key.substringAfterLast('/'))
-                    objectStore.downloadIfAbsent(key, local)
-                    videoFiles[key] = local
+                    gate.withPermit { objectStore.downloadIfAbsent(key, local) }
+                    return key to local
                 }
-                for (key in config.bgmClips.map { it.audioAssetKey }.distinct()) {
-                    val local = File(fileStorage.assetCacheDir, key.substringAfterLast('/'))
-                    objectStore.downloadIfAbsent(key, local)
-                    bgmAudioFiles[key] = local
+                coroutineScope {
+                    val videoJobs = config.segments.map { it.sourceAssetKey }.distinct()
+                        .map { key -> async { fetch(key) } }
+                    val bgmJobs = config.bgmClips.map { it.audioAssetKey }.distinct()
+                        .map { key -> async { fetch(key) } }
+                    videoJobs.awaitAll().forEach { (k, f) -> videoFiles[k] = f }
+                    bgmJobs.awaitAll().forEach { (k, f) -> bgmAudioFiles[k] = f }
                 }
             }
 
