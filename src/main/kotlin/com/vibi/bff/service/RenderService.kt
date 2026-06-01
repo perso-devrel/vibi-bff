@@ -576,11 +576,41 @@ class RenderService(
         qualityProfile: QualityProfile,
     ) {
         require(segments.isNotEmpty()) { "segments must not be empty" }
+        val sorted = segments.sortedBy { it.order }
+
+        // Fast path — 영상 변형 편집(트림 컷 · 속도 · 분할/재정렬)이 전혀 없으면 per-segment libx264
+        // 재인코딩 + concat 을 통째로 스킵하고 원본 영상을 -c:v copy 로 직결한다. 음원분리 mute/스템 ·
+        // BGM · 원본 볼륨은 모두 audio 필터라 buildFfmpegCommand 가 동일하게 처리 → 출력 영상은
+        // 원본과 비트 단위 동일(사용자 의도에 완전 충실)하면서 영상 인코딩 비용 0.
+        if (canStreamCopyWholeVideo(sorted)) {
+            val seg = sorted[0]
+            val videoFile = videoFiles[seg.sourceFileKey]
+                ?: throw IllegalArgumentException("Video file not found: ${seg.sourceFileKey}")
+            // buildFfmpegCommand 는 base 오디오로 [0:a] 를 참조한다. 원본에 audio 트랙이 없으면
+            // 그 참조가 깨지므로(기존 trim 경로는 anullsrc 로 무음을 보장) fast path 를 포기하고
+            // 정규 trim 경로로 폴백한다. probe 실패(null)도 보수적으로 폴백.
+            val kinds = MediaTrimmer.probeStreamKinds(videoFile)
+            if (kinds != null && kinds.contains("audio")) {
+                val totalDurationMs = segmentOutputDurationMs(seg)
+                val command = buildFfmpegCommand(
+                    videoFile, totalDurationMs, job.outputFile,
+                    bgmAudioFiles, bgmClips,
+                    separationDirectives, qualityProfile,
+                    baseVolume = seg.volumeScale,
+                )
+                log.info("Starting stream-copy render (no video edit): jobId={}", job.jobId)
+                runFinalRenderProcess(job, command, totalDurationMs)
+                return
+            }
+            log.info(
+                "Stream-copy fast path skipped (no audio track / probe failed) — falling back to trim path: jobId={}",
+                job.jobId,
+            )
+        }
+
         val tempDir = File(renderDir, "tmp_${job.jobId}")
         tempDir.mkdirs()
         try {
-            val sorted = segments.sortedBy { it.order }
-
             val totalSteps = sorted.size + 2 // per-segment + concat + final
             val stepsDone = AtomicInteger(0)
 
@@ -752,6 +782,55 @@ class RenderService(
         return ((trimEnd - trimStart) / seg.speedScale).toLong().coerceAtLeast(0L)
     }
 
+    /**
+     * 영상 도메인 변형(트림 컷 · 속도 · 분할/재정렬)이 전혀 없어 원본 영상을 그대로 stream-copy 할
+     * 수 있는지 판정. 볼륨/음원분리/BGM 은 audio-only 라 여기 영향 없음(최종 mix 패스가 처리).
+     *
+     * 조건: 단일 세그먼트 + speed==1.0 + 트림 컷 없음. trimEnd 는 0/null(="no trim" sentinel) 또는
+     * durationMs 이상이면 끝까지(컷 없음). 하나라도 어긋나면 false → 기존 per-segment 재인코딩 경로.
+     */
+    private fun canStreamCopyWholeVideo(sorted: List<Segment>): Boolean {
+        if (sorted.size != 1) return false
+        val seg = sorted[0]
+        if (seg.speedScale != 1.0f) return false
+        if ((seg.trimStartMs ?: 0L) > 0L) return false
+        val trimEnd = seg.trimEndMs ?: 0L
+        if (trimEnd in 1 until seg.durationMs) return false
+        return true
+    }
+
+    /**
+     * 단일 ffmpeg 프로세스를 실행하고 진행률/완료 상태를 [job] 에 반영. stream-copy fast path 전용 —
+     * 선행 step(trim/concat)이 없으므로 진행률을 0~99 로 직접 매핑하고 완료 시 100.
+     */
+    private suspend fun runFinalRenderProcess(job: RenderJob, command: List<String>, totalDurationMs: Long) {
+        val proc = ProcessBuilder(command).redirectErrorStream(true).start()
+        try {
+            val durationSec = totalDurationMs / 1000.0
+            proc.inputStream.bufferedReader().useLines { lines ->
+                lines.forEach { line ->
+                    parseFfmpegProgress(line, durationSec)?.let { pct -> job.progress = pct.coerceIn(0, 99) }
+                }
+            }
+            val exitCode = proc.waitFor()
+            if (exitCode == 0 && job.outputFile.exists()) {
+                job.status = "COMPLETED"
+                job.progress = 100
+                job.lastAccessedAt = System.currentTimeMillis()
+                log.info("Stream-copy render completed: jobId={}, size={}", job.jobId, job.outputFile.length())
+                maybeEagerPushToR2(job)
+            } else {
+                job.status = "FAILED"
+                job.error = "ffmpeg stream-copy step exited with code $exitCode"
+                job.outputFile.delete()
+                log.error("Stream-copy render failed: jobId={}, exitCode={}", job.jobId, exitCode)
+            }
+        } catch (e: Exception) {
+            proc.destroyForcibly()
+            throw e
+        }
+    }
+
     companion object {
         /** Default ffmpeg concurrency = max(1, CPU count / 2). Override via
          * RENDER_MAX_CONCURRENT env wired in Application.kt. libx264 uses all
@@ -800,6 +879,10 @@ class RenderService(
         bgmClips: List<BgmClip> = emptyList(),
         separationDirectives: List<DirectiveWithStemFiles> = emptyList(),
         qualityProfile: QualityProfile = QualityProfile.of("medium"),
+        /** 원본(base) 오디오에 적용할 볼륨 배율. 영상 stream-copy fast path 에선 per-segment trim
+         *  단계가 생략되므로 세그먼트 volumeScale 을 여기서 base 에 직접 건다. 1.0f(기본)이면 무동작
+         *  — 기존 호출자(volume 이 이미 trim 에 반영된 multi-segment 최종 mix / legacy)는 영향 없음. */
+        baseVolume: Float = 1.0f,
     ): List<String> {
         val cmd = mutableListOf("ffmpeg", "-y")
         cmd.addAll(listOf("-i", videoFile.absolutePath))
@@ -828,25 +911,34 @@ class RenderService(
 
         val filters = mutableListOf<String>()
 
+        // base 오디오 볼륨(fast path 의 segment volumeScale). 1.0f 면 [0:a] 그대로.
+        val baseInput: String = if (baseVolume != 1.0f) {
+            filters.add("[0:a]volume=${baseVolume}[base_vol]")
+            "[base_vol]"
+        } else {
+            "[0:a]"
+        }
+
         // muteOriginalSegmentAudio=true 인 directive 들의 range 동안 base audio 를
         // 0 으로. enable= expression 안에 OR 로 모든 mute window 를 합쳐 한 번의
         // volume 필터로 처리.
         val muteWindows = separationDirectives.filter { it.muteOriginalSegmentAudio }
         val baseAudioRef: String = if (muteWindows.isEmpty()) {
-            "[0:a]"
+            baseInput
         } else {
             // Invariant: rangeStartMs/rangeEndMs are Long (ms) → / 1000.0 always yields
             // multiples of 0.001 → never enters scientific notation (< 1e-3) range.
             val expr = muteWindows.joinToString("+") {
                 "between(t,${it.rangeStartMs / 1000.0},${it.rangeEndMs / 1000.0})"
             }
-            filters.add("[0:a]volume=enable='gt($expr,0)':volume=0[base_muted]")
+            filters.add("${baseInput}volume=enable='gt($expr,0)':volume=0[base_muted]")
             "[base_muted]"
         }
 
         val hasAnyAudio = bgmClips.isNotEmpty() ||
             separationDirectives.any { it.stems.isNotEmpty() } ||
-            muteWindows.isNotEmpty()
+            muteWindows.isNotEmpty() ||
+            baseVolume != 1.0f
         if (!hasAnyAudio) {
             filters.add("[0:a]anull[aout]")
         } else {

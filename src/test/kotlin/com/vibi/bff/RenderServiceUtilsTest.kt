@@ -131,6 +131,80 @@ class RenderServiceUtilsTest {
         assertTrue(filter.contains("[base_muted][stem_0_0][stem_0_1]amix="), "amix wiring missing in: $filter")
     }
 
+    // ── baseVolume (영상 stream-copy fast path 의 세그먼트 볼륨) ───────────────────
+
+    @Test
+    fun `buildFfmpegCommand applies baseVolume to base audio when no other audio`() {
+        // Fidelity guard: fast path 에선 per-segment trim 이 생략되므로 segment volumeScale 이
+        // baseVolume 으로 들어와 base 오디오에 그대로 적용돼야 한다 (누락되면 볼륨 편집이 사라짐).
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-basevol").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            videoDurationMs = 10_000,
+            outputFile = out,
+            baseVolume = 0.5f,
+        )
+        val filter = cmd[cmd.indexOf("-filter_complex") + 1]
+        assertTrue(filter.contains("[0:a]volume=0.5[base_vol]"), "baseVolume filter missing in: $filter")
+        assertTrue(filter.contains("[base_vol]anull[aout]"), "base_vol not routed to aout in: $filter")
+        // 영상은 stream-copy 유지
+        assertTrue(cmd.containsInOrder("-c:v", "copy"), "video must be stream-copied: $cmd")
+    }
+
+    @Test
+    fun `buildFfmpegCommand applies baseVolume before separation mute window`() {
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-basevol-mute").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            videoDurationMs = 10_000,
+            outputFile = out,
+            separationDirectives = listOf(
+                DirectiveWithStemFiles(
+                    rangeStartMs = 1000,
+                    rangeEndMs = 4000,
+                    muteOriginalSegmentAudio = true,
+                    stems = emptyList(),
+                ),
+            ),
+            baseVolume = 0.5f,
+        )
+        val filter = cmd[cmd.indexOf("-filter_complex") + 1]
+        // volume 먼저, 그 결과([base_vol])에 mute 윈도우 적용
+        assertTrue(filter.contains("[0:a]volume=0.5[base_vol]"), "baseVolume filter missing in: $filter")
+        assertTrue(
+            filter.contains("[base_vol]volume=enable='gt(between(t,1.0,4.0),0)':volume=0[base_muted]"),
+            "mute must chain off base_vol in: $filter",
+        )
+    }
+
+    @Test
+    fun `buildFfmpegCommand with default baseVolume leaves base untouched`() {
+        // 하위호환 guard: 기존 호출자(baseVolume 미지정)는 [0:a] 를 그대로 써야 한다 — base_vol 라벨 없음.
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-basevol-default").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            videoDurationMs = 10_000,
+            outputFile = out,
+        )
+        val filter = cmd[cmd.indexOf("-filter_complex") + 1]
+        assertFalse(filter.contains("base_vol"), "default baseVolume must not inject a volume filter: $filter")
+        assertTrue(filter.contains("[0:a]anull[aout]"), "expected passthrough base in: $filter")
+    }
+
+    private fun List<String>.containsInOrder(a: String, b: String): Boolean {
+        val i = indexOf(a)
+        return i >= 0 && i + 1 < size && this[i + 1] == b
+    }
+
     @Test
     fun `buildFfmpegCommand amix uses normalize=0 and alimiter for separation mix`() {
         // Regression guard: separation directive 구간에서 [base_muted] 는 silence 인데 amix 의 default
