@@ -217,6 +217,7 @@ fun Application.module() {
         queue = separationQueueRepository,
         bffInstanceId = bffInstanceId,
         maxPersoInFlight = appConfig.separation.maxPersoInFlight,
+        stuckSubmittingSec = appConfig.separation.stuckSubmittingSec,
     )
     separationDispatcher.start()
 

@@ -265,6 +265,10 @@ data class SeparationConfig(
      *  보수적으로 1로 두면 BFF 큐가 모든 대기 흡수 (UX 깔끔), 적극적으로 3으로 두면 throughput
      *  최대화. 사고 시 즉시 1로 떨어뜨려 Perso 호출 차단 가능 (env override). */
     val maxPersoInFlight: Int,
+    /** SUBMITTING 상태가 이 초 이상 지속되면 stuck (인스턴스 사망) 으로 간주, reaper 가 QUEUED
+     *  로 복귀시킨다. SUBMITTING 구간엔 ≤100MB 블롭 업로드 + 재시도가 통째로 들어가므로 너무
+     *  짧으면 업로드 도중 멀쩡한 잡을 재큐잉 → 동시 2회 실행 사고. SeparationDispatcher 로 주입. */
+    val stuckSubmittingSec: Long,
 ) {
     init {
         require(signingSecret.length >= 32) {
@@ -276,6 +280,10 @@ data class SeparationConfig(
         require(maxPersoInFlight in 1..5) {
             "SEPARATION_MAX_PERSO_IN_FLIGHT must be in 1..5 (got $maxPersoInFlight). " +
                 "Perso 측 제약은 '실행 1 + 큐 2-3' — 5 이상은 거절 위험."
+        }
+        require(stuckSubmittingSec in 60..1_800) {
+            "SEPARATION_STUCK_SUBMITTING_SEC must be in 60..1800 (got $stuckSubmittingSec). " +
+                "업로드 worst-case 보다 길고 staleQueued(30분) 보다 짧아야 함."
         }
     }
 }
@@ -324,6 +332,7 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
             signingSecret = separation.property("signingSecret").getString(),
             urlTtlSec = separation.property("urlTtlSec").getString().toLong(),
             maxPersoInFlight = separation.property("maxPersoInFlight").getString().toInt(),
+            stuckSubmittingSec = separation.property("stuckSubmittingSec").getString().toLong(),
         ),
         auth = AuthConfig(
             googleClientIds = auth.property("googleClientIds").getString()

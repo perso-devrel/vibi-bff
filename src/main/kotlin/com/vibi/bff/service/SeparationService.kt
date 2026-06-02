@@ -118,6 +118,13 @@ class SeparationService(
 ) {
     private val log = LoggerFactory.getLogger(javaClass)
     private val jobs = ConcurrentHashMap<String, SeparationJob>()
+    /** 현재 이 인스턴스에서 파이프라인이 돌고 있는 jobId 집합 — 동일 잡 동시실행 가드.
+     *  reaper 가 업로드 도중 SUBMITTING 잡을 stuck 으로 오판해 QUEUED 로 되돌리면 dispatcher 가
+     *  같은 잡을 재claim 하는데, 첫 실행이 아직 살아있으면 둘째 실행이 같은 sourceFile 을 두고
+     *  경합 → 첫 실행의 finally{delete} 가 둘째의 업로드 소스를 지워 FileNotFoundException.
+     *  add() 가 false (이미 in-flight) 면 둘째 진입을 즉시 버려 차단. 진짜 인스턴스 사망 시엔
+     *  이 집합도 JVM 과 함께 사라지므로 새 인스턴스의 정상 재시도는 막지 않는다. */
+    private val inFlight = ConcurrentHashMap.newKeySet<String>()
     private val cleanup = Executors.newSingleThreadScheduledExecutor { r ->
         Thread(r, "separation-cleanup").apply { isDaemon = true }
     }
@@ -313,6 +320,13 @@ class SeparationService(
      *  markReady DB 콜은 runPipelineDownloadPhase 내부에서 stems_json/actualDurationMs 와
      *  함께 atomic 하게 처리되므로 여기서는 markFailed 만 다룬다. */
     private suspend fun executePipeline(job: SeparationJob) {
+        // 동일 잡 동시실행 가드 — reaper 오판으로 재claim 된 잡이 첫 실행이 살아있는 동안 다시
+        // 들어오면 즉시 버린다. add()=false 면 이미 in-flight. 차단된 쪽은 capacity 만 풀고 종료.
+        if (!inFlight.add(job.jobId)) {
+            log.warn("Pipeline already in-flight — skipping duplicate execution: jobId={}", job.jobId)
+            onJobChange?.invoke()
+            return
+        }
         try {
             externalCalls.withExternalCall("perso", "audio-separation") {
                 runPipeline(job, job.sourceFile) { projectSeq ->
@@ -330,6 +344,8 @@ class SeparationService(
                 .onFailure { ex -> log.warn("refund hook failed jobId={}: {}", job.jobId, ex.message) }
             log.error("Separation pipeline failed: jobId={}", job.jobId, e)
         } finally {
+            // in-flight 가드 해제 — 이후 정상 재시도 (다른 인스턴스 / 후속 claim) 는 다시 진입 가능.
+            inFlight.remove(job.jobId)
             // 끝 → capacity 한 칸 비움. dispatcher 가 즉시 다음 QUEUED 를 pickup 하도록.
             onJobChange?.invoke()
         }
