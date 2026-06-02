@@ -1,0 +1,52 @@
+# vibi-bff — Oracle Cloud Always Free (ARM Ampere A1) 배포.
+# Cloud Run 이 대신 해주던 것(상시기동·TLS·재시작)을 여기서 직접 wire.
+#
+#   bff   : Ktor 앱. 호스트에 포트 노출 안 함(expose 만) — Caddy 만 접근.
+#   caddy : 80/443 종단, Let's Encrypt 자동 TLS, bff:8080 로 리버스 프록시.
+#
+# 둘 다 restart: always → reboot/크래시/회수 후 재기동 시 자동 복구
+# (Always Free 회수 자체는 PAYG 전환으로 방지 — README 참고).
+#
+# 기동:  docker compose up -d --build
+# 로그:  docker compose logs -f bff
+# 갱신:  git pull && docker compose up -d --build
+
+services:
+  bff:
+    # 기본: ARM VM 에서 직접 빌드 (cross-arch 헤더에이크 없음).
+    # GHCR pull 로 바꾸려면 build 블록 지우고: image: ghcr.io/<owner>/vibi-bff:latest
+    build:
+      context: ../..
+      dockerfile: Dockerfile
+    image: vibi-bff:local
+    env_file:
+      - ./bff.env
+    # bff.env 보다 우선 — Oracle VM 고정값. 로컬 dev .env 와 충돌 안 나게 여기서 못박음.
+    environment:
+      PORT: "8080"
+      STORAGE_PATH: /tmp/storage
+      PERSO_BASE_URL: https://api.perso.ai
+      PERSO_STORAGE_BASE_URL: https://portal-media.perso.ai
+    expose:
+      - "8080"          # 호스트 미노출 — caddy 컨테이너 네트워크에서만 도달
+    restart: always
+    # /tmp/storage 는 R2 업로드 전 임시 버퍼. R2_BUCKET 설정 시 산출물은 R2 로 감.
+    tmpfs:
+      - /tmp/storage
+
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data       # 발급받은 인증서 영속 — 재기동해도 ACME rate limit 안 침
+      - caddy_config:/config
+    restart: always
+    depends_on:
+      - bff
+
+volumes:
+  caddy_data:
+  caddy_config:

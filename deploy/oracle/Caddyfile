@@ -1,0 +1,20 @@
+# Caddy 2 — 자동 HTTPS(Let's Encrypt) + bff:8080 리버스 프록시.
+# 도메인 A 레코드가 이 VM 의 public IP 를 가리키면 Caddy 가 부팅 시 인증서를 알아서 발급/갱신.
+
+{
+	# ACME 만료 알림 받을 이메일. 실제 주소로 교체.
+	email YOUR_EMAIL@example.com
+}
+
+# ↓ 실제 도메인으로 교체 (예: api.vibi.fm). 모바일 BFF_BASE_URL 과 동일해야 함.
+api.example.com {
+	reverse_proxy bff:8080
+
+	# /separate 업로드 ≤100MB. Caddy 는 기본 스트리밍(버퍼 0)이라 별도 한도 설정 불필요.
+	# 혹시 모를 폭주 방어용 상한만 넉넉히.
+	request_body {
+		max_size 150MB
+	}
+
+	encode gzip
+}

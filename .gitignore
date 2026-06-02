@@ -3,6 +3,7 @@ build/
 .idea/
 *.iml
 .env
+deploy/oracle/bff.env
 storage/
 credentials/
 .kotlin/
