@@ -40,9 +40,14 @@ class SeparationDispatcher(
     private val maxPersoInFlight: Int,
     parentScope: CoroutineScope? = null,
     private val tickIntervalMs: Long = 30_000,
-    /** SUBMITTING 상태가 이 초 이상 지나면 stuck 으로 간주, QUEUED 로 복귀. 정상 Perso 호출은
-     *  10-30초 내 끝나므로 60초면 stuck 으로 분류해도 false positive 거의 없음. */
-    private val stuckSubmittingSec: Long = 60,
+    /** SUBMITTING 상태가 이 초 이상 지나면 stuck (인스턴스 사망) 으로 간주, QUEUED 로 복귀.
+     *  주의: SUBMITTING 구간은 빠른 Perso submit 호출만이 아니라 그 앞의 **≤100MB 블롭 업로드
+     *  + withTransientRetry(3회 × 3s)** 를 통째로 포함한다 (markProcessing 은 업로드+submit 이
+     *  다 끝난 뒤 호출). 큰 파일 업로드는 60초를 쉽게 넘기므로 임계가 짧으면 reaper 가 멀쩡히
+     *  업로드 중인 잡을 죽은 줄 알고 재큐잉 → 같은 인스턴스가 동시 2회 실행, 첫 실행의
+     *  finally{sourceFile.delete()} 가 둘째 실행의 업로드 소스를 지워 FileNotFoundException.
+     *  운영값은 SeparationConfig.stuckSubmittingSec(기본 300s) 로 주입. 본 기본값은 테스트용. */
+    private val stuckSubmittingSec: Long = 300,
     /** QUEUED 상태가 이 초 이상 지나면 (보통 소스 파일 소유 인스턴스가 죽은 경우) FAILED. 30분
      *  은 모바일이 합리적으로 재시도 / 사용자 인내 한도를 모두 넘기는 보수적 threshold. */
     private val staleQueuedSec: Long = TimeUnit.MINUTES.toSeconds(30),
