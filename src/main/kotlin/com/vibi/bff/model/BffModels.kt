@@ -28,6 +28,8 @@ data class BgmClip(
     val audioFileKey: String,
     val startMs: Long,
     val volume: Float = 1.0f,
+    /** 1.0 = 정상 속도. ffmpeg atempo 필터로 적용 (0.25..4 → atempo chain). */
+    val speed: Float = 1.0f,
     /** 음원 내부 trim 시작 ms. 0 이면 음원 처음부터. */
     val sourceTrimStartMs: Long = 0L,
     /** 음원 내부 trim 끝 ms. 0 이면 음원 끝까지 (backward-compat). */
@@ -35,6 +37,7 @@ data class BgmClip(
 ) {
     init {
         requireValidVolume("BgmClip", volume)
+        require(speed > 0f) { "BgmClip.speed must be > 0 (got $speed)" }
         require(sourceTrimStartMs >= 0L) { "BgmClip.sourceTrimStartMs must be >= 0 (got $sourceTrimStartMs)" }
         require(sourceTrimEndMs == 0L || sourceTrimEndMs > sourceTrimStartMs) {
             "BgmClip.sourceTrimEndMs ($sourceTrimEndMs) must be 0 or > sourceTrimStartMs ($sourceTrimStartMs)"
@@ -164,6 +167,8 @@ data class BgmClipV3(
     val audioAssetKey: String,
     val startMs: Long,
     val volume: Float = 1.0f,
+    /** 1.0 = 정상 속도. ffmpeg atempo 필터로 적용 (0.25..4 → atempo chain). */
+    val speed: Float = 1.0f,
     val sourceTrimStartMs: Long = 0L,
     val sourceTrimEndMs: Long = 0L,
 ) {
@@ -172,6 +177,7 @@ data class BgmClipV3(
             "BgmClipV3.audioAssetKey must start with 'assets/' (got '$audioAssetKey')"
         }
         requireValidVolume("BgmClipV3", volume)
+        require(speed > 0f) { "BgmClipV3.speed must be > 0 (got $speed)" }
         require(sourceTrimStartMs >= 0L) { "BgmClipV3.sourceTrimStartMs must be >= 0" }
         require(sourceTrimEndMs == 0L || sourceTrimEndMs > sourceTrimStartMs) {
             "BgmClipV3.sourceTrimEndMs ($sourceTrimEndMs) must be 0 or > sourceTrimStartMs ($sourceTrimStartMs)"

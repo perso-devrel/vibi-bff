@@ -534,6 +534,7 @@ class RenderService(
                         startMs = clip.startMs,
                         volume = clip.volume,
                         label = "bgm$i",
+                        speed = clip.speed,
                         sourceTrimStartMs = clip.sourceTrimStartMs,
                         sourceTrimEndMs = clip.sourceTrimEndMs,
                     )
@@ -763,6 +764,7 @@ class RenderService(
         startMs: Long,
         volume: Float,
         label: String,
+        speed: Float = 1.0f,
         sourceTrimStartMs: Long = 0L,
         sourceTrimEndMs: Long = 0L,
     ): String {
@@ -771,7 +773,10 @@ class RenderService(
             val endClause = if (sourceTrimEndMs > 0L) ":${secondsToFfmpegArg(sourceTrimEndMs / 1000.0)}" else ""
             "atrim=${startArg}${endClause},asetpts=PTS-STARTPTS,"
         } else ""
-        return "[$inputIdx:a]${trim}adelay=${startMs}|${startMs},volume=${volume}[$label]"
+        // atempo 는 source sub-range 추출(atrim) 직후, 위치 지정(adelay) 직전에 적용 —
+        // startMs 는 (속도 반영된) 최종 타임라인 위치이므로 delay 는 tempo 후에 와야 정합.
+        val tempo = if (speed != 1.0f) "${atempoChain(speed)}," else ""
+        return "[$inputIdx:a]${trim}${tempo}adelay=${startMs}|${startMs},volume=${volume}[$label]"
     }
 
     private fun segmentOutputDurationMs(seg: Segment): Long {
@@ -950,6 +955,7 @@ class RenderService(
                         startMs = clip.startMs,
                         volume = clip.volume,
                         label = "bgm$i",
+                        speed = clip.speed,
                         sourceTrimStartMs = clip.sourceTrimStartMs,
                         sourceTrimEndMs = clip.sourceTrimEndMs,
                     )

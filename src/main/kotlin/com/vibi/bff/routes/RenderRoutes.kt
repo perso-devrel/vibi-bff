@@ -313,6 +313,7 @@ fun Route.renderRoutes(
                     audioFileKey = c.audioAssetKey,
                     startMs = c.startMs,
                     volume = c.volume,
+                    speed = c.speed,
                     sourceTrimStartMs = c.sourceTrimStartMs,
                     sourceTrimEndMs = c.sourceTrimEndMs,
                 )
