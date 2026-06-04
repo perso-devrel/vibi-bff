@@ -36,6 +36,9 @@ services:
 
   caddy:
     image: caddy:2
+    # Caddyfile 의 {$ACME_EMAIL} 치환용. bff.env 의 ACME_EMAIL 만 참조 (나머지 키는 caddy 가 무시).
+    env_file:
+      - ./bff.env
     ports:
       - "80:80"
       - "443:443"
