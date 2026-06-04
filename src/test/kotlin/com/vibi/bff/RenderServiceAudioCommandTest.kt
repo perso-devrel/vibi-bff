@@ -68,6 +68,52 @@ class RenderServiceAudioCommandTest {
     }
 
     @Test
+    fun `buildAudioConcatCommand applies atempo for bgm speed before adelay`() {
+        // 회귀 가드: BGM 속도 변경(BgmClip.speed)이 ffmpeg atempo 로 적용돼야 함.
+        // atempo 는 source 추출 후·위치(adelay) 전에 와야 startMs(최종 타임라인 위치)와 정합.
+        val tmp = File(System.getProperty("java.io.tmpdir"), "vibi-test-rsac-bgmspeed").apply { mkdirs() }
+        val seg = File(tmp, "seg.m4a").apply { writeText("x") }
+        val bgm = File(tmp, "bgm.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.m4a")
+
+        val cmd = service.buildAudioConcatCommand(
+            segmentFiles = listOf(seg),
+            bgmAudioFiles = mapOf("bgm_0" to bgm),
+            bgmClips = listOf(BgmClip(audioFileKey = "bgm_0", startMs = 500, volume = 0.7f, speed = 2.0f)),
+            totalDurationMs = 3_000,
+            outputFile = out,
+        )
+
+        val filterIdx = cmd.indexOf("-filter_complex")
+        val filter = cmd[filterIdx + 1]
+        assertTrue(
+            filter.contains("atempo=2.0,adelay=500|500,volume=0.7[bgm0]"),
+            "expected atempo before adelay for bgm speed, got: $filter",
+        )
+    }
+
+    @Test
+    fun `buildAudioConcatCommand omits atempo when bgm speed is 1`() {
+        // speed=1.0 (default) 은 atempo 미삽입 — 기존 출력과 byte-identical 보장.
+        val tmp = File(System.getProperty("java.io.tmpdir"), "vibi-test-rsac-bgmspeed1").apply { mkdirs() }
+        val seg = File(tmp, "seg.m4a").apply { writeText("x") }
+        val bgm = File(tmp, "bgm.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.m4a")
+
+        val cmd = service.buildAudioConcatCommand(
+            segmentFiles = listOf(seg),
+            bgmAudioFiles = mapOf("bgm_0" to bgm),
+            bgmClips = listOf(BgmClip(audioFileKey = "bgm_0", startMs = 500, volume = 0.7f)),
+            totalDurationMs = 3_000,
+            outputFile = out,
+        )
+
+        val filterIdx = cmd.indexOf("-filter_complex")
+        val filter = cmd[filterIdx + 1]
+        assertFalse(filter.contains("atempo"), "no atempo expected at speed 1.0: $filter")
+    }
+
+    @Test
     fun `buildAudioConcatCommand amix uses normalize=0 and alimiter`() {
         // Regression guard: default amix normalize=1 은 silent input 도 N 으로 카운트해 base 와
         // BGM 을 1/N 으로 나눠 의도 대비 −6 dB(2개) ~ −9.5 dB(3개) 작아진다. normalize=0 합산 후

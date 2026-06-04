@@ -1,223 +1,110 @@
-# GitHub Actions → Cloud Run 배포 셋업
+# GitHub Actions → Oracle VM 배포 셋업
 
-`.github/workflows/deploy.yml` 이 main push 시 Cloud Run 에 자동 배포한다. 인증은
-**Workload Identity Federation (WIF)** — GitHub OIDC 토큰을 GCP federated token 으로 교환.
-서비스 계정 JSON 키를 GitHub 에 저장할 필요 없음.
+`.github/workflows/deploy.yml` 이 main push 시 Oracle Ampere(ARM) VM 에 SSH 로 접속해
+`git reset --hard origin/main` → `docker compose up -d --build` 를 돌린다. gcloud / WIF /
+Secret Manager 없음 — 빌드는 VM 에서, 런타임 시크릿은 VM 의 `deploy/oracle/bff.env` 가 담당.
 
-`deploy/cloud-run.sh` 는 Cloud Run runtime SA / Secret Manager / 첫 배포만 셋업한다.
-**WIF 풀과 provider 는 별도로** 만들어야 — 아래 1회 부트스트랩 후 GitHub Secrets 채우면 끝.
-
----
-
-## 에러 매핑
-
-| 증상 | 원인 |
-|---|---|
-| `invalid_target — pool or provider … doesn't exist` | 풀/provider 미생성 (가장 흔함) 또는 `GCP_WIF_PROVIDER` 값 형식 오류 |
-| `unauthorized_client — repository not allowed` | provider `attribute-condition` 이 이 repo 를 허용하지 않음 |
-| `Permission 'iam.serviceAccounts.getAccessToken' denied` | SA 에 `roles/iam.workloadIdentityUser` binding 누락 |
-| `gcloud run deploy: Permission denied` | SA 에 Cloud Run / Cloud Build / Artifact Registry 권한 누락 (배포 권한은 runtime 권한과 별개) |
-| 배포 성공 후 다운로드 endpoint 만 500 | `vars.R2_BUCKET` / `vars.R2_ACCOUNT_ID` 오타, R2 bucket 미존재, `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` secret 만료·권한 부족 |
+> VM 자체 부트스트랩(인스턴스 생성·PAYG·방화벽·git clone·bff.env)은 [`oracle/README.md`](./oracle/README.md).
+> 이 문서는 **GitHub Actions 가 그 VM 에 배포하기 위한 SSH 시크릿**만 다룬다.
 
 ---
 
-## 1) WIF 풀 + provider 부트스트랩
+## 1) 배포용 SSH 키 발급 (배포 전용, 사람 키 재사용 금지)
+
+로컬에서:
 
 ```bash
-# 사전: cloud-run.sh 한 번 돌려서 vibi-bff-sa 만들어둔 상태 가정.
-export PROJECT_ID=<your-project-id>
-export PROJECT_NUMBER=$(gcloud projects describe "$PROJECT_ID" --format='value(projectNumber)')
-export SA_EMAIL="vibi-bff-sa@${PROJECT_ID}.iam.gserviceaccount.com"
-export REPO_OWNER="perso-devrel"           # GitHub <owner> (이 repo 는 perso-devrel 조직)
-export REPO="perso-devrel/vibi-bff"        # GitHub <owner>/<repo>
-
-gcloud config set project "$PROJECT_ID"
-gcloud services enable iamcredentials.googleapis.com sts.googleapis.com
-
-# 풀
-gcloud iam workload-identity-pools create github-pool \
-  --location=global \
-  --display-name="GitHub Actions Pool"
-
-# OIDC provider — repository_owner 로 제한 (다른 조직 토큰 거부)
-gcloud iam workload-identity-pools providers create-oidc github-provider \
-  --location=global \
-  --workload-identity-pool=github-pool \
-  --display-name="GitHub Actions Provider" \
-  --issuer-uri="https://token.actions.githubusercontent.com" \
-  --attribute-mapping="google.subject=assertion.sub,attribute.repository=assertion.repository,attribute.repository_owner=assertion.repository_owner" \
-  --attribute-condition="assertion.repository_owner=='${REPO_OWNER}'"
-
-# SA 에 이 repo 한정 WIF binding — principalSet 로 repo 단위 허용
-gcloud iam service-accounts add-iam-policy-binding "$SA_EMAIL" \
-  --role=roles/iam.workloadIdentityUser \
-  --member="principalSet://iam.googleapis.com/projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/attribute.repository/${REPO}"
-
-# 배포 권한 — gcloud run deploy --source 는 Cloud Build 로 빌드 후 Artifact Registry 에 push
-for ROLE in \
-  roles/run.admin \
-  roles/iam.serviceAccountUser \
-  roles/cloudbuild.builds.builder \
-  roles/artifactregistry.writer \
-  roles/storage.admin \
-  roles/logging.logWriter; do
-  gcloud projects add-iam-policy-binding "$PROJECT_ID" \
-    --member="serviceAccount:${SA_EMAIL}" \
-    --role="$ROLE" \
-    --condition=None --quiet >/dev/null
-done
-
-# GitHub secret GCP_WIF_PROVIDER 에 넣을 값
-echo ""
-echo "GCP_WIF_PROVIDER = projects/${PROJECT_NUMBER}/locations/global/workloadIdentityPools/github-pool/providers/github-provider"
-echo "GCP_SA_EMAIL     = ${SA_EMAIL}"
-echo "GCP_PROJECT_ID   = ${PROJECT_ID}"
+ssh-keygen -t ed25519 -f vibi-deploy -C "github-actions-deploy" -N ""
+# → vibi-deploy (private), vibi-deploy.pub (public)
 ```
+
+public 키를 VM 의 배포 유저(`authorized_keys`)에 추가:
+
+```bash
+ssh-copy-id -i vibi-deploy.pub ubuntu@<VM_PUBLIC_IP>
+# 또는 VM 에서 직접:  echo "<vibi-deploy.pub 내용>" >> ~/.ssh/authorized_keys
+```
+
+검증 — 이 키로 비번 없이 들어가지고, repo 디렉터리가 보이는지:
+
+```bash
+ssh -i vibi-deploy ubuntu@<VM_PUBLIC_IP> 'cd ~/vibi-bff && git rev-parse --short HEAD'
+```
+
+> ⚠️ `vibi-deploy` (private) 는 GitHub Secret 으로만 보관. 로컬 파일은 등록 후 삭제.
 
 ---
 
 ## 2) GitHub Secrets 설정
 
-repo → **Settings → Secrets and variables → Actions → New repository secret** 에서 3개:
+repo → **Settings → Secrets and variables → Actions → New repository secret**:
 
-| Secret | 값 | 주의 |
+| Secret | 값 | 비고 |
 |---|---|---|
-| `GCP_WIF_PROVIDER` | `projects/<PROJECT_NUMBER>/locations/global/workloadIdentityPools/github-pool/providers/github-provider` | `<PROJECT_NUMBER>` 는 **숫자 12자리** (project ID 아님). 위 스크립트 마지막 출력 그대로 복사. |
-| `GCP_SA_EMAIL` | `vibi-bff-sa@<PROJECT_ID>.iam.gserviceaccount.com` | |
-| `GCP_PROJECT_ID` | `<PROJECT_ID>` | project ID (문자열) |
+| `ORACLE_SSH_HOST` | VM public IP 또는 도메인 | Caddy 도메인과 같아도 되고 IP 직접도 됨 |
+| `ORACLE_SSH_USER` | `ubuntu` | Oracle Ubuntu 이미지 기본 유저 |
+| `ORACLE_SSH_KEY` | `vibi-deploy` private 키 **전체** | `-----BEGIN ... END-----` 줄 포함, 통째로 붙여넣기 |
+| `ORACLE_SSH_PORT` | (선택) SSH 포트 | 미설정 시 `22` |
 
-또한 secrets 탭에서 추가:
+### Variables (선택)
 
-| Secret | 값 |
-|---|---|
-| `GOOGLE_OAUTH_CLIENT_IDS` | 콤마 분리 Google OAuth client ID (iOS / Android / Web) |
-| `APPLE_OAUTH_CLIENT_IDS` | 콤마 분리 Apple Sign In client ID — 보통 iOS bundle id (`com.vibi.ios`). 비워두면 Apple 로그인 비활성. |
+같은 화면의 **Variables** 탭:
 
-### Secret Manager (Postgres / Neon) — `cloud-run.sh` 가 1회 시드
-
-DB credential 은 GitHub Secret 이 아닌 **Secret Manager** 에 저장된다 (Cloud Run runtime SA 만 read).
-첫 부트스트랩 시 `.env` 에 채운 값을 `cloud-run.sh` 가 자동으로 Secret Manager 에 시드한다 —
-이후 회전은 `.env` 갱신 후 `cloud-run.sh` 재실행 또는 `gcloud secrets versions add ...`.
-
-| Secret 이름 | 형식 | 비고 |
+| Variable | 값 예시 | 미설정 시 |
 |---|---|---|
-| `DATABASE_URL` | `jdbc:postgresql://<host>/<db>?sslmode=require` | **`jdbc:` 접두사 필수** — Neon UI 가 주는 원본 URL 에는 없음 |
-| `DB_USER` | Neon role 이름 | |
-| `DB_PASSWORD` | Neon role 비밀번호 | |
+| `ORACLE_APP_DIR` | `/home/ubuntu/vibi-bff` | `~/vibi-bff` (= `$HOME/vibi-bff`) |
 
----
-
-## 2.5) GitHub Variables (선택)
-
-같은 화면의 **Variables** 탭. 설정 안 해도 워크플로우는 돌지만, 기능별 활성화 여부에
-영향. R2 egress 분리를 쓰려면 `R2_BUCKET` + `R2_ACCOUNT_ID` 필수 (credentials 는 Secret Manager).
-
-| Variable | 값 예시 | 미설정 시 동작 |
-|---|---|---|
-| `BFF_BASE_URL` | `https://api.vibi.fm` | Cloud Run 자동 발급 URL self-reference |
-| `CORS_ALLOWED_ORIGINS` | 콤마 분리 origin | 빈 값 (CORS 비활성) |
-| `R2_BUCKET` | `vibi-bff-artifacts` | **빈 값 → 다운로드가 Cloud Run streaming 으로 fallback**. R2 egress 분리 효과 없음. |
-| `R2_ACCOUNT_ID` | 32자 hex (dashboard URL 에서 복사) | R2_BUCKET 셋업 시 필수 — endpoint host 결정 |
-
-> Presigned URL TTL 은 application.conf 의 `signedUrlTtlSec = "900"` (15분) default 사용.
-> 바꿔야 하면 그때 `SIGNED_URL_TTL_SEC` var 추가.
-
-R2 bucket / API token 은 Cloudflare dashboard 에서 미리 만들어두고 (Object Read & Write 권한),
-`deploy/cloud-run.sh` 가 access key / secret 을 Secret Manager 로 옮긴다. lifecycle (7일 자동 삭제) 도
-dashboard → R2 → bucket → Settings → Object lifecycle rules 에서 1회 설정.
+> 앱 런타임 env (PERSO/Auth/DB/R2 등)는 **GitHub 이 아니라 VM 의 `bff.env`** 에 있다.
+> 값 회전은 VM 에서 `bff.env` 수정 후 `docker compose up -d` (또는 다음 배포 때 자동 반영).
 
 ---
 
 ## 3) 검증
 
-### 셋업 검증 (로컬, GitHub 트리거 전)
-
-```bash
-# 풀 / provider 가 ACTIVE 인지
-gcloud iam workload-identity-pools providers describe github-provider \
-  --location=global \
-  --workload-identity-pool=github-pool \
-  --format='value(name,state)'
-# → projects/.../providers/github-provider  ACTIVE
-
-# SA 에 workloadIdentityUser binding 있는지
-gcloud iam service-accounts get-iam-policy "$SA_EMAIL" \
-  --format='value(bindings.role,bindings.members)' | grep workloadIdentityUser
-```
-
-### CI 검증
-
 `main` 에 빈 커밋 push 하거나 Actions UI → **Run workflow**:
 
 ```bash
 git commit --allow-empty -m "ci: trigger deploy"
-git push
+git push origin main
 ```
 
-성공 시 워크플로우 마지막 step 이 `::notice title=Deployed::https://vibi-bff-…-uc.a.run.app` 출력.
+워크플로 로그 마지막에 `docker compose ps` 출력(두 컨테이너 `Up`)이 보이면 성공.
+이어서:
+
+```bash
+curl -i https://<도메인>/swagger     # 200 + 정상 인증서
+```
 
 ---
 
 ## Troubleshooting
 
-### `invalid_target` 재발 — 셋업 후에도
+### `ssh: handshake failed` / `Permission denied (publickey)`
+- `ORACLE_SSH_KEY` 가 public 키거나 일부만 붙여넣어짐 — **private 키 전체**(BEGIN/END 줄 포함)인지 확인.
+- public 키가 VM `~ubuntu/.ssh/authorized_keys` 에 없음 — 1) 단계 재실행.
+- `ORACLE_SSH_USER` 오타 (Oracle Ubuntu 는 `ubuntu`, Oracle Linux 는 `opc`).
 
-1. **PROJECT_NUMBER 가 아닌 PROJECT_ID 를 넣음**. secret 값이 `projects/my-proj-id/...` 면 X — `projects/123456789012/...` 형식.
-2. 풀/provider 이름 오타. secret 값과 `gcloud iam workload-identity-pools providers describe` 출력의 `name` 필드가 정확히 일치해야 함.
-3. 풀/provider 가 `DELETED` 상태. soft-delete 면 30일 보존 — 새 이름으로 재생성.
+### `dial tcp <ip>:22: i/o timeout`
+- VM 콘솔 Security List 에 22 인바운드 없음, 또는 VM iptables 가 막음. (80/443 만 열고 22 빠뜨린 경우)
+- 사무실/CI 고정 IP 가 아니므로 22 는 `0.0.0.0/0` 허용이 필요 — 대신 키 인증만 허용(비번 끄기)으로 방어.
 
-### `unauthorized_client — repository "<owner>/<repo>" is not allowed`
+### `cd: ~/vibi-bff: No such file or directory`
+- VM 에 repo 가 clone 안 됨 — [`oracle/README.md`](./oracle/README.md) 5번(`git clone`) 미완료.
+- 경로가 다르면 `ORACLE_APP_DIR` Variable 로 지정.
 
-`attribute-condition` 이 이 repo 의 owner 를 거부 중. 확인:
+### 배포는 됐는데 `/swagger` 502 / 빈 응답
+- `bff` 컨테이너 부팅 실패 — VM 에서 `cd deploy/oracle && docker compose logs --tail=100 bff`.
+- 대개 `bff.env` 필수값(PERSO/Auth/DB) 누락 → AppConfig `require(...)` fail-fast.
 
-```bash
-gcloud iam workload-identity-pools providers describe github-provider \
-  --location=global --workload-identity-pool=github-pool \
-  --format='value(attributeCondition)'
-```
-
-`assertion.repository_owner=='perso-devrel'` 같은 식. owner 가 바뀌었으면 update:
-
-```bash
-gcloud iam workload-identity-pools providers update-oidc github-provider \
-  --location=global --workload-identity-pool=github-pool \
-  --attribute-condition="assertion.repository_owner=='<new-owner>'"
-```
-
-### `Permission denied` on `gcloud run deploy`
-
-위 부트스트랩의 `for ROLE in ...` 블록 다시 실행. `roles/iam.serviceAccountUser` 가 빠지면
-Cloud Run 이 runtime SA 를 attach 못 함.
-
-### 다운로드 endpoint 가 500 / presigned URL 발급 실패
-
-배포는 성공했는데 `/api/v2/render/{jobId}/download` 등이 500 반환:
-
-1. **`vars.R2_BUCKET` / `vars.R2_ACCOUNT_ID` 값이 실제와 다름** — Cloudflare dashboard 에서 정확한
-   이름 / 32자 hex 확인.
-2. **`R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` secret 만료·삭제** — Cloudflare dashboard 에서 token
-   재발급 후 cloud-run.sh 재실행 (Secret Manager 새 version 추가).
-3. **token 권한 부족** — R2 API token 이 Object Read & Write 권한이어야 함. Read-only 면 upload 실패.
-
-`vars.R2_BUCKET` 를 빈 값으로 두면 위 모두 불필요 — 다운로드가 Cloud Run streaming 으로 fallback.
-
-### `Cloud Build` 빌드 실패
-
-첫 배포는 `gcloud run deploy --source .` 가 Cloud Build 로 컨테이너를 빌드. 빌드 자체가
-깨지면 GitHub Actions 가 아니라 Cloud Build 로그 확인:
-
-```bash
-gcloud builds list --limit=5
-gcloud builds log <BUILD_ID>
-```
+### 다운로드 endpoint 만 500
+- `bff.env` 의 `R2_BUCKET` / `R2_ACCOUNT_ID` 오타 또는 `R2_ACCESS_KEY_ID` / `R2_SECRET_ACCESS_KEY` 만료·권한 부족.
+- R2 비우면 로컬 streaming fallback 이지만, Oracle VM 은 디스크 영속 안 하므로 **R2 권장**.
 
 ---
 
 ## 보안 메모
 
-- WIF 풀은 SA 키보다 안전 — 키 회전 / 분실 위험 없음, repo 범위 제한.
-- `attribute-condition` 으로 **반드시 repository_owner 또는 repository 단위 제한**. 빠뜨리면
-  GitHub 의 모든 repo 토큰이 이 SA 를 빌릴 수 있음.
-- `principalSet://...attribute.repository/<owner>/<repo>` binding 은 정확히 그 repo 만 허용 —
-  fork / PR from fork 에서는 `id-token` 권한이 read-only 라 별도 안전.
-- `workflow_dispatch` 로 수동 트리거할 때도 같은 인증 경로 사용.
+- 배포 전용 키 — 사람 개인 키 재사용 금지. 유출 시 `authorized_keys` 에서 한 줄만 지우면 폐기.
+- VM `sshd` 는 `PasswordAuthentication no` 권장 (키 인증만).
+- `bff.env` 는 절대 commit 금지 (`.gitignore` 에 `deploy/oracle/bff.env`).
+- `workflow_dispatch` 수동 트리거도 같은 SSH 경로를 쓴다.

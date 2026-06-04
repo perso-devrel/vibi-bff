@@ -5,7 +5,9 @@
 # ============================================================
 # Build stage — JDK 21 + Gradle
 # ============================================================
-FROM eclipse-temurin:21-jdk AS build
+# LTS(noble=Ubuntu 24.04) 핀 — 무태그(latest)는 비-LTS(25.10 resolute)로 올라가
+# apt 미러 CDN hash mismatch 가 남. LTS 는 미러 안정 + 빌드 재현성 ↑.
+FROM eclipse-temurin:21-jdk-noble AS build
 WORKDIR /app
 
 # 1) Gradle wrapper + 빌드 스크립트만 먼저 — 의존성 그래프 변경 시에만 무효화
@@ -25,7 +27,7 @@ RUN ./gradlew --no-daemon installDist
 # ============================================================
 # Runtime stage — JRE 21 + ffmpeg
 # ============================================================
-FROM eclipse-temurin:21-jre
+FROM eclipse-temurin:21-jre-noble
 
 # ffmpeg / ffprobe — CLAUDE.md 의 runtime 필수. ca-certificates — Vertex AI HTTPS.
 # 한 RUN 으로 묶어 레이어 최소화, apt 캐시는 즉시 제거.
