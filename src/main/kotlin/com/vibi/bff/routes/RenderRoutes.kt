@@ -220,6 +220,7 @@ fun Route.renderRoutes(
                             muteOriginalSegmentAudio = directive.muteOriginalSegmentAudio,
                             stems = resolvedStems,
                             sourceOffsetMs = directive.sourceOffsetMs,
+                            appliedSpeedScale = directive.appliedSpeedScale,
                         )
                     )
                 }
@@ -339,6 +340,7 @@ fun Route.renderRoutes(
                             muteOriginalSegmentAudio = directive.muteOriginalSegmentAudio,
                             stems = resolvedStems,
                             sourceOffsetMs = directive.sourceOffsetMs,
+                            appliedSpeedScale = directive.appliedSpeedScale,
                         )
                     )
                 }

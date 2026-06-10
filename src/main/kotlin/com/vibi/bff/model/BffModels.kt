@@ -116,6 +116,13 @@ data class SeparationDirectiveDto(
      * 해당 offset 부터 잘라 mix.
      */
     val sourceOffsetMs: Long = 0L,
+    /**
+     * directive 가 앵커된 영상 세그먼트의 speedScale. stem audio 에 atempo 로 적용해 속도 조절된
+     * 영상과 tempo 를 맞춘다. 1.0 = 원본 속도. rangeStart/End 는 클라이언트가 이미 속도 반영해
+     * 압축한 타임라인 위치라, BFF 는 atrim 으로 rangeMs*speed 만큼 원본 stem 을 떼어 atempo=speed 로
+     * 압축한다 (RenderService 참조).
+     */
+    val appliedSpeedScale: Float = 1.0f,
 ) {
     init {
         require(rangeStartMs >= 0) {
@@ -126,6 +133,9 @@ data class SeparationDirectiveDto(
         }
         require(sourceOffsetMs >= 0) {
             "SeparationDirectiveDto.sourceOffsetMs must be >= 0 (got $sourceOffsetMs)"
+        }
+        require(appliedSpeedScale > 0f) {
+            "SeparationDirectiveDto.appliedSpeedScale must be > 0 (got $appliedSpeedScale)"
         }
     }
 }

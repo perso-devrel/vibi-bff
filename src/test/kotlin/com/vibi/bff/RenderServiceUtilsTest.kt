@@ -308,4 +308,77 @@ class RenderServiceUtilsTest {
         )
         assertTrue(stem.absolutePath.contains("화자"), "test fixture must include Korean")
     }
+
+    /**
+     * 속도 조절된 구간의 stem: 클라이언트가 rangeStart/End 를 (속도 반영된) 압축 타임라인 위치로 보낸다.
+     * stem audio 는 원본 tempo 라, 압축 슬롯 rangeMs(=2000) 에 들어갈 원본 구간은 rangeMs*speed(=4000) —
+     * atrim 이 그만큼 떼어내고(0.0:4.0, 압축 슬롯 길이 0.0:2.0 이 아님), atempo=2.0 으로 다시 압축해야
+     * 영상과 tempo 가 맞는다. atempo 는 asetpts 후 adelay 전에 와야 함(adelay 는 압축된 최종 위치).
+     */
+    @Test
+    fun `buildFfmpegCommand applies atempo and extends atrim span for stem speed`() {
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-stem-speed").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val stem = File(tmp, "s.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            videoDurationMs = 10_000,
+            outputFile = out,
+            separationDirectives = listOf(
+                DirectiveWithStemFiles(
+                    rangeStartMs = 1_000,
+                    rangeEndMs = 3_000,
+                    muteOriginalSegmentAudio = true,
+                    stems = listOf(DirectiveStem(file = stem, volume = 1.0f)),
+                    appliedSpeedScale = 2.0f,
+                ),
+            ),
+        )
+
+        val filterIdx = cmd.indexOf("-filter_complex")
+        val filter = cmd[filterIdx + 1]
+        assertTrue(
+            filter.contains(
+                "atrim=0.0:4.0,asetpts=PTS-STARTPTS,atempo=2.0,adelay=1000|1000,volume=1.0[stem_0_0]",
+            ),
+            "expected span-extended atrim + atempo before adelay for stem speed, got: $filter",
+        )
+    }
+
+    /**
+     * Regression: speed=1.0(기본) 이면 atempo 미삽입 + atrim span 은 rangeMs 그대로 — 기존 렌더와
+     * byte-identical 보장 (속도 미사용 프로젝트 회귀 0).
+     */
+    @Test
+    fun `buildFfmpegCommand omits atempo when stem speed is 1`() {
+        val tmp = File(System.getProperty("java.io.tmpdir"), "rsut-stem-nospeed").apply { mkdirs() }
+        val video = File(tmp, "v.mp4").apply { writeText("x") }
+        val stem = File(tmp, "s.mp3").apply { writeText("x") }
+        val out = File(tmp, "out.mp4")
+
+        val cmd = service.buildFfmpegCommand(
+            videoFile = video,
+            videoDurationMs = 10_000,
+            outputFile = out,
+            separationDirectives = listOf(
+                DirectiveWithStemFiles(
+                    rangeStartMs = 1_000,
+                    rangeEndMs = 3_000,
+                    muteOriginalSegmentAudio = true,
+                    stems = listOf(DirectiveStem(file = stem, volume = 1.0f)),
+                    // appliedSpeedScale 기본 1.0f
+                ),
+            ),
+        )
+
+        val filterIdx = cmd.indexOf("-filter_complex")
+        val filter = cmd[filterIdx + 1]
+        assertTrue(
+            filter.contains("atrim=0.0:2.0,asetpts=PTS-STARTPTS,adelay=1000|1000,volume=1.0[stem_0_0]"),
+            "expected unchanged stem chain (no atempo, span=rangeMs), got: $filter",
+        )
+        assertTrue(!filter.contains("atempo"), "speed=1 must not insert atempo, got: $filter")
+    }
 }

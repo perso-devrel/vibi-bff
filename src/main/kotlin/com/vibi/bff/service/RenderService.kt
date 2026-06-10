@@ -78,6 +78,8 @@ data class DirectiveWithStemFiles(
     val stems: List<DirectiveStem>,
     /** Stem audio 파일 안의 시작 offset (ms). split directive 의 뒤쪽 piece 가 stem 중간부터 재생. */
     val sourceOffsetMs: Long = 0L,
+    /** 앵커 영상 세그먼트의 speedScale. stem 에 atempo 로 적용해 속도 조절된 영상과 tempo 동기. 1.0 = 원본. */
+    val appliedSpeedScale: Float = 1.0f,
 )
 
 private const val MAX_PARALLEL_SEGMENTS = 2
@@ -962,20 +964,28 @@ class RenderService(
                 )
                 mixInputs.add("[bgm$i]")
             }
-            // Directive stems: directive 마다 stem 들을 atrim 으로 [sourceOffset, sourceOffset+range]
-            // 구간만 잘라내고, asetpts 로 PTS 리셋, adelay 로 rangeStartMs 만큼 밀고, volume.
+            // Directive stems: directive 마다 stem 들을 atrim 으로 [sourceOffset, sourceOffset+span]
+            // 구간만 잘라내고, asetpts 로 PTS 리셋, (속도면 atempo,) adelay 로 rangeStartMs 만큼 밀고, volume.
             // sourceOffsetMs 가 0 이면 stem 처음부터 (기본), >0 이면 stem audio 의 중간부터 — 모바일
             // 클라이언트가 split 한 directive 의 뒤쪽 piece 에 해당.
+            //
+            // 속도(appliedSpeedScale): 클라이언트가 rangeStart/End 를 (속도 반영된) 최종 타임라인 위치로 이미
+            // 압축해 보낸다. 하지만 stem audio 파일은 원본 tempo 그대로다. 그래서 압축된 슬롯 rangeMs 에 들어갈
+            // 원본 stem 구간 길이는 rangeMs*speed — 그만큼을 atrim 으로 떼어낸 뒤 atempo=speed 로 다시 압축하면
+            // 슬롯과 정확히 맞고 영상과 tempo 가 동기된다. speed=1 이면 span=rangeMs, atempo 생략(byte-identical).
             for ((dIdx, directive) in separationDirectives.withIndex()) {
                 val rangeMs = (directive.rangeEndMs - directive.rangeStartMs).coerceAtLeast(0L)
+                val speed = directive.appliedSpeedScale
+                val sourceSpanMs = (rangeMs * speed.toDouble()).toLong()
                 val trimStartSec = directive.sourceOffsetMs / 1000.0
-                val trimEndSec = (directive.sourceOffsetMs + rangeMs) / 1000.0
+                val trimEndSec = (directive.sourceOffsetMs + sourceSpanMs) / 1000.0
+                val tempo = if (speed != 1.0f) "${atempoChain(speed)}," else ""
                 for ((sIdx, stem) in directive.stems.withIndex()) {
                     val inputIndex = stemInputIndices[dIdx][sIdx]
                     val label = "stem_${dIdx}_${sIdx}"
                     filters.add(
                         "[$inputIndex:a]atrim=$trimStartSec:$trimEndSec,asetpts=PTS-STARTPTS," +
-                            "adelay=${directive.rangeStartMs}|${directive.rangeStartMs}," +
+                            "${tempo}adelay=${directive.rangeStartMs}|${directive.rangeStartMs}," +
                             "volume=${stem.volume}[$label]"
                     )
                     mixInputs.add("[$label]")
