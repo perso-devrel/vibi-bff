@@ -166,18 +166,29 @@ fun Application.module() {
     // when a deployment needs longer reuse windows (long-running mobile session
     // editing N variants over hours).
     val renderInputCacheTtlHours = System.getenv("RENDER_INPUT_CACHE_TTL_HOURS")?.toLongOrNull() ?: 24L
+    require(renderInputCacheTtlHours > 0) {
+        "RENDER_INPUT_CACHE_TTL_HOURS must be > 0 (got $renderInputCacheTtlHours)"
+    }
     val renderInputCache = RenderInputCacheService(
         baseDir = File(fileStorage.renderDir.parentFile, "render-input-cache"),
         ttlMs = TimeUnit.HOURS.toMillis(renderInputCacheTtlHours),
     )
     val cacheCleanupScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
     val assetCacheTtlHours = System.getenv("ASSET_CACHE_TTL_HOURS")?.toLongOrNull() ?: 24L
+    require(assetCacheTtlHours > 0) {
+        "ASSET_CACHE_TTL_HOURS must be > 0 (got $assetCacheTtlHours)"
+    }
     cacheCleanupScope.launch {
         // Sweep once on startup (recover from crash-leftover entries), then
         // hourly. Sleeping 1h between sweeps is fine — TTL is 24h, slop tolerated.
+        // 예외는 삼키되(다음 sweep 으로 계속) WARN 으로 남겨 디스크 누적 같은 cleanup 실패가
+        // 관측되도록 한다 — silent swallow 면 디스크가 찰 때까지 보이지 않는다.
+        val cleanupLog = org.slf4j.LoggerFactory.getLogger("CacheCleanup")
         while (isActive) {
             runCatching { renderInputCache.cleanExpired() }
+                .onFailure { cleanupLog.warn("render input cache cleanup failed (will retry in 1h): {}", it.message, it) }
             runCatching { fileStorage.sweepAssetCacheOlderThan(TimeUnit.HOURS.toMillis(assetCacheTtlHours)) }
+                .onFailure { cleanupLog.warn("asset cache sweep failed (will retry in 1h): {}", it.message, it) }
             delay(TimeUnit.HOURS.toMillis(1))
         }
     }
