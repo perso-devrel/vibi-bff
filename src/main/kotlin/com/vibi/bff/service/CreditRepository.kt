@@ -12,7 +12,6 @@ import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import org.jetbrains.exposed.sql.upsert
-import kotlin.math.ceil
 
 /**
  * 신규 가입 시 자동 지급되는 보너스 크레딧. 1분 = 1 크레딧이므로 약 3분 분량 = 첫 사용 무료
@@ -31,15 +30,13 @@ class InsufficientCreditsException(
 ) : RuntimeException("insufficient credits: required=$required balance=$balance")
 
 /**
- * 잡 길이 → 크레딧 비용 계산. 1분당 1 크레딧, 올림 (ceil). 0초 입력은 비용 0이 아니라
- * **최소 1 크레딧** — duration 측정 실패(0L)로 무료 사용 가능해지는 우회 차단. 본 계산은
- * 라우트 (선차감) 와 /credits/cost endpoint (모바일 견적) 양쪽이 단일 source 로 사용.
+ * 잡 길이 → 크레딧 비용 계산. **영상(잡) 1개당 고정 1 크레딧** — duration 무관. 라우트(선차감)
+ * 와 /credits/cost endpoint (모바일 견적) 양쪽이 단일 source 로 사용하므로 견적·차감·402 required
+ * 가 모두 1 로 일관. (durationMs 는 호출처 시그니처 호환을 위해 유지 — 현재 계산에 미사용.)
  */
 object CreditCost {
-    fun forSeparation(durationMs: Long): Int {
-        val minutes = ceil(durationMs.coerceAtLeast(0L) / 60_000.0).toInt()
-        return minutes.coerceAtLeast(1)
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun forSeparation(durationMs: Long): Int = 1
 }
 
 /**

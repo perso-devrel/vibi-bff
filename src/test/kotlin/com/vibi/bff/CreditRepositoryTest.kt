@@ -187,13 +187,14 @@ class CreditRepositoryTest {
     // ── CreditCost ──────────────────────────────────────────────────────────
 
     @Test
-    fun `CreditCost forSeparation ceils per minute with minimum 1`() {
-        assertEquals(1, CreditCost.forSeparation(0))            // 0 → min 1
-        assertEquals(1, CreditCost.forSeparation(1))            // 1ms → 1
-        assertEquals(1, CreditCost.forSeparation(60_000))       // 정확히 1분 → 1
-        assertEquals(2, CreditCost.forSeparation(60_001))       // 1분 +1ms → 2 (올림)
-        assertEquals(2, CreditCost.forSeparation(120_000))      // 2분 → 2
-        assertEquals(3, CreditCost.forSeparation(120_001))      // 2분 +1ms → 3
-        assertEquals(1, CreditCost.forSeparation(-100))         // 음수 입력은 0 으로 clamp 후 min 1
+    fun `CreditCost forSeparation is flat 1 credit regardless of duration`() {
+        // 정책: 영상(잡) 1개당 고정 1 크레딧 — duration 무관.
+        assertEquals(1, CreditCost.forSeparation(0))
+        assertEquals(1, CreditCost.forSeparation(1))
+        assertEquals(1, CreditCost.forSeparation(60_000))       // 1분
+        assertEquals(1, CreditCost.forSeparation(60_001))
+        assertEquals(1, CreditCost.forSeparation(120_000))      // 2분
+        assertEquals(1, CreditCost.forSeparation(300_000))      // 5분 (업로드 상한)
+        assertEquals(1, CreditCost.forSeparation(-100))         // 음수 입력도 1
     }
 }

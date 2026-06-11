@@ -176,11 +176,11 @@ class SeparationRoutesTest {
     fun `POST separate uses size-based duration fallback when probeDurationMs fails`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
-        // 8MB 가짜 audio bytes → 8000_000 / 8000 = 1000초 → ceil(1_000_000ms / 60_000) = 17 credits.
+        // probeDurationMs 실패 → size-based duration fallback 경로를 타는지 검증. 비용 정책은
+        // 영상 1개당 고정 1 크레딧이라 duration 과 무관하게 reserve cost 인자는 1.
         val bigBytes = ByteArray(8_000_000) { 0 }
-        // reserve 가 호출됐는지 + cost 인자만 검증 → 17 credit.
-        every { creditRepo.reserve(eq(callerId), any(), eq(17)) } returns
-            CreditRepository.ReserveOutcome(charged = 17, balance = 100)
+        every { creditRepo.reserve(eq(callerId), any(), eq(1)) } returns
+            CreditRepository.ReserveOutcome(charged = 1, balance = 100)
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
         coEvery { MediaTrimmer.probeDurationMs(any()) } returns null
@@ -199,7 +199,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(17)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(1)) }
         }
     }
 
@@ -303,12 +303,12 @@ class SeparationRoutesTest {
     }
 
     @Test
-    fun `POST separate charges expected cost based on audio duration`() {
+    fun `POST separate charges flat 1 credit regardless of audio duration`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
         every { creditRepo.reserve(any(), any(), any()) } returns
-            CreditRepository.ReserveOutcome(charged = 2, balance = 1)
-        // 클라가 보낸 audio 가 120s → ceil(120000/60000)=2 크레딧.
+            CreditRepository.ReserveOutcome(charged = 1, balance = 1)
+        // audio 가 120s 여도 정책상 영상 1개당 고정 1 크레딧.
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
         coEvery { MediaTrimmer.probeDurationMs(any()) } returns 120_000L
@@ -327,7 +327,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(2)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(1)) }
             verify(exactly = 0) { creditRepo.refund(any()) }
         }
     }
