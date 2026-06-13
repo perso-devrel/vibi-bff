@@ -11,8 +11,12 @@ Current surface:
 - Gateways **Google Sign In** + **Apple Sign In** ID Token verification → upserts
   the user in **Postgres** → issues an HS256 access token whose `sub` is the
   internal UUID (reusable as IAP `appAccountToken`).
+- Meters usage with a **credit** ledger (Postgres): separation reserves credits up
+  front and refunds on failure. Top-ups validate **StoreKit2 / Play Billing** receipts
+  before granting. A read-only **admin** dashboard serves `/api/v2/admin/*` analytics.
 - Optionally redirects large render / stem downloads to **Cloudflare R2** SigV4 presigned URLs (egress free)
-  so Cloud Run egress and instance occupancy decouple.
+  so Cloud Run egress and instance occupancy decouple. Mobile can also upload render
+  assets directly to R2 (`/api/v2/assets/upload-url`) and render them by reference (`/api/v2/render/v3`).
 
 > Surface previously exposed but **removed** in commit `52f8d7c` (sticker
 > overlays, subtitle burn-in, auto-subtitle/Perso STT, auto-dub, lipsync, Gemini
@@ -134,24 +138,29 @@ v1 has been retired.
 |--------|----------------------------------------------|---------------------------------------------------------------|
 | POST   | `/api/v2/auth/google`                        | Google ID Token → BFF JWT (see [Sign-In](#sign-in)).          |
 | POST   | `/api/v2/auth/apple`                         | Apple ID Token → BFF JWT (503 when `APPLE_OAUTH_CLIENT_IDS` blank). |
+| DELETE | `/api/v2/auth/account`                       | Delete the authenticated user and cascade their jobs.         |
+| GET    | `/api/v2/credits`                            | Current credit balance (auth required).                       |
+| GET    | `/api/v2/credits/cost`                       | Separation cost estimate (`?durationMs=…` → credits).         |
+| POST   | `/api/v2/credits/purchase`                   | StoreKit2 / Play Billing receipt validation → credit grant (idempotent on `transactionId`). |
+| POST   | `/api/v2/credits/admin-grant`                | Manual credit grant. Requires `admin` role.                   |
+| POST   | `/api/v2/assets/upload-url`                  | R2 presigned PUT URL for a render asset (`sha256`-deduped). Feeds `/render/v3`. |
 | POST   | `/api/v2/render/inputs`                      | Multipart `video` upload → `{inputId, expiresAt, videoSizeBytes}`. Reused by N variant renders. `inputId = sha256(video)[:16]`. |
 | POST   | `/api/v2/render`                             | Multipart render job (see [Render](#render-endpoint)). Optional `inputId` form field replaces the video file part. |
+| POST   | `/api/v2/render/v3`                          | Asset-by-reference render — segments/BGM reference R2 keys uploaded via `/assets/upload-url`, no multipart bytes. |
 | GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`. |
 | GET    | `/api/v2/render/{jobId}/download`            | Binary mp4. With `R2_BUCKET`, `302` to an R2 presigned URL.   |
-| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Audio-only upload (`m4a` / `mp3` / `wav`, ≤100MB). |
+| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Audio-only upload (`m4a` / `mp3` / `wav`, ≤100MB). Reserves credits. |
 | GET    | `/api/v2/separate/{jobId}`                   | Status + signed stem URLs when `READY`.                       |
 | GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream (requires `?token=…`).                      |
+| GET    | `/api/v2/admin/*`                            | Read-only analytics dashboard (`overview`, `stats/*`, `users`, `jobs/active`). Requires `admin` role. |
 | GET    | `/api/v2/testdata/separation/list`           | (dev mock) `testdata/<startSec>-<endSec>/` folder listing.    |
 | GET    | `/api/v2/testdata/separation/{folder}/{stem}` | (dev mock) Stem audio stream (no auth).                      |
 
 > **Retired surface** (commit `52f8d7c`): `/api/v2/subtitles*`, `/api/v2/autodub*`,
-> `/api/v2/lipsync*`, sticker overlays on `/render`, subtitle burn-in on `/render`.
-> The mobile client still has historical `submitSubtitleJob` / `submitAutoDubJob` /
-> `requestLipSync` methods in `BffApi` — they will 404 if invoked. Re-introducing
-> the surface should be a fresh design, not a `git revert`.
->
-> The Gemini-backed chat assistant (`/api/v2/chat`) was also removed; the
-> mobile `ChatRoutes` / `ChatToolDispatcher` paths now lead to 404.
+> `/api/v2/lipsync*`, the Gemini-backed chat assistant (`/api/v2/chat`), `/api/v2/languages`,
+> sticker overlays on `/render`, and subtitle burn-in on `/render`. These were removed from
+> **both the BFF and the mobile client** (no dead caller methods remain) — re-introducing any
+> of them should be a fresh design, not a `git revert`.
 
 ### Render endpoint
 
@@ -204,7 +213,7 @@ ffprobe on the source (legacy).
 ### Separation endpoints
 
 `POST /api/v2/separate` accepts an **already-trimmed audio file** (m4a / mp3 / wav),
-submits it to Perso's dubbing pipeline, and exposes the byproduct stems for the
+submits it to Perso's audio-separation pipeline, and exposes the byproduct stems for the
 mobile client to pick and locally mix for preview. The mobile client handles trim +
 audio extract locally (iOS `AVAssetExportPresetAppleM4A`), so the BFF performs no
 ffmpeg work before the upstream upload. Final stem amix happens once at `/render`
@@ -320,12 +329,17 @@ src/main/kotlin/com/vibi/bff/
 │   └── ErrorHandling.kt        # StatusPages → ErrorResponse
 ├── model/
 │   ├── AuthModels.kt           # GoogleAuthRequest / AppleAuthRequest / AuthResponse
-│   ├── BffModels.kt            # Render / Separation DTOs
+│   ├── CreditModels.kt         # Balance / cost / purchase / admin-grant DTOs
+│   ├── AdminModels.kt          # Dashboard KPI / stats response DTOs
+│   ├── BffModels.kt            # Render (v2 + v3) / Separation / Asset DTOs
 │   └── PersoModels.kt          # Perso upstream DTOs
 ├── routes/
-│   ├── AuthRoutes.kt           # /auth/google · /auth/apple
-│   ├── RenderRoutes.kt         # /render · /render/inputs · /render/{id}/{status,download}
+│   ├── AuthRoutes.kt           # /auth/google · /auth/apple · /auth/account (DELETE)
+│   ├── CreditRoutes.kt         # /credits · /credits/cost · /credits/purchase · /credits/admin-grant
+│   ├── AssetRoutes.kt          # /assets/upload-url (R2 presigned PUT)
+│   ├── RenderRoutes.kt         # /render · /render/inputs · /render/v3 · /render/{id}/{status,download}
 │   ├── SeparationRoutes.kt     # /separate · /separate/{id} · /stem
+│   ├── AdminRoutes.kt          # /admin/* read-only dashboard (admin role)
 │   ├── DownloadResponder.kt    # respondFile / R2-redirect dispatcher
 │   └── MultipartUtils.kt       # parsing helpers
 └── service/
@@ -333,11 +347,19 @@ src/main/kotlin/com/vibi/bff/
     ├── PersoPolling.kt         # Job-status polling primitive
     ├── AuthService.kt          # Google tokeninfo + Apple JWKS RS256 + JWT issuance
     ├── UserRepository.kt       # Exposed-backed user upsert
+    ├── CreditRepository.kt     # Credit ledger (reserve / refund / grant)
+    ├── AppleReceiptVerifier.kt # StoreKit2 transaction verification
+    ├── GoogleReceiptVerifier.kt # Play Billing purchase token verification
+    ├── AdminRepository.kt      # Dashboard analytics queries
+    ├── ExternalApiCallsRepository.kt # Perso call logging (latency / failure rate)
+    ├── JobAnalyticsRepository.kt # Render / separation job analytics
     ├── FileStorageService.kt   # Local blob storage (uploads/, render/, separation/)
     ├── MediaTrimmer.kt         # ffprobe-based audio duration probe (KPI / credit metering)
     ├── RenderService.kt        # ffmpeg orchestration (normalize → concat → final mix -c:v copy)
     ├── RenderInputCacheService.kt # /render/inputs slot (sha256 inputId, TTL sweep)
     ├── SeparationService.kt    # Perso-backed stem separation jobs (idempotency, TTL reap)
+    ├── SeparationDispatcher.kt # Dequeue + submit QUEUED separations
+    ├── SeparationQueueRepository.kt # In-memory queue (position / avg time)
     ├── SignedUrlService.kt     # HMAC-SHA256 download URL signer
     ├── ObjectStore.kt          # Optional Cloudflare R2 upload + SigV4 presigned URL redirect
     └── FfmpegRunner.kt         # ffmpeg / ffprobe process spawning + stderr capture
