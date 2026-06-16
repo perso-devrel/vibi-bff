@@ -223,11 +223,18 @@ fun Application.module() {
             withContext(Dispatchers.IO) { creditRepository.refund(jobId) }
         },
     )
+    // Dispatcher tick: 잡이 돌 땐 짧게(reaper 빠른 회수), 완전 idle 이면 길게(Neon suspend 허용
+    // → 무료 compute 한도 절약). env 로 override 가능. idle 기본 1시간 (트래픽 적으면 더 길게).
+    val dispatcherActiveTickMs = System.getenv("SEPARATION_DISPATCH_TICK_MS")?.toLongOrNull() ?: 30_000L
+    val dispatcherIdleTickMs = System.getenv("SEPARATION_DISPATCH_IDLE_TICK_MS")?.toLongOrNull()
+        ?: TimeUnit.HOURS.toMillis(1)
     separationDispatcher = SeparationDispatcher(
         service = separationService,
         queue = separationQueueRepository,
         bffInstanceId = bffInstanceId,
         maxPersoInFlight = appConfig.separation.maxPersoInFlight,
+        tickIntervalMs = dispatcherActiveTickMs,
+        idleTickIntervalMs = dispatcherIdleTickMs,
         stuckSubmittingSec = appConfig.separation.stuckSubmittingSec,
     )
     separationDispatcher.start()
