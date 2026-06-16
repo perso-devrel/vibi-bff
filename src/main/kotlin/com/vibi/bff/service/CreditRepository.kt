@@ -61,6 +61,8 @@ object CreditCost {
  */
 class CreditRepository {
 
+    private val log = org.slf4j.LoggerFactory.getLogger(javaClass)
+
     data class PurchaseOutcome(
         val granted: Int,
         val balance: Int,
@@ -101,6 +103,24 @@ class CreditRepository {
             it[CreditTransactionsTable.createdAt] = now
         }.insertedCount
         if (inserted == 0) {
+            // (platform, transactionId) 충돌 — 이미 처리된 영수증. 같은 user 의 retry 면 정상
+            // (멱등). 그러나 *다른* user 가 같은 transactionId 를 청구하면 영수증 공유/탈취
+            // 시도일 수 있어 fraud 신호로 warn 로깅한다. 가산은 어느 쪽이든 skip (granted=0) —
+            // 영수증 1건은 최초 청구자에게만 귀속되고 이중 적립은 없다.
+            val ownerUserId = CreditTransactionsTable
+                .select(CreditTransactionsTable.userId)
+                .where {
+                    (CreditTransactionsTable.platform eq platform) and
+                        (CreditTransactionsTable.transactionId eq transactionId)
+                }
+                .singleOrNull()
+                ?.get(CreditTransactionsTable.userId)
+            if (ownerUserId != null && ownerUserId != userId) {
+                log.warn(
+                    "credit purchase cross-user replay: tx={} platform={} claimedBy={} originalOwner={} — granting 0",
+                    transactionId, platform, userId, ownerUserId,
+                )
+            }
             return@transaction PurchaseOutcome(granted = 0, balance = readBalance(userId))
         }
 

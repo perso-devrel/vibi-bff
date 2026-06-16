@@ -173,10 +173,10 @@ gcloud run services update "$SERVICE_NAME" --region "$REGION" \
 
 echo ""
 echo "✅ Deployed: $URL"
-echo "   Swagger: $URL/swagger"
+echo "   (Swagger UI 는 운영에서 비활성 — 보려면 ENABLE_SWAGGER=true 로 배포)"
 echo ""
 echo "Next steps:"
-echo "  1. Smoke test:  curl -i $URL/swagger"
+echo "  1. Smoke test:  curl -i $URL/api/v2/separate/nonexistent   # 404 면 서비스 정상 기동"
 echo "  2. Update vibi-mobile/local.properties → BFF_BASE_URL=$URL/"
 echo "  3. Update vibi-mobile/iosApp/Configuration/Auth.xcconfig → BFF_BASE_URL=$URL/"
 echo "  4. iosApp/Info.plist 의 NSAppTransportSecurity localhost 예외 제거"

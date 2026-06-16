@@ -79,6 +79,22 @@ class CreditRepositoryTest {
     }
 
     @Test
+    fun `grantPurchase cross-user replay grants 0 and original owner keeps credit`() {
+        // 보안 속성(#6): 다른 user 가 이미 청구된 영수증을 재청구해도 가산 0 — 영수증은
+        // 최초 청구자에게만 귀속. (cross-user 시도는 fraud 신호로 warn 로깅되지만 동작은 granted=0.)
+        val owner = users.upsert(AuthProvider.GOOGLE, "g-owner", "owner@example.com", "Owner", null)
+        val attacker = users.upsert(AuthProvider.APPLE, "a-atk", "atk@example.com", "Atk", null)
+
+        val first = credits.grantPurchase(owner.id, "apple", "tx-shared", "vibi.credits.50", 50)
+        assertEquals(50, first.granted)
+
+        val replay = credits.grantPurchase(attacker.id, "apple", "tx-shared", "vibi.credits.50", 50)
+        assertEquals(0, replay.granted)            // attacker 는 한 푼도 못 받음
+        assertEquals(0, replay.balance)            // attacker 잔액 그대로 0
+        assertEquals(50, credits.balance(owner.id)) // 최초 청구자 잔액 보존
+    }
+
+    @Test
     fun `different platforms with same transactionId both succeed`() {
         // Apple/Google 영수증 시스템이 독립 — UNIQUE (platform, transactionId) 라 platform 다르면 양립.
         val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)

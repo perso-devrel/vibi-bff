@@ -49,7 +49,12 @@ fun Application.configureRouting(
 ) {
     val log = org.slf4j.LoggerFactory.getLogger("BootCheck")
     routing {
-        swaggerUI(path = "swagger", swaggerFile = "openapi/vibi-bff.yaml")
+        // Swagger UI — 전체 API 스펙을 무인증 노출하므로 운영에선 끈다. ENABLE_SWAGGER=true
+        // (로컬 dev) 일 때만 마운트해 정찰 표면을 줄인다.
+        if (System.getenv("ENABLE_SWAGGER") == "true") {
+            swaggerUI(path = "swagger", swaggerFile = "openapi/vibi-bff.yaml")
+            log.info("Swagger UI mounted at /swagger (ENABLE_SWAGGER=true)")
+        }
 
         // Admin SPA — Swagger 와 같은 패턴으로 BFF 가 직접 서빙. ADMIN_SLUG blank 면 마운트 자체 skip
         // (= 외부에선 admin 페이지 존재도 인지 불가). Vite 빌드 산출물이 src/main/resources/admin/ 에 있다.
