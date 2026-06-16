@@ -22,10 +22,11 @@ SA_EMAIL="${SA_NAME}@${PROJECT_ID}.iam.gserviceaccount.com"
 # URL redirect 로 우회. **R2 egress 무료** 라 Cloud Run egress 비용 0. Cloud Run 인스턴스도
 # 바이트 전송으로 잠기지 않아 max-instances=2 cap 에서 동시 다운로드 처리량 회복.
 SIGNED_URL_TTL_SEC="${SIGNED_URL_TTL_SEC:-900}"
-# min-instances=1 이 기본 — SeparationDispatcher 가 BFF 안에 살고 있어 idle 시 인스턴스가
-# scale-to-zero 되면 큐 dispatch 가 멈춤. 사용자 submit 은 DB에 QUEUED 만 쌓이고 처리 안 됨.
-# 비용: us-central1 2Gi/1CPU ≈ $25/mo. 진짜 traffic 없는 dev 환경에선 MIN_INSTANCES=0 override.
-MIN_INSTANCES="${MIN_INSTANCES:-1}"
+# min-instances=0 이 기본 — 유휴 시 scale-to-zero 라 비용 0. SeparationDispatcher 가 BFF 안에
+# 살고 있어 idle 시 인스턴스가 죽으면 dispatch 가 멈추는 문제는, 아래 --no-cpu-throttling 으로
+# CPU 를 항상 할당해 인스턴스가 살아있는 한 백그라운드 잡(렌더 ffmpeg / Perso 폴링)이 끝까지 돌게
+# 해결. 첫 submit 은 콜드 스타트(~5-15s) 감수. 큐 즉시성이 중요하면 MIN_INSTANCES=1 override (월 비용 발생).
+MIN_INSTANCES="${MIN_INSTANCES:-0}"
 MAX_INSTANCES="${MAX_INSTANCES:-2}"
 
 ENV_FILE="$(dirname "$0")/../.env"
@@ -159,6 +160,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --timeout 3600 \
   --concurrency 4 \
   --min-instances "$MIN_INSTANCES" --max-instances "$MAX_INSTANCES" \
+  --no-cpu-throttling \
   --session-affinity \
   --allow-unauthenticated \
   --set-env-vars="^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${REGION}@PERSO_BASE_URL=https://api.perso.ai@PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai@STORAGE_PATH=/tmp/storage@GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS}@APPLE_OAUTH_CLIENT_IDS=${APPLE_OAUTH_CLIENT_IDS}@CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}@R2_BUCKET=${R2_BUCKET}@R2_ACCOUNT_ID=${R2_ACCOUNT_ID}@SIGNED_URL_TTL_SEC=${SIGNED_URL_TTL_SEC}@ADMIN_SLUG=${ADMIN_SLUG}" \

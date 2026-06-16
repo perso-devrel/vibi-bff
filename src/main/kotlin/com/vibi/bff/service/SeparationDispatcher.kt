@@ -37,9 +37,10 @@ import kotlin.time.Duration.Companion.milliseconds
  *   4. **트랜잭션은 짧게**: claimNext / markProcessing / mark{Ready,Failed} 모두 SQL 1-2개.
  *      실제 Perso 호출 (분 단위) 은 service.executePipeline 에서 트랜잭션 밖.
  *
- * Cloud Run min-instances=0 일 때 trade-off: 인스턴스가 idle 로 잠들면 dispatcher 도 죽음.
- * 그 사이 새 submit 이 들어와도 QUEUED 만 쌓이고 처리 안 됨. min-instances=1 로 운영하거나
- * (권장) 새 submit 이 들어올 때만 처리되는 한계를 받아들여야 함.
+ * Cloud Run 운영 (min-instances=0 + --no-cpu-throttling): 인스턴스가 살아있는 동안은 CPU 가 항상
+ * 할당돼 dispatcher 가 in-flight 잡을 끝까지 폴링한다. 완전 idle 이 길어져 scale-to-zero 로 죽으면
+ * dispatcher 도 멈추지만, 그 시점엔 처리 중 잡이 없고, 새 submit 이 들어와 인스턴스를 깨우면 dispatcher
+ * 가 다시 떠 QUEUED 를 claim 한다. 큐 즉시성이 꼭 필요하면 min-instances=1 로 인스턴스를 상주.
  */
 class SeparationDispatcher(
     private val service: SeparationService,
