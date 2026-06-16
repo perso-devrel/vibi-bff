@@ -5,7 +5,9 @@ import com.vibi.bff.config.AppConfig
 import com.vibi.bff.model.*
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.NotFoundException
+import com.vibi.bff.plugins.RL_SEPARATE
 import com.vibi.bff.plugins.requireUser
+import io.ktor.server.plugins.ratelimit.rateLimit
 import com.vibi.bff.service.CreditCost
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.FileStorageService
@@ -47,6 +49,8 @@ fun Route.separationRoutes(
     creditRepository: CreditRepository? = null,
 ) {
     route("/separate") {
+        // submit(POST)만 레이트리밋 — 크레딧이 1차 방어, 보조 상한. 상태 조회/stem GET 은 제외.
+        rateLimit(RL_SEPARATE) {
         // POST /api/v2/separate — submit job
         // 모바일이 trim + audio extract 까지 끝낸 audio (m4a/mp3/wav) 만 받는다.
         // BFF 는 file 을 그대로 Perso 에 forward — ffmpeg 단계 없음.
@@ -146,6 +150,8 @@ fun Route.separationRoutes(
                 throw e
             }
         }
+
+        } // rateLimit(RL_SEPARATE)
 
         // GET /api/v2/separate/{jobId} — status + stem URLs (signed)
         get("/{jobId}") {

@@ -283,6 +283,7 @@ fun Application.module() {
 
     configureSerialization()
     configureCors()
+    configureRateLimiting(appConfig.auth.jwtSecret)
     configureErrorHandling()
     configureRouting(
         fileStorage, persoClient, appConfig, renderService,

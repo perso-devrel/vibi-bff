@@ -11,7 +11,9 @@ import com.vibi.bff.model.Segment
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
+import com.vibi.bff.plugins.RL_RENDER
 import com.vibi.bff.plugins.requireUser
+import io.ktor.server.plugins.ratelimit.rateLimit
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
 import com.vibi.bff.service.FileStorageService
@@ -55,6 +57,8 @@ fun Route.renderRoutes(
     jwtSecret: String? = null,
 ) {
     route("/render") {
+        // submit 계열(POST)만 레이트리밋 — ffmpeg CPU 직결. 상태 폴링/다운로드 GET 은 제외.
+        rateLimit(RL_RENDER) {
         // POST /api/v2/render/inputs — shared input cache. Mobile uploads the
         // source video once; the response's inputId can be reused across N
         // variant renders without re-sending the bytes. inputId is
@@ -321,6 +325,7 @@ fun Route.renderRoutes(
             )
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
         }
+        } // rateLimit(RL_RENDER)
 
         get("/{jobId}/status") {
             val principal = jwtSecret?.let { call.requireUser(it) }
