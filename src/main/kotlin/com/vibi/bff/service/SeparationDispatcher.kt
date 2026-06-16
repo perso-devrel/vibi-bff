@@ -106,7 +106,11 @@ class SeparationDispatcher(
                 // (Neon suspend 허용 — 새 submit 은 어차피 nudge 가 즉시 깨움).
                 val tickMs = if (inFlight.get() > 0) tickIntervalMs else idleTickIntervalMs
                 select<Unit> {
-                    kick.onReceive { /* kick — 즉시 다음 사이클 */ }
+                    // onReceiveCatching: shutdown() 이 kick.close() 하면 onReceive 는
+                    // ClosedReceiveChannelException 을 던져 (scale-to-zero 종료마다) 워커 스레드를
+                    // 크래시시킨다. catching 변형은 닫혀도 throw 없이 ChannelResult 만 반환 → 다음
+                    // 사이클의 while(isActive) 가 정상 종료를 처리. (kick 값이든 close 든 동작 동일.)
+                    kick.onReceiveCatching { /* kick 또는 shutdown(close) — 즉시 다음 사이클 */ }
                     onTimeout(tickMs.milliseconds) {
                         runCatching { reapPass() }
                             .onFailure { log.warn("Reap pass failed: {}", it.message) }
