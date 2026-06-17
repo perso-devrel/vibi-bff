@@ -77,8 +77,8 @@ dependencies {
     implementation("org.jetbrains.exposed:exposed-java-time:$exposedVersion")
     implementation("org.postgresql:postgresql:42.7.4")
     implementation("com.zaxxer:HikariCP:5.1.0")
-    implementation("org.flywaydb:flyway-core:10.18.2")
-    implementation("org.flywaydb:flyway-database-postgresql:10.18.2")
+    implementation("org.flywaydb:flyway-core:12.8.1")
+    implementation("org.flywaydb:flyway-database-postgresql:12.8.1")
     // 단위 테스트용 in-memory DB (Exposed 호환). Flyway 도 H2 지원.
     testImplementation("com.h2database:h2:2.3.232")
 
