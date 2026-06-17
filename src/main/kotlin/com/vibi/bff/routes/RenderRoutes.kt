@@ -13,6 +13,8 @@ import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.plugins.RL_RENDER
 import com.vibi.bff.plugins.requireUser
+import com.vibi.bff.plugins.requireUserActiveIfPossible
+import com.vibi.bff.service.UserRepository
 import io.ktor.server.plugins.ratelimit.rateLimit
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
@@ -55,6 +57,8 @@ fun Route.renderRoutes(
     objectStore: ObjectStore?,
     /** JWT 검증용 — null 이면 인증 강제 안 함 (테스트 호환). 운영에선 항상 주입. */
     jwtSecret: String? = null,
+    /** 삭제된 계정의 잔존 JWT 차단용 존재 확인. null 이면 skip (테스트/dev). 운영에선 항상 주입. */
+    userRepository: UserRepository? = null,
 ) {
     route("/render") {
         // submit 계열(POST)만 레이트리밋 — ffmpeg CPU 직결. 상태 폴링/다운로드 GET 은 제외.
@@ -68,7 +72,7 @@ fun Route.renderRoutes(
             // 인증 강제 + cache entry 의 ownerUserId 바인딩 — 같은 sha256 의 슬롯을
             // 다른 user 가 resolve 해 cross-account content IDOR 으로 이어지는 회귀 차단.
             // legacy (ownerUserId null) entry 는 다음 인증 caller hit 시 박힘 — 점진 마이그레이션.
-            val principal = jwtSecret?.let { call.requireUser(it) }
+            val principal = call.requireUserActiveIfPossible(jwtSecret, userRepository)
             val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
             var videoFileName: String? = null
@@ -129,7 +133,7 @@ fun Route.renderRoutes(
 
         post {
             // 사용자 귀속 — admin 대시보드의 "사용자별 사용량" 집계 source. jwtSecret null 이면 분석 skip.
-            val principal = jwtSecret?.let { call.requireUser(it) }
+            val principal = call.requireUserActiveIfPossible(jwtSecret, userRepository)
             // Ktor 3.x default formFieldLimit 50MB → 70MB+ 영상 multipart 거부됨. 500MB 까지 허용.
             val multipart = call.receiveMultipart(formFieldLimit = MAX_UPLOAD_FILE_SIZE)
 
@@ -245,7 +249,7 @@ fun Route.renderRoutes(
         // 으로 전송. BFF 가 R2 에서 다운로드 후 ffmpeg. Cloud Run body 한도 회피 + 재편집 시
         // 재업로드 제거 + BGM dedup 자동 해결.
         post("/v3") {
-            val principal = jwtSecret?.let { call.requireUser(it) }
+            val principal = call.requireUserActiveIfPossible(jwtSecret, userRepository)
             if (objectStore == null) {
                 throw ApiErrorException(
                     HttpStatusCode.ServiceUnavailable,

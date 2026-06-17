@@ -7,6 +7,8 @@ import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.plugins.RL_SEPARATE
 import com.vibi.bff.plugins.requireUser
+import com.vibi.bff.plugins.requireUserActiveIfPossible
+import com.vibi.bff.service.UserRepository
 import io.ktor.server.plugins.ratelimit.rateLimit
 import com.vibi.bff.service.CreditCost
 import com.vibi.bff.service.CreditRepository
@@ -47,6 +49,8 @@ fun Route.separationRoutes(
     jwtSecret: String? = null,
     /** 크레딧 선차감 / 환불용. null 이면 차감 skip (테스트 / dev). 운영에선 항상 주입. */
     creditRepository: CreditRepository? = null,
+    /** 삭제된 계정의 잔존 JWT 차단용 존재 확인. null 이면 skip (테스트/dev). 운영에선 항상 주입. */
+    userRepository: UserRepository? = null,
 ) {
     route("/separate") {
         // submit(POST)만 레이트리밋 — 크레딧이 1차 방어, 보조 상한. 상태 조회/stem GET 은 제외.
@@ -55,7 +59,7 @@ fun Route.separationRoutes(
         // 모바일이 trim + audio extract 까지 끝낸 audio (m4a/mp3/wav) 만 받는다.
         // BFF 는 file 을 그대로 Perso 에 forward — ffmpeg 단계 없음.
         post {
-            val principal = jwtSecret?.let { call.requireUser(it) }
+            val principal = call.requireUserActiveIfPossible(jwtSecret, userRepository)
             val (filePart, specOpt) = parseOptionalUploadAndSpec<SeparationSpec>(
                 call.receiveMultipart(formFieldLimit = MAX_SEPARATION_AUDIO_SIZE),
                 fileStorage,

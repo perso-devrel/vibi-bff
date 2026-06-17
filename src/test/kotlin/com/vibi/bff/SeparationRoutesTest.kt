@@ -12,6 +12,7 @@ import com.vibi.bff.service.MediaTrimmer
 import com.vibi.bff.service.SeparationJob
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
+import com.vibi.bff.service.UserRepository
 import io.ktor.client.request.*
 import io.ktor.client.request.forms.*
 import io.ktor.client.statement.*
@@ -49,6 +50,7 @@ class SeparationRoutesTest {
     private fun testApp(
         jwtSecret: String? = null,
         creditRepository: CreditRepository? = null,
+        userRepository: UserRepository? = null,
         block: suspend ApplicationTestBuilder.() -> Unit,
     ) = testApplication {
         application {
@@ -64,6 +66,7 @@ class SeparationRoutesTest {
                     appConfig, objectStore = null,
                     jwtSecret = jwtSecret,
                     creditRepository = creditRepository,
+                    userRepository = userRepository,
                 )
             }
         }
@@ -261,6 +264,29 @@ class SeparationRoutesTest {
     // ── 자원 소유권 검증 ─────────────────────────────────────────────────────
 
     private val testJwtSecret = "a".repeat(64)
+
+    /** A-1: 삭제된 계정의 아직-유효한 JWT 로 submit 시도 → users row 부재라 401 account_deleted.
+     *  Perso/ffmpeg 비용 유발 전에 차단. submit 자체는 호출되지 않아야 한다. */
+    @Test
+    fun `POST separate rejects deleted account (valid JWT but user row gone)`() {
+        val userRepo = mockk<UserRepository>()
+        every { userRepo.exists(any()) } returns false
+        val callerId = UUID.randomUUID()
+        testApp(jwtSecret = testJwtSecret, userRepository = userRepo) {
+            val response = client.post("/api/v2/separate") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+                setBody(MultiPartFormDataContent(formData {
+                    append("file", "fake".toByteArray(), Headers.build {
+                        append(HttpHeaders.ContentType, "audio/mp4")
+                        append(HttpHeaders.ContentDisposition, "filename=\"t.m4a\"")
+                    })
+                    append("spec", "{}")
+                }))
+            }
+            assertEquals(HttpStatusCode.Unauthorized, response.status)
+            verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        }
+    }
 
     @Test
     fun `GET separation status returns 404 when caller is not owner`() = testApp(jwtSecret = testJwtSecret) {

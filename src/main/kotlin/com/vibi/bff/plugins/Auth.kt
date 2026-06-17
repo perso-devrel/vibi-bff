@@ -4,10 +4,13 @@ import com.auth0.jwt.JWT
 import com.auth0.jwt.algorithms.Algorithm
 import com.auth0.jwt.exceptions.JWTVerificationException
 import com.vibi.bff.service.AuthService
+import com.vibi.bff.service.UserRepository
 import io.ktor.http.HttpStatusCode
 import io.ktor.server.application.ApplicationCall
 import io.ktor.server.request.header
 import java.util.UUID
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.withContext
 
 /**
  * 인증된 호출자 정보. [userId] 는 internal UUID (users.id), [role] 은 'user' 또는 'admin'.
@@ -65,6 +68,32 @@ fun ApplicationCall.requireAdmin(jwtSecret: String): JwtPrincipal {
     val principal = requireUser(jwtSecret)
     if (!principal.isAdmin) {
         throw ApiErrorException(HttpStatusCode.Forbidden, "admin_required")
+    }
+    return principal
+}
+
+/**
+ * 비용/엔타이틀먼트 mutating endpoint(render·separation submit)용 인증 헬퍼.
+ *
+ * - [jwtSecret] null (테스트/dev 분기) → null 반환 (인증 강제 안 함, 기존 동작 유지).
+ * - [userRepository] null (테스트/dev) → [requireUser] 만 수행 (DB 조회 없음).
+ * - 둘 다 주입된 운영 경로 → [requireUser] 후 users row 존재까지 확인. 삭제된 계정의
+ *   아직-유효한 JWT (만료 전 최대 expiry) 가 ffmpeg/Perso 비용을 유발하는 것을 차단.
+ *   존재하지 않으면 `Unauthorized(account_deleted)`.
+ *
+ * 상태 폴링 GET 등 핫패스에는 쓰지 않는다 — 거긴 [requireUser] 단독(무-DB)으로 충분.
+ */
+suspend fun ApplicationCall.requireUserActiveIfPossible(
+    jwtSecret: String?,
+    userRepository: UserRepository?,
+): JwtPrincipal? {
+    if (jwtSecret == null) return null
+    val principal = requireUser(jwtSecret)
+    if (userRepository != null) {
+        val exists = withContext(Dispatchers.IO) { userRepository.exists(principal.userId) }
+        if (!exists) {
+            throw ApiErrorException(HttpStatusCode.Unauthorized, "account_deleted")
+        }
     }
     return principal
 }
