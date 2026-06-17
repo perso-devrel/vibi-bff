@@ -251,6 +251,15 @@ data class DbConfig(
         require(jdbcUrl.startsWith("jdbc:postgresql://") || jdbcUrl.startsWith("jdbc:h2:")) {
             "DATABASE_URL must be a Postgres or H2 JDBC URL (got: ${jdbcUrl.take(20)}...)"
         }
+        // Neon 은 공용 인터넷 경유 — 평문 연결 차단. Postgres URL 은 TLS(sslmode) 필수,
+        // sslmode=disable 은 명시 거부. (H2 in-memory 테스트는 면제.) verify-ca/verify-full
+        // 같은 더 강한 모드도 허용하도록 'require' 고정 대신 'disable 아님' 으로 검증.
+        if (jdbcUrl.startsWith("jdbc:postgresql://")) {
+            require(jdbcUrl.contains("sslmode=") && !jdbcUrl.contains("sslmode=disable")) {
+                "DATABASE_URL must enforce TLS for Postgres — add sslmode=require " +
+                    "(or verify-ca/verify-full). sslmode=disable is rejected."
+            }
+        }
         require(maxPoolSize in 1..50) { "DB_MAX_POOL must be in 1..50 (got $maxPoolSize)" }
     }
 }

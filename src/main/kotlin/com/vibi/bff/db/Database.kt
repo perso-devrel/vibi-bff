@@ -42,8 +42,19 @@ object DbBootstrap {
                 // "connection has been closed" 경고 다발 발생. maxLifetime 을 Neon idle limit 보다
                 // 짧게 잡아 Hikari 가 먼저 회전시키도록 한다.
                 maxLifetime = 240_000
-                idleTimeout = 180_000
-                keepaliveTime = 60_000
+                // minimumIdle=0: idle 시 풀을 0까지 비운다. Hikari 기본은 minimumIdle=maximumPoolSize
+                // 라 항상 풀만큼 커넥션을 유지하고 keepaliveTime 마다 ping 을 던져 Neon compute 가
+                // 24/7 깨어있게 만든다(=과금). 0 으로 두면 마지막 사용 후 idleTimeout 안에 커넥션이
+                // 전부 닫혀 ping 도 멈추고 Neon 이 suspend 된다. 반드시 SeparationDispatcher 의 idle
+                // tick 완화와 함께 적용 — 한쪽이라도 주기적으로 DB 를 두드리면 suspend 가 안 된다.
+                minimumIdle = 0
+                // idleTimeout 을 짧게(30s) 잡아 마지막 쿼리 후 빠르게 풀을 비운다. keepaliveTime 은
+                // idleTimeout 보다 길게 두어 idle 커넥션이 ping 전에 닫히게 — 사실상 keepalive 정지.
+                // (커넥션이 30s 이상 살아남는 건 사용 중일 때뿐이고, 그땐 Neon 이 어차피 깨어있다.)
+                idleTimeout = 30_000
+                keepaliveTime = 120_000
+                // 첫 요청이 풀을 0→1 로 키울 때 Neon cold start(수 초)를 견디도록 validation 여유.
+                validationTimeout = 10_000
             }
         }
         val ds = HikariDataSource(hikari)

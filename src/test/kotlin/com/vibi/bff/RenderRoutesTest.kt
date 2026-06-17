@@ -2,6 +2,7 @@ package com.vibi.bff
 
 import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.configureErrorHandling
+import com.vibi.bff.plugins.configureRateLimiting
 import com.vibi.bff.plugins.configureSerialization
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.service.FileStorageService
@@ -66,6 +67,8 @@ class RenderRoutesTest {
         application {
             configureSerialization()
             configureErrorHandling()
+            // renderRoutes 가 rateLimit(RL_RENDER) 래퍼를 쓰므로 플러그인 설치 필요.
+            configureRateLimiting(appConfig.auth.jwtSecret)
         }
         routing {
             route("/api/v2") {

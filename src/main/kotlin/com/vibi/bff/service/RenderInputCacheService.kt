@@ -246,7 +246,7 @@ class RenderInputCacheService(
     private fun sanitizeOwnerNs(ns: String): String {
         if (ns == "anonymous") return ns
         // UUID 패턴 검증 (xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx, hex only)
-        if (ns.matches(Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$"))) {
+        if (ns.matches(UUID_PATTERN)) {
             return ns.lowercase()
         }
         // unexpected — hash 로 normalize
@@ -270,15 +270,22 @@ class RenderInputCacheService(
     }
 
     private fun sanitizeFilename(name: String): String {
-        val cleaned = name.replace(Regex("[^a-zA-Z0-9._-]"), "_")
+        val cleaned = name.replace(FILENAME_UNSAFE_PATTERN, "_")
         return cleaned.take(120)
     }
 
     /** inputIds are 32-char lowercase hex (16-byte sha256 prefix) — strict to block path traversal. */
-    private fun isValidInputId(id: String): Boolean = id.matches(Regex("^[0-9a-f]{32}$"))
+    private fun isValidInputId(id: String): Boolean = id.matches(INPUT_ID_PATTERN)
 
     companion object {
         private const val METADATA_NAME = "metadata.json"
+
+        // Hot-path regexes — compiled once. save()/resolve()/cleanExpired() run per
+        // video upload, so per-call `Regex(...)` 컴파일을 피한다.
+        private val UUID_PATTERN =
+            Regex("^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$")
+        private val FILENAME_UNSAFE_PATTERN = Regex("[^a-zA-Z0-9._-]")
+        private val INPUT_ID_PATTERN = Regex("^[0-9a-f]{32}$")
     }
 }
 

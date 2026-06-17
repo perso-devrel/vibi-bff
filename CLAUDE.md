@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-vibi BFF — Kotlin/Ktor backend. **Perso AI** 프록시 (오디오 분리) + 로컬 ffmpeg 렌더 파이프라인 (multi-segment concat, BGM atrim+amix, audio override) + **Google / Apple Sign In** ID Token 검증 + **Postgres** user upsert + HS256 JWT 발급 + 옵션 **Cloudflare R2** SigV4 presigned URL redirect.
+vibi BFF — Kotlin/Ktor backend. **Perso AI** 프록시 (오디오 분리) + 로컬 ffmpeg 렌더 파이프라인 (multi-segment concat, BGM atrim+amix, audio override) + **Google / Apple Sign In** ID Token 검증 + **Postgres** user upsert + HS256 JWT 발급 + **크레딧/인앱결제** (StoreKit2 / Play Billing 영수증 검증) + **admin 대시보드** (읽기전용 분석) + 옵션 **Cloudflare R2** SigV4 presigned URL redirect.
 
 - **Stack**: Kotlin 2.0, Ktor 3.0.3, Netty, kotlinx.serialization, JDK 21, Exposed + HikariCP, Postgres
 - **Runtime deps**: `ffmpeg`, `ffprobe` on `PATH`; Postgres (Neon free tier 호환); Cloudflare R2 bucket (옵션)
@@ -29,25 +29,32 @@ Swagger UI at `/swagger`. 환경 변수 표 + API 상세는 `README.md`.
 - `Application.kt` — entry point. `loadDotenv` (real env > sys prop > .env), `loadConfig`, `DbBootstrap.init`, HttpClient + 모든 서비스 wiring, CallLogging (signed-URL token / OAuth code 마스킹), 종료 hook (httpClient + render/separation shutdown + dataSource close).
 - `Constants.kt` — `MAX_UPLOAD_FILE_SIZE` 등.
 - `config/AppConfig.kt` — HOCON + env var loading (StorageConfig·PersoConfig·SeparationConfig·AuthConfig·DbConfig). 각 config 의 `init { require(...) }` 가 boot 시 fail-fast.
-- `db/Database.kt` (DbBootstrap, HikariCP) + `db/UsersTable.kt` (Exposed `(provider, providerSub)` unique).
+- `db/Database.kt` (DbBootstrap, HikariCP) + Exposed 테이블 (`UsersTable` `(provider, providerSub)` unique + 크레딧 ledger / job analytics / external-call 로그).
 - `plugins/` — CORS, Serialization (`AppJson = Json { ignoreUnknownKeys=true, encodeDefaults=true }`), `ErrorHandling` (StatusPages), `Routing`.
-- `routes/` — `/api/v2` (`AuthRoutes` · `LanguageRoutes` · `RenderRoutes` (+ `/inputs`) · `SeparationRoutes` · `DownloadResponder`·`MultipartUtils` 헬퍼). dev mock 으로 `/testdata/separation/*`.
-- `model/` — `AuthModels` · `BffModels` · `PersoModels`. BFF DTO 와 Perso upstream DTO 분리, `@SerialName` 으로 snake_case ↔ camelCase 매핑.
-- `service/` — `PersoClient`, `PersoPolling`, `FileStorageService`, `MediaTrimmer` (audio duration probe 전용), `RenderService`, `RenderInputCacheService`, `SeparationService`, `SignedUrlService`, `AuthService`, `UserRepository`, `ObjectStore`, `FfmpegRunner`.
+- `routes/` — `/api/v2` (`AuthRoutes` · `CreditRoutes` · `AssetRoutes` · `RenderRoutes` (+ `/inputs`, `/v3`) · `SeparationRoutes` · `AdminRoutes` · `DownloadResponder`·`MultipartUtils` 헬퍼). dev mock 으로 `/testdata/separation/*`.
+- `model/` — `AuthModels` · `CreditModels` · `AdminModels` · `BffModels` · `PersoModels`. BFF DTO 와 Perso upstream DTO 분리, `@SerialName` 으로 snake_case ↔ camelCase 매핑.
+- `service/` — `PersoClient`, `PersoPolling`, `FileStorageService`, `MediaTrimmer` (audio duration probe 전용), `RenderService`, `RenderInputCacheService`, `SeparationService`, `SeparationDispatcher`, `SeparationQueueRepository`, `SignedUrlService`, `AuthService`, `UserRepository`, `CreditRepository`, `AppleReceiptVerifier`, `GoogleReceiptVerifier`, `AdminRepository`, `ExternalApiCallsRepository`, `JobAnalyticsRepository`, `ObjectStore`, `FfmpegRunner`.
 
-> 과거 `AutoSubtitleService` / `AutoDubService` / `LipSyncService` + 관련 route·DTO 는 **commit `52f8d7c refactor(bff): sticker/자막/더빙 surface 절단`** 으로 일괄 제거. 모바일에 잔존하는 caller (BffApi 메서드들 + Auto*RepositoryImpl) 는 호출 시 404 — 재도입 작업 시 본 commit 의 디프를 base 로 복원하지 말고 새로 설계할 것.
+> 과거 `AutoSubtitleService` / `AutoDubService` / `LipSyncService` + Gemini 챗(`/chat`) + `/languages` + 관련 route·DTO 는 **commit `52f8d7c refactor(bff): sticker/자막/더빙 surface 절단`** 으로 일괄 제거. BFF·모바일 양쪽 모두 caller 까지 제거된 상태 (잔존 dead 메서드 없음) — 재도입 작업 시 본 commit 의 디프를 base 로 복원하지 말고 새로 설계할 것.
 
 ## 운영 surface 요약
 
 ```
-POST /api/v2/auth/{google,apple}        # ID Token → BFF JWT 교환
-POST /api/v2/render/inputs              # video bytes 한 번만 업로드 → inputId
-POST /api/v2/render                     # multipart, multi-segment 합성 (inputId 재사용)
-GET  /api/v2/render/{id}/{status,download}
-POST /api/v2/separate                   # audio-only multipart (m4a/mp3/wav, ≤100MB)
-GET  /api/v2/separate/{id}              # stem + 서명 URL
-GET  /api/v2/separate/{id}/stem/{stemId}        # token=*** 필수
-GET  /api/v2/testdata/separation/*      # (dev mock)
+POST   /api/v2/auth/{google,apple}        # ID Token → BFF JWT 교환
+DELETE /api/v2/auth/account               # 계정 삭제 (인증 필요)
+GET    /api/v2/credits                    # 잔액 (+ GET /credits/cost 견적)
+POST   /api/v2/credits/purchase           # StoreKit2 / Play Billing 영수증 검증 → 적립
+POST   /api/v2/credits/admin-grant        # admin 전용 수동 적립
+POST   /api/v2/assets/upload-url          # R2 presigned PUT URL (v3 render 에셋 업로드)
+POST   /api/v2/render/inputs              # video bytes 한 번만 업로드 → inputId
+POST   /api/v2/render                     # multipart, multi-segment 합성 (inputId 재사용)
+POST   /api/v2/render/v3                  # 에셋 by-reference (R2 key) 렌더
+GET    /api/v2/render/{id}/{status,download}
+POST   /api/v2/separate                   # audio-only multipart (m4a/mp3/wav, ≤100MB, 크레딧 reserve)
+GET    /api/v2/separate/{id}              # stem + 서명 URL
+GET    /api/v2/separate/{id}/stem/{stemId}        # token=*** 필수
+GET    /api/v2/admin/*                     # 읽기전용 대시보드 (overview/stats/users/jobs, admin role)
+GET    /api/v2/testdata/separation/*      # (dev mock)
 ```
 
 ## Known BFF bug patterns

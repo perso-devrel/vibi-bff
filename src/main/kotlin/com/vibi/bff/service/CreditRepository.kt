@@ -12,7 +12,6 @@ import org.jetbrains.exposed.sql.select
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
 import org.jetbrains.exposed.sql.upsert
-import kotlin.math.ceil
 
 /**
  * 신규 가입 시 자동 지급되는 보너스 크레딧. 1분 = 1 크레딧이므로 약 3분 분량 = 첫 사용 무료
@@ -31,15 +30,13 @@ class InsufficientCreditsException(
 ) : RuntimeException("insufficient credits: required=$required balance=$balance")
 
 /**
- * 잡 길이 → 크레딧 비용 계산. 1분당 1 크레딧, 올림 (ceil). 0초 입력은 비용 0이 아니라
- * **최소 1 크레딧** — duration 측정 실패(0L)로 무료 사용 가능해지는 우회 차단. 본 계산은
- * 라우트 (선차감) 와 /credits/cost endpoint (모바일 견적) 양쪽이 단일 source 로 사용.
+ * 잡 길이 → 크레딧 비용 계산. **영상(잡) 1개당 고정 1 크레딧** — duration 무관. 라우트(선차감)
+ * 와 /credits/cost endpoint (모바일 견적) 양쪽이 단일 source 로 사용하므로 견적·차감·402 required
+ * 가 모두 1 로 일관. (durationMs 는 호출처 시그니처 호환을 위해 유지 — 현재 계산에 미사용.)
  */
 object CreditCost {
-    fun forSeparation(durationMs: Long): Int {
-        val minutes = ceil(durationMs.coerceAtLeast(0L) / 60_000.0).toInt()
-        return minutes.coerceAtLeast(1)
-    }
+    @Suppress("UNUSED_PARAMETER")
+    fun forSeparation(durationMs: Long): Int = 1
 }
 
 /**
@@ -63,6 +60,8 @@ object CreditCost {
  *   이중 환불 차단.
  */
 class CreditRepository {
+
+    private val log = org.slf4j.LoggerFactory.getLogger(javaClass)
 
     data class PurchaseOutcome(
         val granted: Int,
@@ -104,6 +103,24 @@ class CreditRepository {
             it[CreditTransactionsTable.createdAt] = now
         }.insertedCount
         if (inserted == 0) {
+            // (platform, transactionId) 충돌 — 이미 처리된 영수증. 같은 user 의 retry 면 정상
+            // (멱등). 그러나 *다른* user 가 같은 transactionId 를 청구하면 영수증 공유/탈취
+            // 시도일 수 있어 fraud 신호로 warn 로깅한다. 가산은 어느 쪽이든 skip (granted=0) —
+            // 영수증 1건은 최초 청구자에게만 귀속되고 이중 적립은 없다.
+            val ownerUserId = CreditTransactionsTable
+                .select(CreditTransactionsTable.userId)
+                .where {
+                    (CreditTransactionsTable.platform eq platform) and
+                        (CreditTransactionsTable.transactionId eq transactionId)
+                }
+                .singleOrNull()
+                ?.get(CreditTransactionsTable.userId)
+            if (ownerUserId != null && ownerUserId != userId) {
+                log.warn(
+                    "credit purchase cross-user replay: tx={} platform={} claimedBy={} originalOwner={} — granting 0",
+                    transactionId, platform, userId, ownerUserId,
+                )
+            }
             return@transaction PurchaseOutcome(granted = 0, balance = readBalance(userId))
         }
 

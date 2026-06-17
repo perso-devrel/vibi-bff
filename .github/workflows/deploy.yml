@@ -1,59 +1,117 @@
-name: Deploy to Oracle VM
+name: Deploy to Cloud Run
 
 # main 푸시 시 자동 배포 + 수동 트리거 (Actions UI 의 Run workflow 버튼).
-# Cloud Run → Oracle Ampere(ARM) VM 이전 후의 배포 경로 — gcloud / WIF / Secret Manager 없음.
-#
-# 빌드도 시크릿 wiring 도 전부 VM 안에서 닫힌다:
-#   - 빌드:   docker compose 가 ARM 네이티브로 직접 빌드 (cross-arch 헤더에이크 없음)
-#   - 시크릿: VM 의 deploy/oracle/bff.env (gitignored, 1회 수기 세팅)
-# 따라서 이 워크플로는 "VM 에 SSH → git 최신화 → docker compose 재빌드" 트리거만 한다.
-#
-# 최초 1회 VM 부트스트랩(인스턴스 생성·방화벽·git clone·bff.env)은 deploy/oracle/README.md 참고.
+# 최초 1회 부트스트랩 (SA 생성, API 활성화, Secret Manager 시드) 은 deploy/cloud-run.sh 로 끝내두고,
+# 이 워크플로우는 매 배포마다 런타임 SA / env / secret / 리소스 스펙을 declarative 하게 wire 한다.
 on:
   push:
     branches: [main]
   workflow_dispatch:
 
-# 연속 푸시 시 마지막 것만 살린다 — VM 재빌드가 겹쳐 도는 것 방지.
+env:
+  SERVICE_NAME: vibi-bff
+  REGION: us-central1
+  GEMINI_PROJECT_ID: est-perso-vt-prod
+  GEMINI_LOCATION: us-central1
+  PERSO_BASE_URL: https://api.perso.ai
+  PERSO_STORAGE_BASE_URL: https://portal-media.perso.ai
+  STORAGE_PATH: /tmp/storage
+
+# Cloud Run 동시 배포 충돌 방지 — main 에 빠르게 연속 푸시되면 마지막 것만 살린다.
 concurrency:
-  group: deploy-oracle-${{ github.ref }}
+  group: deploy-${{ github.ref }}
   cancel-in-progress: true
 
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write   # WIF OIDC 토큰 발급에 필수
+
     steps:
-      # 러너는 checkout 조차 불필요 — 빌드는 VM(ARM 네이티브)에서 일어나므로
-      # SSH 로 명령만 던지고 빠진다.
-      - name: Deploy over SSH (git pull + docker compose rebuild)
-        uses: appleboy/ssh-action@v1
+      - uses: actions/checkout@v6
+
+      # admin-ui (Vite) 빌드 산출물은 .gitignore 됨 — 매 배포마다 fresh build 해서
+      # src/main/resources/admin/ 로 떨어뜨려야 Ktor staticResources 가 마운트한다.
+      # 빠뜨리면 ADMIN_SLUG 가 박혀도 부팅 로그에 WARN + admin URL 404.
+      - name: Set up Node.js
+        uses: actions/setup-node@v6
         with:
-          host: ${{ secrets.ORACLE_SSH_HOST }}
-          username: ${{ secrets.ORACLE_SSH_USER }}
-          key: ${{ secrets.ORACLE_SSH_KEY }}
-          port: ${{ secrets.ORACLE_SSH_PORT || 22 }}
-          # ARM 네이티브 풀 재빌드가 ~5분 — 여유 있게.
-          command_timeout: 30m
-          # ORACLE_APP_DIR 미설정 시 기본 ~/vibi-bff. 다른 경로면 repo Variables 로 주입.
-          envs: ORACLE_APP_DIR
-          script: |
-            set -euo pipefail
-            APP_DIR="${ORACLE_APP_DIR:-$HOME/vibi-bff}"
-            cd "$APP_DIR"
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: admin-ui/package-lock.json
 
-            echo "▶ git 최신화 (origin/main 강제 동기화)…"
-            # reset --hard 로 로컬 표류 무시 — bff.env 는 gitignored 라 안 날아간다.
-            git fetch origin main
-            git reset --hard origin/main
-
-            echo "▶ docker compose 재빌드 + 무중단 갱신…"
-            cd deploy/oracle
-            docker compose up -d --build
-
-            echo "▶ 미사용 이미지 정리 (VM 디스크 보호)…"
-            docker image prune -f
-
-            echo "▶ 컨테이너 상태:"
-            docker compose ps
+      - name: Build admin-ui (vite)
+        working-directory: admin-ui
         env:
-          ORACLE_APP_DIR: ${{ vars.ORACLE_APP_DIR }}
+          # Vite 는 `VITE_*` 를 빌드 타임에 번들에 인라인 — Cloud Run runtime env 로는 닿지 않는다.
+          # 누락 시 LoginPage 가 "VITE_GOOGLE_OAUTH_CLIENT_ID_ADMIN 빌드 env 가 없습니다." 로 표시.
+          VITE_GOOGLE_OAUTH_CLIENT_ID_ADMIN: ${{ secrets.GOOGLE_OAUTH_CLIENT_ID_ADMIN }}
+        run: |
+          npm ci --silent
+          npm run build
+
+      - name: Authenticate to Google Cloud (WIF)
+        uses: google-github-actions/auth@v3
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
+          service_account: ${{ secrets.GCP_SA_EMAIL }}
+
+      - name: Set up gcloud
+        uses: google-github-actions/setup-gcloud@v3
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      # BFF_BASE_URL 출처 (deploy 전 미리 결정 — deploy 단계 한 번에 wire 하기 위함):
+      #   1. vars.BFF_BASE_URL 가 있으면 그 값 (커스텀 도메인 운영 시 — 예: https://api.vibi.fm)
+      #   2. 없으면 기존 Cloud Run 자동 URL describe (service 가 이미 존재할 때)
+      #   3. 둘 다 없으면 최초 배포 — 빈 값으로 진행하고 다음 push 에서 (2) 로 자동 채움
+      #
+      # 과거에는 deploy + 별도 `update --update-env-vars BFF_BASE_URL=...` 두 step 으로 처리해
+      # **매 push 마다 revision 이 2개 생성** → 처리 중인 separation 잡 인스턴스가 두 번 죽을
+      # 기회. 한 step 으로 합쳐 revision 1개 / push 로 정상화.
+      - name: Determine BFF_BASE_URL
+        id: bff_url
+        run: |
+          VAR_URL="${{ vars.BFF_BASE_URL }}"
+          if [ -n "$VAR_URL" ]; then
+            URL="$VAR_URL"
+            echo "Using vars.BFF_BASE_URL: $URL"
+          else
+            URL=$(gcloud run services describe "$SERVICE_NAME" \
+              --region "$REGION" \
+              --project "${{ secrets.GCP_PROJECT_ID }}" \
+              --format='value(status.url)' 2>/dev/null || echo "")
+            if [ -n "$URL" ]; then
+              echo "Falling back to Cloud Run default URL: $URL"
+            else
+              echo "::warning::Service '$SERVICE_NAME' not found — BFF_BASE_URL will be empty this revision; rerun the workflow to populate."
+            fi
+          fi
+          echo "url=$URL" >> "$GITHUB_OUTPUT"
+
+      # min-instances=0 → 유휴 시 scale-to-zero 라 비용 0 (Oracle VM 이전 전 min=1 의 24/7 비용 제거).
+      # 단 렌더 ffmpeg / separation dispatcher 폴링은 백그라운드라, 요청이 없으면 Cloud Run 이 CPU 를
+      # throttle 해 멈춘다 → --no-cpu-throttling 으로 CPU 항상 할당 (instance-기반 과금이지만 완전 유휴
+      # 시엔 인스턴스가 죽어 $0). 첫 submit 은 콜드 스타트(~5-15s) 감수. 잡은 로컬 디스크/in-memory 에
+      # 핀돼 있어 polling client 를 같은 인스턴스로 보내는 --session-affinity 는 유지.
+      - name: Deploy to Cloud Run
+        run: |
+          gcloud run deploy "$SERVICE_NAME" \
+            --source . \
+            --region "$REGION" \
+            --project "${{ secrets.GCP_PROJECT_ID }}" \
+            --service-account "${{ secrets.GCP_RUNTIME_SA_EMAIL }}" \
+            --execution-environment gen2 \
+            --cpu 1 --memory 2Gi --cpu-boost \
+            --timeout 600 \
+            --concurrency 4 \
+            --min-instances 0 --max-instances 2 \
+            --no-cpu-throttling \
+            --session-affinity \
+            --allow-unauthenticated \
+            --set-env-vars "^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${GEMINI_LOCATION}@PERSO_BASE_URL=${PERSO_BASE_URL}@PERSO_STORAGE_BASE_URL=${PERSO_STORAGE_BASE_URL}@STORAGE_PATH=${STORAGE_PATH}@GOOGLE_OAUTH_CLIENT_IDS=${{ secrets.GOOGLE_OAUTH_CLIENT_IDS }}@APPLE_OAUTH_CLIENT_IDS=${{ secrets.APPLE_OAUTH_CLIENT_IDS }}@CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}@R2_BUCKET=${{ vars.R2_BUCKET }}@R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}@ADMIN_SLUG=${{ secrets.ADMIN_SLUG }}@BFF_BASE_URL=${{ steps.bff_url.outputs.url }}" \
+            --set-secrets "PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest,DATABASE_URL=DATABASE_URL:latest,DB_USER=DB_USER:latest,DB_PASSWORD=DB_PASSWORD:latest,R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest" \
+            --quiet
+          echo "::notice title=Deployed::${{ steps.bff_url.outputs.url }}"

@@ -22,6 +22,11 @@ repositories {
 }
 
 dependencies {
+    // netty BOM 핀 — Ktor 가 끌어오는 netty 를 4.1.118+ 로 강제해 CVE-2025-24970
+    // (SslHandler 네이티브 크래시) / CVE-2025-25193 차단. Ktor 패치 라인이 뒤처져도
+    // transitive netty 만 독립적으로 올릴 수 있게 belt-and-suspenders 로 명시.
+    implementation(platform("io.netty:netty-bom:4.1.118.Final"))
+
     // Ktor Server
     implementation("io.ktor:ktor-server-core:$ktor_version")
     implementation("io.ktor:ktor-server-netty:$ktor_version")
@@ -29,6 +34,9 @@ dependencies {
     implementation("io.ktor:ktor-server-cors:$ktor_version")
     implementation("io.ktor:ktor-server-status-pages:$ktor_version")
     implementation("io.ktor:ktor-server-call-logging:$ktor_version")
+    // 비용 폭주(악의적 대량 호출) 둔화용 인-프로세스 레이트리밋. 외부 인프라(Cloud Armor 등)
+    // 없이 앱 메모리 토큰버킷만 사용 — 운영비 증가 0. 고비용/민감 endpoint 에만 적용.
+    implementation("io.ktor:ktor-server-rate-limit:$ktor_version")
 
     // Ktor Client
     implementation("io.ktor:ktor-client-core:$ktor_version")
@@ -46,7 +54,7 @@ dependencies {
     implementation("ch.qos.logback:logback-classic:$logback_version")
     // Cloud Run / GCP Error Reporting 자동 수집용 JSON encoder. K_SERVICE env 가 set 인 경우만
     // 활성 (logback.xml 의 if-property), 로컬에선 기존 텍스트 포맷 유지.
-    implementation("net.logstash.logback:logstash-logback-encoder:7.4")
+    implementation("net.logstash.logback:logstash-logback-encoder:8.0")
     // logback.xml 의 <if condition> 평가 엔진. 부팅 시 ~50KB 메모리, eval 1회.
     implementation("org.codehaus.janino:janino:3.1.12")
 

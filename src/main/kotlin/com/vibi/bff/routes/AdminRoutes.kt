@@ -52,10 +52,7 @@ fun Route.adminRoutes(
         // q non-blank 면 email/name 부분일치 검색.
         get("/users") {
             call.requireAdmin(jwtSecret)
-            val limit = (call.request.queryParameters["limit"]?.toIntOrNull() ?: 50)
-                .coerceIn(1, 200)
-            val offset = (call.request.queryParameters["offset"]?.toIntOrNull() ?: 0)
-                .coerceAtLeast(0)
+            val (limit, offset) = call.parsePagination()
             val query = call.request.queryParameters["q"]
             val (rows, total) = withContext(Dispatchers.IO) {
                 adminRepository.getUsersOverview(limit, offset, query)
@@ -102,16 +99,23 @@ fun Route.adminRoutes(
             } catch (e: IllegalArgumentException) {
                 throw ApiErrorException(HttpStatusCode.BadRequest, "invalid_user_id")
             }
-            val limit = (call.request.queryParameters["limit"]?.toIntOrNull() ?: 50)
-                .coerceIn(1, 200)
-            val offset = (call.request.queryParameters["offset"]?.toIntOrNull() ?: 0)
-                .coerceAtLeast(0)
+            val (limit, offset) = call.parsePagination()
             val (rows, total) = withContext(Dispatchers.IO) {
                 adminRepository.getUserJobs(userId, limit, offset)
             }
             call.respond(HttpStatusCode.OK, AdminUserJobsResponse(jobs = rows, total = total))
         }
     }
+}
+
+/**
+ * limit / offset 쿼리 파라미터 파싱 — limit 1..200 (default 50), offset >= 0 (default 0).
+ * `/users` 와 `/users/{userId}/jobs` 가 공유.
+ */
+private fun ApplicationCall.parsePagination(): Pair<Int, Int> {
+    val limit = (request.queryParameters["limit"]?.toIntOrNull() ?: 50).coerceIn(1, 200)
+    val offset = (request.queryParameters["offset"]?.toIntOrNull() ?: 0).coerceAtLeast(0)
+    return limit to offset
 }
 
 /**

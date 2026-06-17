@@ -1,0 +1,28 @@
+# Dependabot — 의존성 취약점/업데이트 자동 감시. GitHub 네이티브라 무료 + NVD API 키 불필요.
+# 보안 권고: GitHub repo Settings → Code security → Dependabot alerts/security updates 도 켜두면
+# 이 파일 없이도 취약점 PR 이 뜨지만, 본 파일은 정기 version-update + Actions 핀까지 함께 관리.
+version: 2
+updates:
+  # Gradle 런타임/테스트 의존성 (build.gradle.kts + gradle.properties 의 *_version 프로퍼티).
+  - package-ecosystem: "gradle"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    # PR 노이즈/리뷰 비용 축소 — patch/minor 는 묶어서 한 PR, major 만 개별.
+    groups:
+      gradle-minor-patch:
+        update-types:
+          - "minor"
+          - "patch"
+    commit-message:
+      prefix: "chore(deps)"
+
+  # deploy.yml 등의 GitHub Actions 핀 — 공급망 보안(액션 변조) + deprecation 추적.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "chore(ci)"

@@ -11,7 +11,9 @@ import com.vibi.bff.model.Segment
 import com.vibi.bff.plugins.ApiErrorException
 import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
+import com.vibi.bff.plugins.RL_RENDER
 import com.vibi.bff.plugins.requireUser
+import io.ktor.server.plugins.ratelimit.rateLimit
 import com.vibi.bff.service.DirectiveStem
 import com.vibi.bff.service.DirectiveWithStemFiles
 import com.vibi.bff.service.FileStorageService
@@ -55,6 +57,8 @@ fun Route.renderRoutes(
     jwtSecret: String? = null,
 ) {
     route("/render") {
+        // submit 계열(POST)만 레이트리밋 — ffmpeg CPU 직결. 상태 폴링/다운로드 GET 은 제외.
+        rateLimit(RL_RENDER) {
         // POST /api/v2/render/inputs — shared input cache. Mobile uploads the
         // source video once; the response's inputId can be reused across N
         // variant renders without re-sending the bytes. inputId is
@@ -200,30 +204,9 @@ fun Route.renderRoutes(
             // separationDirectives: 각 stem 의 audioUrl 은 BFF 자체 HMAC URL 만 허용.
             // SignedUrlService 검증 후 SeparationService 의 LocalStem.file 직접 매핑.
             // 외부 URL fallback 다운로드는 SSRF 위험으로 폐기 (resolveStemUrlToFile 참조).
-            val resolvedDirectives = mutableListOf<DirectiveWithStemFiles>()
-            for (directive in config.separationDirectives) {
-                val resolvedStems = mutableListOf<DirectiveStem>()
-                for (selection in directive.selections) {
-                    val file = resolveStemUrlToFile(
-                        audioUrl = selection.audioUrl,
-                        separationService = separationService,
-                        signedUrlService = signedUrlService,
-                        callerUserId = principal?.userId,
-                    )
-                    resolvedStems.add(DirectiveStem(file = file, volume = selection.volume))
-                }
-                if (resolvedStems.isNotEmpty() || directive.muteOriginalSegmentAudio) {
-                    resolvedDirectives.add(
-                        DirectiveWithStemFiles(
-                            rangeStartMs = directive.rangeStartMs,
-                            rangeEndMs = directive.rangeEndMs,
-                            muteOriginalSegmentAudio = directive.muteOriginalSegmentAudio,
-                            stems = resolvedStems,
-                            sourceOffsetMs = directive.sourceOffsetMs,
-                        )
-                    )
-                }
-            }
+            val resolvedDirectives = resolveSeparationDirectives(
+                config.separationDirectives, separationService, signedUrlService, principal?.userId,
+            )
 
             // inputFilesToCleanup tracks PER-REQUEST temp uploads. Cache-resident
             // files (videoFile from inputCache) live under the shared cache
@@ -319,30 +302,9 @@ fun Route.renderRoutes(
                 )
             }
 
-            val resolvedDirectives = mutableListOf<DirectiveWithStemFiles>()
-            for (directive in config.separationDirectives) {
-                val resolvedStems = mutableListOf<DirectiveStem>()
-                for (selection in directive.selections) {
-                    val file = resolveStemUrlToFile(
-                        audioUrl = selection.audioUrl,
-                        separationService = separationService,
-                        signedUrlService = signedUrlService,
-                        callerUserId = principal?.userId,
-                    )
-                    resolvedStems.add(DirectiveStem(file = file, volume = selection.volume))
-                }
-                if (resolvedStems.isNotEmpty() || directive.muteOriginalSegmentAudio) {
-                    resolvedDirectives.add(
-                        DirectiveWithStemFiles(
-                            rangeStartMs = directive.rangeStartMs,
-                            rangeEndMs = directive.rangeEndMs,
-                            muteOriginalSegmentAudio = directive.muteOriginalSegmentAudio,
-                            stems = resolvedStems,
-                            sourceOffsetMs = directive.sourceOffsetMs,
-                        )
-                    )
-                }
-            }
+            val resolvedDirectives = resolveSeparationDirectives(
+                config.separationDirectives, separationService, signedUrlService, principal?.userId,
+            )
 
             // asset cache 의 파일은 모든 job 의 공유 소유물 — 다른 동시 render 가 같은 키
             // 재사용 가능하므로 job 완료 시 cleanup 대상에서 제외. assetCacheDir TTL sweep
@@ -363,6 +325,7 @@ fun Route.renderRoutes(
             )
             call.respond(HttpStatusCode.OK, RenderResponse(jobId = jobId))
         }
+        } // rateLimit(RL_RENDER)
 
         get("/{jobId}/status") {
             val principal = jwtSecret?.let { call.requireUser(it) }
@@ -424,6 +387,44 @@ fun Route.renderRoutes(
             )
         }
     }
+}
+
+/**
+ * separationDirectives 의 각 stem URL 을 로컬 파일로 해석해 [DirectiveWithStemFiles] 리스트로.
+ * v2(`/render`) 와 v3(`/render/v3`) 가 동일 로직을 공유 — 둘 다 `List<SeparationDirectiveDto>`.
+ * stem 이 하나도 없고 muteOriginalSegmentAudio 도 false 인 directive 는 no-op 이라 제외한다.
+ */
+private suspend fun resolveSeparationDirectives(
+    directives: List<com.vibi.bff.model.SeparationDirectiveDto>,
+    separationService: SeparationService,
+    signedUrlService: SignedUrlService,
+    callerUserId: UUID?,
+): List<DirectiveWithStemFiles> {
+    val resolved = mutableListOf<DirectiveWithStemFiles>()
+    for (directive in directives) {
+        val resolvedStems = directive.selections.map { selection ->
+            val file = resolveStemUrlToFile(
+                audioUrl = selection.audioUrl,
+                separationService = separationService,
+                signedUrlService = signedUrlService,
+                callerUserId = callerUserId,
+            )
+            DirectiveStem(file = file, volume = selection.volume)
+        }
+        if (resolvedStems.isNotEmpty() || directive.muteOriginalSegmentAudio) {
+            resolved.add(
+                DirectiveWithStemFiles(
+                    rangeStartMs = directive.rangeStartMs,
+                    rangeEndMs = directive.rangeEndMs,
+                    muteOriginalSegmentAudio = directive.muteOriginalSegmentAudio,
+                    stems = resolvedStems,
+                    sourceOffsetMs = directive.sourceOffsetMs,
+                    appliedSpeedScale = directive.appliedSpeedScale,
+                )
+            )
+        }
+    }
+    return resolved
 }
 
 /**

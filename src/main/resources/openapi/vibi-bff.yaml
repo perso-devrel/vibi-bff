@@ -612,7 +612,7 @@ components:
         credits:
           type: integer
           minimum: 1
-          description: 차감될 크레딧 수 (분당 1, 올림, 최소 1)
+          description: 차감될 크레딧 수 (영상 1개당 고정 1)
         balance:
           type: integer
           minimum: 0

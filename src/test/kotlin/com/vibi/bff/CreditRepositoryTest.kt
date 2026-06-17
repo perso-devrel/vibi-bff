@@ -79,6 +79,22 @@ class CreditRepositoryTest {
     }
 
     @Test
+    fun `grantPurchase cross-user replay grants 0 and original owner keeps credit`() {
+        // 보안 속성(#6): 다른 user 가 이미 청구된 영수증을 재청구해도 가산 0 — 영수증은
+        // 최초 청구자에게만 귀속. (cross-user 시도는 fraud 신호로 warn 로깅되지만 동작은 granted=0.)
+        val owner = users.upsert(AuthProvider.GOOGLE, "g-owner", "owner@example.com", "Owner", null)
+        val attacker = users.upsert(AuthProvider.APPLE, "a-atk", "atk@example.com", "Atk", null)
+
+        val first = credits.grantPurchase(owner.id, "apple", "tx-shared", "vibi.credits.50", 50)
+        assertEquals(50, first.granted)
+
+        val replay = credits.grantPurchase(attacker.id, "apple", "tx-shared", "vibi.credits.50", 50)
+        assertEquals(0, replay.granted)            // attacker 는 한 푼도 못 받음
+        assertEquals(0, replay.balance)            // attacker 잔액 그대로 0
+        assertEquals(50, credits.balance(owner.id)) // 최초 청구자 잔액 보존
+    }
+
+    @Test
     fun `different platforms with same transactionId both succeed`() {
         // Apple/Google 영수증 시스템이 독립 — UNIQUE (platform, transactionId) 라 platform 다르면 양립.
         val u = users.upsert(AuthProvider.GOOGLE, "g-1", "a@example.com", "A", null)
@@ -187,13 +203,14 @@ class CreditRepositoryTest {
     // ── CreditCost ──────────────────────────────────────────────────────────
 
     @Test
-    fun `CreditCost forSeparation ceils per minute with minimum 1`() {
-        assertEquals(1, CreditCost.forSeparation(0))            // 0 → min 1
-        assertEquals(1, CreditCost.forSeparation(1))            // 1ms → 1
-        assertEquals(1, CreditCost.forSeparation(60_000))       // 정확히 1분 → 1
-        assertEquals(2, CreditCost.forSeparation(60_001))       // 1분 +1ms → 2 (올림)
-        assertEquals(2, CreditCost.forSeparation(120_000))      // 2분 → 2
-        assertEquals(3, CreditCost.forSeparation(120_001))      // 2분 +1ms → 3
-        assertEquals(1, CreditCost.forSeparation(-100))         // 음수 입력은 0 으로 clamp 후 min 1
+    fun `CreditCost forSeparation is flat 1 credit regardless of duration`() {
+        // 정책: 영상(잡) 1개당 고정 1 크레딧 — duration 무관.
+        assertEquals(1, CreditCost.forSeparation(0))
+        assertEquals(1, CreditCost.forSeparation(1))
+        assertEquals(1, CreditCost.forSeparation(60_000))       // 1분
+        assertEquals(1, CreditCost.forSeparation(60_001))
+        assertEquals(1, CreditCost.forSeparation(120_000))      // 2분
+        assertEquals(1, CreditCost.forSeparation(300_000))      // 5분 (업로드 상한)
+        assertEquals(1, CreditCost.forSeparation(-100))         // 음수 입력도 1
     }
 }

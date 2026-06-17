@@ -24,6 +24,7 @@ import com.vibi.bff.service.iap.GoogleReceiptVerifier
 import io.ktor.http.*
 import io.ktor.server.application.*
 import io.ktor.server.http.content.*
+import io.ktor.server.plugins.ratelimit.*
 import io.ktor.server.plugins.swagger.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
@@ -48,7 +49,12 @@ fun Application.configureRouting(
 ) {
     val log = org.slf4j.LoggerFactory.getLogger("BootCheck")
     routing {
-        swaggerUI(path = "swagger", swaggerFile = "openapi/vibi-bff.yaml")
+        // Swagger UI — 전체 API 스펙을 무인증 노출하므로 운영에선 끈다. ENABLE_SWAGGER=true
+        // (로컬 dev) 일 때만 마운트해 정찰 표면을 줄인다.
+        if (System.getenv("ENABLE_SWAGGER") == "true") {
+            swaggerUI(path = "swagger", swaggerFile = "openapi/vibi-bff.yaml")
+            log.info("Swagger UI mounted at /swagger (ENABLE_SWAGGER=true)")
+        }
 
         // Admin SPA — Swagger 와 같은 패턴으로 BFF 가 직접 서빙. ADMIN_SLUG blank 면 마운트 자체 skip
         // (= 외부에선 admin 페이지 존재도 인지 불가). Vite 빌드 산출물이 src/main/resources/admin/ 에 있다.
@@ -73,7 +79,10 @@ fun Application.configureRouting(
         }
 
         route("/api/v2") {
-            authRoutes(authService, userRepository, jwtSecret = appConfig.auth.jwtSecret)
+            // /auth/* 는 무인증 게이트웨이 — IP 키 레이트리밋으로 가입 보너스 크레딧 양산 차단.
+            rateLimit(RL_AUTH) {
+                authRoutes(authService, userRepository, jwtSecret = appConfig.auth.jwtSecret)
+            }
             creditRoutes(
                 creditRepository,
                 appleVerifier = appleReceiptVerifier,
@@ -100,6 +109,11 @@ fun Application.configureRouting(
             // 각 폴더 안에 stem 오디오 파일들 (배경음/화자1/... 한글 파일명, .wav/.mp3/.m4a 등).
             // 실제 음성분리 결과는 .wav 로 떨어져 — 확장자 화이트리스트는 일반 오디오 포맷 다수 허용.
             // 모바일은 list endpoint 로 폴더 목록 + stem 이름(확장자 제외) 받아 directive 등록.
+            //
+            // dev mock — 운영 surface 에 노출하지 않도록 ENABLE_TESTDATA_MOCK=true 일 때만 마운트.
+            // 운영 컨테이너엔 testdata/ 디렉터리도 없어 이전에도 사실상 404 였으나, dead/dev 코드를
+            // 운영 라우트 트리에서 아예 제거해 공격 표면을 줄인다.
+            if (System.getenv("ENABLE_TESTDATA_MOCK") == "true") {
             val audioExtensions = setOf("wav", "mp3", "m4a", "aac", "ogg", "flac")
             get("/testdata/separation/list") {
                 val testdataRoots = listOf(
@@ -136,6 +150,11 @@ fun Application.configureRouting(
                 val folder = call.parameters["folder"] ?: throw NotFoundException("folder required")
                 val stem = call.parameters["stem"] ?: throw NotFoundException("stem required")
                 if (!folder.matches(Regex("^\\d+-\\d+$"))) throw NotFoundException("invalid folder: $folder")
+                // path traversal 방어 — stem 은 basename 만 허용 (경로 구분자 / `..` reject).
+                // folder 와 달리 정규식 검증이 없던 자리라 defense-in-depth 로 추가.
+                if (stem.contains('/') || stem.contains('\\') || stem.contains("..")) {
+                    throw NotFoundException("invalid stem: $stem")
+                }
                 val roots = listOf(
                     File("testdata/$folder"),
                     File("../testdata/$folder"),
@@ -158,6 +177,7 @@ fun Application.configureRouting(
                 call.response.header(HttpHeaders.ContentType, mime.toString())
                 call.respondFile(file)
             }
+            } // ENABLE_TESTDATA_MOCK
         }
     }
 }
