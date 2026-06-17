@@ -95,7 +95,7 @@ dependencies {
 
     // Sentry — 운영 모니터링. SENTRY_DSN_BFF env 가 비면 init no-op (dev/test 무영향).
     // logback appender 까지는 도입 안 함 (5xx 캐치에서 explicit captureException 만 사용).
-    implementation("io.sentry:sentry:7.18.1")
+    implementation("io.sentry:sentry:8.43.2")
 
     // Testing
     testImplementation("io.ktor:ktor-server-test-host:$ktor_version")
