@@ -95,6 +95,7 @@ fun Application.configureRouting(
                 separationService, signedUrlService, renderInputCache,
                 objectStore,
                 jwtSecret = appConfig.auth.jwtSecret,
+                userRepository = userRepository,
             )
             separationRoutes(
                 separationService, signedUrlService, fileStorage,
@@ -102,6 +103,7 @@ fun Application.configureRouting(
                 queueRepository = separationQueue,
                 jwtSecret = appConfig.auth.jwtSecret,
                 creditRepository = creditRepository,
+                userRepository = userRepository,
             )
             adminRoutes(adminRepository, jwtSecret = appConfig.auth.jwtSecret)
 

@@ -6,11 +6,14 @@ import com.vibi.bff.db.UsersTable
 import com.vibi.bff.model.AuthProvider
 import com.vibi.bff.service.UserRepository
 import com.zaxxer.hikari.HikariDataSource
+import java.util.UUID
 import kotlin.test.AfterTest
 import kotlin.test.BeforeTest
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotEquals
+import kotlin.test.assertTrue
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.transaction
 import org.jetbrains.exposed.sql.update
@@ -89,5 +92,14 @@ class UserRepositoryTest {
         val second = repo.upsert(AuthProvider.GOOGLE, "g-admin", "ops@example.com", "Ops Renamed", null)
         assertEquals(first.id, second.id)
         assertEquals("admin", second.role)
+    }
+
+    @Test
+    fun `exists is true for upserted user, false for unknown and after delete`() {
+        val u = repo.upsert(AuthProvider.GOOGLE, "g-exists", "e@example.com", "E", null)
+        assertTrue(repo.exists(u.id))
+        assertFalse(repo.exists(UUID.randomUUID())) // 본 적 없는 UUID
+        repo.delete(u.id)
+        assertFalse(repo.exists(u.id))               // 삭제 후 false → A-1 차단의 기반
     }
 }

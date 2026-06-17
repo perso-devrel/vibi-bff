@@ -90,4 +90,13 @@ class UserRepository {
     fun delete(userId: UUID): Int = transaction {
         UsersTable.deleteWhere { UsersTable.id eq userId }
     }
+
+    /**
+     * users row 존재 여부 — 삭제된 계정의 아직-유효한 JWT 가 비용/엔타이틀먼트 mutating
+     * endpoint 를 타는 것을 차단하기 위한 fresh check. PK 단일 lookup + limit(1) 이라 저렴.
+     * 핫패스(상태 폴링 GET)에는 적용하지 않고 제출(POST) 계열에서만 호출한다.
+     */
+    fun exists(userId: UUID): Boolean = transaction {
+        UsersTable.selectAll().where { UsersTable.id eq userId }.limit(1).any()
+    }
 }
