@@ -9,12 +9,14 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
-    # PR 노이즈/리뷰 비용 축소 — patch/minor 는 묶어서 한 PR, major 만 개별.
+    # PR 노이즈 최소화 — major 포함 모든 gradle 업데이트를 단일 PR 로 묶는다.
+    # (update-types 미지정 = major/minor/patch 전부 그룹 포함. patterns "*" = 모든 의존성.)
+    # 트레이드오프: 깨지는 major 하나가 그룹 PR 전체를 막을 수 있다 → 그땐 해당 dep 만
+    # exclude-patterns 로 그룹에서 빼 개별 처리.
     groups:
-      gradle-minor-patch:
-        update-types:
-          - "minor"
-          - "patch"
+      gradle:
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(deps)"
 
@@ -24,5 +26,10 @@ updates:
     schedule:
       interval: "weekly"
     open-pull-requests-limit: 5
+    # 액션 업데이트도 단일 PR 로 묶는다.
+    groups:
+      github-actions:
+        patterns:
+          - "*"
     commit-message:
       prefix: "chore(ci)"
