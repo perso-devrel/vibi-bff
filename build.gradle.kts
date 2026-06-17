@@ -71,7 +71,7 @@ dependencies {
 
     // DB — Neon (managed Postgres) + Exposed DSL + HikariCP pool + Flyway migration.
     // Vendor-neutral: Cloud Run / Cloudflare Containers 양쪽 동등 동작.
-    val exposedVersion = "1.3.0"
+    val exposedVersion = "0.56.0"
     implementation("org.jetbrains.exposed:exposed-core:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-jdbc:$exposedVersion")
     implementation("org.jetbrains.exposed:exposed-java-time:$exposedVersion")
