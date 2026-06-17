@@ -1,9 +1,8 @@
 name: CI
 
 # PR 게이트 — main/develop 로 가는 PR 마다 컴파일 + 테스트를 돌려 빨간 변경이 머지되는 걸 막는다.
-# Dependabot 의존성 bump PR (major 포함) 도 이 잡으로 빌드 깨짐을 사전 검출 → 자동 머지의 전제 조건.
-# pull_request 이벤트의 워크플로 정의는 base 브랜치(main) 것을 쓰므로, 이 파일이 main 에 올라가야
-# 기존 Dependabot PR 들에 체크가 붙는다.
+# pull_request 이벤트의 워크플로 정의는 base 브랜치 것을 쓰므로, 이 파일이 main 에 올라가야
+# main 으로 가는 모든 PR 에 체크가 붙는다.
 on:
   pull_request:
     branches: [main, develop]
