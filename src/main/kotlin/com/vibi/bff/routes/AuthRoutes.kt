@@ -16,7 +16,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 
-private val log = LoggerFactory.getLogger("AuthRoutes")
+private val log = LoggerFactory.getLogger("com.vibi.bff.routes.AuthRoutes")
 
 /**
  * 소셜 로그인 게이트웨이 + 회원탈퇴.

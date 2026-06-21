@@ -183,7 +183,7 @@ fun Application.module() {
         // hourly. Sleeping 1h between sweeps is fine — TTL is 24h, slop tolerated.
         // 예외는 삼키되(다음 sweep 으로 계속) WARN 으로 남겨 디스크 누적 같은 cleanup 실패가
         // 관측되도록 한다 — silent swallow 면 디스크가 찰 때까지 보이지 않는다.
-        val cleanupLog = org.slf4j.LoggerFactory.getLogger("CacheCleanup")
+        val cleanupLog = org.slf4j.LoggerFactory.getLogger("com.vibi.bff.CacheCleanup")
         while (isActive) {
             runCatching { renderInputCache.cleanExpired() }
                 .onFailure { cleanupLog.warn("render input cache cleanup failed (will retry in 1h): {}", it.message, it) }
@@ -194,7 +194,7 @@ fun Application.module() {
     }
 
     val persoClient = PersoClient(appConfig.perso, httpClient)
-    org.slf4j.LoggerFactory.getLogger("BootCheck").info(
+    org.slf4j.LoggerFactory.getLogger("com.vibi.bff.BootCheck").info(
         "Perso config: baseUrl={} spaceSeq={} pollIntervalMs={}",
         appConfig.perso.baseUrl, appConfig.perso.spaceSeq, appConfig.perso.pollIntervalMs
     )
@@ -250,7 +250,7 @@ fun Application.module() {
                 separationService.resumePollingForJob(jobId, persoProjectSeq, ownerUserId)
             }
         }.onFailure { e ->
-            org.slf4j.LoggerFactory.getLogger("BootResume")
+            org.slf4j.LoggerFactory.getLogger("com.vibi.bff.BootResume")
                 .error("Failed to resume orphaned PROCESSING jobs: {}", e.message, e)
         }
     }

@@ -40,7 +40,7 @@ class GoogleReceiptVerifier(
     private val httpClient: HttpClient,
 ) {
 
-    private val log = LoggerFactory.getLogger("GoogleReceiptVerifier")
+    private val log = LoggerFactory.getLogger("com.vibi.bff.service.iap.GoogleReceiptVerifier")
 
     private val credentials: GoogleCredentials = GoogleCredentials
         .fromStream(config.serviceAccountJson.byteInputStream())

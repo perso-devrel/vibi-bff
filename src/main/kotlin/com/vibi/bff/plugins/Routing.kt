@@ -47,7 +47,7 @@ fun Application.configureRouting(
     appleReceiptVerifier: AppleReceiptVerifier?,
     googleReceiptVerifier: GoogleReceiptVerifier?,
 ) {
-    val log = org.slf4j.LoggerFactory.getLogger("BootCheck")
+    val log = org.slf4j.LoggerFactory.getLogger("com.vibi.bff.plugins.BootCheck")
     routing {
         // Swagger UI — 전체 API 스펙을 무인증 노출하므로 운영에선 끈다. ENABLE_SWAGGER=true
         // (로컬 dev) 일 때만 마운트해 정찰 표면을 줄인다.

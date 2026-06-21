@@ -26,7 +26,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import org.slf4j.LoggerFactory
 
-private val log = LoggerFactory.getLogger("CreditRoutes")
+private val log = LoggerFactory.getLogger("com.vibi.bff.routes.CreditRoutes")
 
 /**
  * 크레딧 잔액 조회 + IAP 영수증 가산 + 관리자 무료 충전.

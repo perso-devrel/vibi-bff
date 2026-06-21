@@ -47,7 +47,7 @@ class ApiErrorException(
 ) : RuntimeException("$errorCode${detail?.let { ": $it" } ?: ""}")
 
 fun Application.configureErrorHandling() {
-    val log = LoggerFactory.getLogger("ErrorHandling")
+    val log = LoggerFactory.getLogger("com.vibi.bff.plugins.ErrorHandling")
 
     install(StatusPages) {
         exception<NotFoundException> { call, cause ->

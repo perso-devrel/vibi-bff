@@ -9,7 +9,7 @@ import io.ktor.http.content.streamProvider
 import org.slf4j.LoggerFactory
 import java.io.File
 
-private val multipartLog = LoggerFactory.getLogger("MultipartUtils")
+private val multipartLog = LoggerFactory.getLogger("com.vibi.bff.routes.MultipartUtils")
 
 /**
  * Parse a "single file + JSON spec" multipart that tolerates a missing `file`
