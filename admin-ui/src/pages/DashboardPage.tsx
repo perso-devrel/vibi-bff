@@ -7,7 +7,10 @@ import {
   AdminDailyStats,
   AdminDurationBucket,
   AdminExternalCallDaily,
+  AdminJobStatusBreakdown,
   AdminOverview,
+  AdminRevenue,
+  AdminRevenueDaily,
   AdminSignupDaily,
 } from "../lib/api";
 import { formatDurationMs } from "../lib/format";
@@ -17,9 +20,15 @@ import HistogramChart from "../components/HistogramChart";
 import ExternalCallsTable from "../components/ExternalCallsTable";
 import SignupChart from "../components/SignupChart";
 import ActiveJobsTable from "../components/ActiveJobsTable";
+import RevenuePanel from "../components/RevenuePanel";
+import RevenueChart from "../components/RevenueChart";
+import JobStatusTable from "../components/JobStatusTable";
 
 interface State {
   overview: AdminOverview | null;
+  revenue: AdminRevenue | null;
+  revenueDaily: AdminRevenueDaily[];
+  jobStatus: AdminJobStatusBreakdown[];
   daily: AdminDailyStats[];
   externalCalls: AdminExternalCallDaily[];
   histogram: AdminDurationBucket[];
@@ -30,7 +39,8 @@ interface State {
 }
 
 const INITIAL: State = {
-  overview: null, daily: [], externalCalls: [], histogram: [], activeJobs: [], signups: [],
+  overview: null, revenue: null, revenueDaily: [], jobStatus: [],
+  daily: [], externalCalls: [], histogram: [], activeJobs: [], signups: [],
   loading: true, error: null,
 };
 
@@ -42,16 +52,21 @@ export default function DashboardPage() {
     let cancelled = false;
     (async () => {
       try {
-        const [overview, daily, externalCalls, histogram, activeJobs, signups] = await Promise.all([
-          adminFetch<AdminOverview>("/api/v2/admin/overview"),
-          adminFetch<AdminDailyStats[]>("/api/v2/admin/stats/daily"),
-          adminFetch<AdminExternalCallDaily[]>("/api/v2/admin/stats/external-calls"),
-          adminFetch<AdminDurationBucket[]>("/api/v2/admin/stats/duration-histogram"),
-          adminFetch<AdminActiveJob[]>("/api/v2/admin/jobs/active"),
-          adminFetch<AdminSignupDaily[]>("/api/v2/admin/stats/signups"),
-        ]);
+        const [overview, revenue, revenueDaily, jobStatus, daily, externalCalls, histogram, activeJobs, signups] =
+          await Promise.all([
+            adminFetch<AdminOverview>("/api/v2/admin/overview"),
+            adminFetch<AdminRevenue>("/api/v2/admin/revenue"),
+            adminFetch<AdminRevenueDaily[]>("/api/v2/admin/revenue/daily"),
+            adminFetch<AdminJobStatusBreakdown[]>("/api/v2/admin/jobs/status-breakdown"),
+            adminFetch<AdminDailyStats[]>("/api/v2/admin/stats/daily"),
+            adminFetch<AdminExternalCallDaily[]>("/api/v2/admin/stats/external-calls"),
+            adminFetch<AdminDurationBucket[]>("/api/v2/admin/stats/duration-histogram"),
+            adminFetch<AdminActiveJob[]>("/api/v2/admin/jobs/active"),
+            adminFetch<AdminSignupDaily[]>("/api/v2/admin/stats/signups"),
+          ]);
         if (!cancelled) setState({
-          overview, daily, externalCalls, histogram, activeJobs, signups,
+          overview, revenue, revenueDaily, jobStatus,
+          daily, externalCalls, histogram, activeJobs, signups,
           loading: false, error: null,
         });
       } catch (e) {
@@ -82,8 +97,31 @@ export default function DashboardPage() {
           <StatCard
             label="Total uploaded duration"
             value={formatDurationMs(o.totalSourceDurationMs)}
-            sub="render_jobs.source_duration_ms 합계"
+            sub="render 잡 입력 길이 합계 (separation 제외)"
           />
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold">Revenue (IAP)</h2>
+        <p className="mt-1 text-sm text-neutral-500">
+          크레딧 인앱결제 — 결제자 / 판매 크레딧 / Apple·Google 분포. 금액은 미저장이라 크레딧 수로 표시, admin 지급 제외.
+        </p>
+        <div className="mt-4">
+          {state.revenue ? <RevenuePanel revenue={state.revenue} /> : null}
+        </div>
+        <div className="mt-4 rounded-lg border border-neutral-200 bg-white p-4">
+          <RevenueChart data={state.revenueDaily} />
+        </div>
+      </section>
+
+      <section>
+        <h2 className="text-lg font-semibold">Job success / failure</h2>
+        <p className="mt-1 text-sm text-neutral-500">
+          render / separation 의 성공·실패·진행중 분해. 성공률은 종료된 잡(성공+실패) 기준.
+        </p>
+        <div className="mt-4">
+          <JobStatusTable rows={state.jobStatus} />
         </div>
       </section>
 
@@ -98,20 +136,20 @@ export default function DashboardPage() {
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold">Last 30 days</h2>
-        <p className="mt-1 text-sm text-neutral-500">일별 render / separation 잡 카운트. UTC 기준.</p>
-        <div className="mt-4 rounded-lg border border-neutral-200 bg-white p-4">
-          <DailyChart data={state.daily} />
+        <h2 className="text-lg font-semibold">External API calls</h2>
+        <p className="mt-1 text-sm text-neutral-500">
+          Perso 호출 카운트 + 실패율 + p95 latency. 비용 추정 + 안정성 모니터.
+        </p>
+        <div className="mt-4">
+          <ExternalCallsTable rows={state.externalCalls} />
         </div>
       </section>
 
       <section>
-        <h2 className="text-lg font-semibold">External API calls</h2>
-        <p className="mt-1 text-sm text-neutral-500">
-          Perso / Gemini 호출 카운트 + 실패율 + p95 latency. 비용 추정 + 안정성 모니터.
-        </p>
-        <div className="mt-4">
-          <ExternalCallsTable rows={state.externalCalls} />
+        <h2 className="text-lg font-semibold">Last 30 days</h2>
+        <p className="mt-1 text-sm text-neutral-500">일별 render / separation 잡 카운트. UTC 기준.</p>
+        <div className="mt-4 rounded-lg border border-neutral-200 bg-white p-4">
+          <DailyChart data={state.daily} />
         </div>
       </section>
 

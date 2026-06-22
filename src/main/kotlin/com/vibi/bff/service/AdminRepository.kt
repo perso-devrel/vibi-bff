@@ -4,7 +4,10 @@ import com.vibi.bff.model.AdminActiveJob
 import com.vibi.bff.model.AdminDailyStats
 import com.vibi.bff.model.AdminDurationBucket
 import com.vibi.bff.model.AdminExternalCallDaily
+import com.vibi.bff.model.AdminJobStatusBreakdown
 import com.vibi.bff.model.AdminOverview
+import com.vibi.bff.model.AdminRevenue
+import com.vibi.bff.model.AdminRevenueDaily
 import com.vibi.bff.model.AdminSignupDaily
 import com.vibi.bff.model.AdminUserJob
 import com.vibi.bff.model.AdminUserOverview
@@ -329,6 +332,121 @@ class AdminRepository {
             }
         }
         rows to total
+    }
+
+    /**
+     * 수익/IAP 요약. credit_transactions 에서 admin-grant 제외 집계 + admin grant 참고값.
+     * 화폐 금액은 미저장 — "판매된 크레딧 수" 로 매출 표현. (AdminRevenue KDoc 참조)
+     */
+    fun getRevenue(): AdminRevenue = transaction {
+        val thirtyDaysAgo = Instant.now().minusSeconds(30L * 24 * 3600)
+        val sql = """
+            SELECT
+                COUNT(*) AS purchase_count,
+                COUNT(DISTINCT user_id) AS paying_users,
+                COALESCE(SUM(credits), 0) AS credits_sold,
+                COALESCE(SUM(CASE WHEN created_at >= ? THEN 1 ELSE 0 END), 0) AS purchase_count_30d,
+                COALESCE(SUM(CASE WHEN created_at >= ? THEN credits ELSE 0 END), 0) AS credits_sold_30d,
+                COALESCE(SUM(CASE WHEN platform = 'apple'  THEN 1 ELSE 0 END), 0) AS apple_count,
+                COALESCE(SUM(CASE WHEN platform = 'google' THEN 1 ELSE 0 END), 0) AS google_count,
+                COALESCE(SUM(CASE WHEN platform = 'apple'  THEN credits ELSE 0 END), 0) AS apple_credits,
+                COALESCE(SUM(CASE WHEN platform = 'google' THEN credits ELSE 0 END), 0) AS google_credits
+            FROM credit_transactions
+            WHERE platform <> 'admin'
+        """.trimIndent()
+        var revenue = AdminRevenue(0, 0, 0, 0, 0, 0, 0, 0, 0, 0)
+        TransactionManager.current().exec(sql, args = listOf(
+            instantArg(thirtyDaysAgo), instantArg(thirtyDaysAgo),
+        )) { rs ->
+            if (rs.next()) {
+                revenue = revenue.copy(
+                    purchaseCount = rs.getLong("purchase_count"),
+                    payingUsers = rs.getLong("paying_users"),
+                    creditsSold = rs.getLong("credits_sold"),
+                    purchaseCount30d = rs.getLong("purchase_count_30d"),
+                    creditsSold30d = rs.getLong("credits_sold_30d"),
+                    applePurchaseCount = rs.getLong("apple_count"),
+                    googlePurchaseCount = rs.getLong("google_count"),
+                    appleCredits = rs.getLong("apple_credits"),
+                    googleCredits = rs.getLong("google_credits"),
+                )
+            }
+        }
+        revenue.copy(
+            adminGrantedCredits = scalarLong(
+                "SELECT COALESCE(SUM(credits), 0) FROM credit_transactions WHERE platform = 'admin'",
+            ),
+        )
+    }
+
+    /**
+     * 일별 IAP 추세 (admin-grant 제외). 빈 날짜는 미포함 — 호출자/프론트가 채워서 표시.
+     */
+    fun getRevenueDaily(fromInclusive: Instant, toExclusive: Instant): List<AdminRevenueDaily> = transaction {
+        // 별칭은 'bucket_date' — 'day' 는 H2(PostgreSQL mode) 예약어라 AS day 가 깨진다.
+        val sql = """
+            SELECT
+                date_trunc('day', created_at)::date AS bucket_date,
+                COALESCE(SUM(CASE WHEN platform = 'apple'  THEN credits ELSE 0 END), 0) AS apple_credits,
+                COALESCE(SUM(CASE WHEN platform = 'google' THEN credits ELSE 0 END), 0) AS google_credits,
+                COUNT(*) AS purchase_count
+            FROM credit_transactions
+            WHERE platform <> 'admin' AND created_at >= ? AND created_at < ?
+            GROUP BY 1
+            ORDER BY 1
+        """.trimIndent()
+        val rows = mutableListOf<AdminRevenueDaily>()
+        TransactionManager.current().exec(sql, args = listOf(
+            instantArg(fromInclusive), instantArg(toExclusive),
+        )) { rs ->
+            while (rs.next()) {
+                rows += AdminRevenueDaily(
+                    date = rs.getDate("bucket_date").toLocalDate().format(DateTimeFormatter.ISO_LOCAL_DATE),
+                    appleCredits = rs.getLong("apple_credits"),
+                    googleCredits = rs.getLong("google_credits"),
+                    purchaseCount = rs.getLong("purchase_count"),
+                )
+            }
+        }
+        rows
+    }
+
+    /**
+     * render/separation 잡의 성공/실패/진행중 분해. 성공 status 가 종류별로 다름:
+     * render=COMPLETED, separation=READY. 실패는 둘 다 FAILED, 나머지는 inProgress.
+     */
+    fun getJobStatusBreakdown(): List<AdminJobStatusBreakdown> = transaction {
+        fun breakdown(table: String, successStatus: String): AdminJobStatusBreakdown {
+            val sql = """
+                SELECT
+                    COUNT(*) AS total,
+                    SUM(CASE WHEN status = '$successStatus' THEN 1 ELSE 0 END) AS succeeded,
+                    SUM(CASE WHEN status = 'FAILED' THEN 1 ELSE 0 END) AS failed
+                FROM $table
+            """.trimIndent()
+            var total = 0L
+            var succeeded = 0L
+            var failed = 0L
+            TransactionManager.current().exec(sql) { rs ->
+                if (rs.next()) {
+                    total = rs.getLong("total")
+                    succeeded = rs.getLong("succeeded")
+                    failed = rs.getLong("failed")
+                }
+            }
+            return AdminJobStatusBreakdown(
+                jobType = if (table == "render_jobs") "render" else "separation",
+                total = total,
+                succeeded = succeeded,
+                failed = failed,
+                inProgress = (total - succeeded - failed).coerceAtLeast(0),
+            )
+        }
+        // 잡 종류 식별자는 'render'/'separation' 고정 — 테이블명에서 파생.
+        listOf(
+            breakdown("render_jobs", "COMPLETED"),
+            breakdown("separation_jobs", "READY"),
+        )
     }
 
     /**
