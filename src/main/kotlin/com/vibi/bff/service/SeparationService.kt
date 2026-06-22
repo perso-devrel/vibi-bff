@@ -357,6 +357,22 @@ class SeparationService(
         log.info("Disposed separation job: {}", jobId)
     }
 
+    /**
+     * 큐 레벨 reaper(인스턴스 사망 → stale QUEUED / 영구 FAILED SUBMITTING)가 FAILED 처리한 잡의
+     * 크레딧 환불 + in-memory 상태 정리. [SeparationDispatcher.reapPass] 가 reaper 결과의
+     * failedJobIds 마다 호출한다. onJobFailed(=CreditRepository.refund) 는 멱등이라 다른 경로의
+     * 환불과 겹쳐도 이중 환불 없음. pipeline 의 catch 경로와 달리 reaper 는 in-memory 잡을
+     * 거치지 않으므로 별도 진입점이 필요하다 (블로커: 인프라 사망 시 무단 크레딧 소실).
+     */
+    suspend fun onReapedFailed(jobId: String) {
+        jobs[jobId]?.let {
+            it.status = "FAILED"
+            if (it.error == null) it.error = "reaped (instance churn)"
+        }
+        runCatching { onJobFailed?.invoke(jobId) }
+            .onFailure { ex -> log.warn("refund hook failed (reaped) jobId={}: {}", jobId, ex.message) }
+    }
+
     // ── Pipeline ─────────────────────────────────────────────────────────────
 
     private suspend fun runPipeline(

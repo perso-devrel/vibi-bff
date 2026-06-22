@@ -78,6 +78,22 @@ class CreditRepository {
     }
 
     /**
+     * [userId] 가 [since] 이후 platform='admin' 으로 적립받은 크레딧 합. admin-grant 의 일일
+     * 상한 enforcement 용 — admin JWT 가 유출/탈취되어도 무제한 자가 적립을 막는다. 잔액
+     * mutating 이 아닌 단순 SUM 조회라 lock 불필요.
+     */
+    fun adminGrantedCreditsSince(userId: UUID, since: Instant): Int = transaction {
+        CreditTransactionsTable
+            .select(CreditTransactionsTable.credits)
+            .where {
+                (CreditTransactionsTable.userId eq userId) and
+                    (CreditTransactionsTable.platform eq "admin") and
+                    (CreditTransactionsTable.createdAt greaterEq since)
+            }
+            .sumOf { it[CreditTransactionsTable.credits] }
+    }
+
+    /**
      * 영수증 1건의 idempotent 가산. 영수증 서버 검증 통과 직후 호출.
      *
      * `insertIgnore` 로 (platform, transactionId) UNIQUE 제약을 단일 statement 로 활용 —

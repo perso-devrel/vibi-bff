@@ -63,6 +63,9 @@ data class GoogleTokenInfo(
     val email: String,
     val aud: String,
     val exp: String,
+    /** 토큰 발급자. Google ID 토큰은 항상 `accounts.google.com` 또는 `https://accounts.google.com`.
+     *  AuthService 가 검증해 Apple 경로(iss 검증)와 대칭을 맞춘다. */
+    val iss: String? = null,
     @SerialName("email_verified") val emailVerified: String? = null,
     val name: String? = null,
     val picture: String? = null,

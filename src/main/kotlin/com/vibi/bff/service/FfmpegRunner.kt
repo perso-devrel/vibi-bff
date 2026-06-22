@@ -52,7 +52,7 @@ class FfmpegProcessException(
  * caller (RenderService 등) 는 이미 suspend 컨텍스트라 그대로 호출 가능.
  */
 object FfmpegRunner {
-    private val log = LoggerFactory.getLogger("FfmpegRunner")
+    private val log = LoggerFactory.getLogger("com.vibi.bff.service.FfmpegRunner")
 
     /**
      * Runs the given command with stderr merged into stdout, drains output on

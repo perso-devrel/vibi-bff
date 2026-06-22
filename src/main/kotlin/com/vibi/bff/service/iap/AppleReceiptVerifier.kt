@@ -54,7 +54,7 @@ class AppleReceiptVerifier(
     private val httpClient: HttpClient,
 ) {
 
-    private val log = LoggerFactory.getLogger("AppleReceiptVerifier")
+    private val log = LoggerFactory.getLogger("com.vibi.bff.service.iap.AppleReceiptVerifier")
     private val privateKey: ECPrivateKey = parsePkcs8Ec(config.privateKeyPem)
     private val algorithm: Algorithm = Algorithm.ECDSA256(
         // java-jwt 의 ECDSA256 은 sign 만 쓸 거라 public key 는 null 로 둘 수 없음 — dummy.

@@ -41,6 +41,7 @@ fun ApplicationCall.requireUser(jwtSecret: String): JwtPrincipal {
     val decoded = try {
         JWT.require(Algorithm.HMAC256(jwtSecret))
             .withIssuer(AuthService.ISSUER)
+            .withAudience(AuthService.AUDIENCE)
             .build()
             .verify(token)
     } catch (e: JWTVerificationException) {

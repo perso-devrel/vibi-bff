@@ -1,5 +1,6 @@
 package com.vibi.bff.service
 
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -95,11 +96,20 @@ class SeparationDispatcher(
             // 첫 tick: 인스턴스 시작 직후 stuck 회수 + reapStaleQueued 한 번 돌려 어수선한
             // 상태 정리. nudge 없이 곧장 시도.
             runCatching { reapPass() }
-                .onFailure { log.warn("Initial reap pass failed: {}", it.message) }
+                .onFailure {
+                    if (it is CancellationException) throw it
+                    log.warn("Initial reap pass failed: {}", it.message)
+                }
 
             while (isActive) {
                 runCatching { tryClaimAndRun() }
-                    .onFailure { log.error("tryClaimAndRun crashed (continuing): {}", it.message, it) }
+                    .onFailure {
+                        // scale-to-zero 종료 시 loop.cancel() 이 in-flight tryClaimAndRun 을 취소 →
+                        // JobCancellationException. 이는 정상 종료 신호이므로 재던져 코루틴 취소
+                        // 전파에 맡긴다 (ERROR 노이즈 방지). 그 외만 진짜 크래시로 로깅 후 계속.
+                        if (it is CancellationException) throw it
+                        log.error("tryClaimAndRun crashed (continuing): {}", it.message, it)
+                    }
 
                 // kick 또는 tick 둘 중 먼저 오는 것 기다리기. tick 마다 reap 도 같이.
                 // in-flight 잡이 있으면 짧은 tick (stuck 빠른 회수), 완전 idle 이면 긴 tick
@@ -113,7 +123,10 @@ class SeparationDispatcher(
                     kick.onReceiveCatching { /* kick 또는 shutdown(close) — 즉시 다음 사이클 */ }
                     onTimeout(tickMs.milliseconds) {
                         runCatching { reapPass() }
-                            .onFailure { log.warn("Reap pass failed: {}", it.message) }
+                            .onFailure {
+                                if (it is CancellationException) throw it
+                                log.warn("Reap pass failed: {}", it.message)
+                            }
                     }
                 }
             }
@@ -154,7 +167,17 @@ class SeparationDispatcher(
     }
 
     private suspend fun reapPass() {
-        queue.reapStuckSubmitting(stuckSubmittingSec, maxAttempts)
-        queue.reapStaleQueued(staleQueuedSec)
+        // reaper 가 인프라 사망으로 FAILED 처리한 잡은 라우트가 선차감한 크레딧을 환불해야 한다 —
+        // 안 하면 Cloud Run 인스턴스 교체(min=0)마다 사용자 크레딧이 소리없이 사라진다(블로커).
+        // onReapedFailed 의 refund hook 은 멱등이라 중복 호출/다른 경로와 겹쳐도 이중 환불 없음.
+        val stuck = queue.reapStuckSubmitting(stuckSubmittingSec, maxAttempts)
+        val staleFailed = queue.reapStaleQueued(staleQueuedSec)
+        (stuck.failedJobIds + staleFailed).forEach { jobId ->
+            runCatching { service.onReapedFailed(jobId) }
+                .onFailure {
+                    if (it is CancellationException) throw it
+                    log.warn("reaped-job refund failed jobId={}: {}", jobId, it.message)
+                }
+        }
     }
 }

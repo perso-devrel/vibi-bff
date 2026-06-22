@@ -20,7 +20,7 @@ fun Application.configureCors() {
         ?.trim()
         ?.takeIf { it.isNotBlank() }
 
-    val log = LoggerFactory.getLogger("Cors")
+    val log = LoggerFactory.getLogger("com.vibi.bff.plugins.Cors")
     if (allowedOrigins == null) {
         log.info("CORS_ALLOWED_ORIGINS not set — CORS not installed (same-origin only)")
         return

@@ -30,13 +30,15 @@ jobs:
       id-token: write   # WIF OIDC 토큰 발급에 필수
 
     steps:
-      - uses: actions/checkout@v6
+      # 서드파티 액션은 commit SHA 로 핀 — 이 job 은 WIF(id-token) + 전체 prod 시크릿을 쥐므로
+      # 태그 재지정/계정 탈취 액션이 임의 코드를 돌리면 프로덕션 전체가 노출된다. (주석=버전 라벨)
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
 
       # admin-ui (Vite) 빌드 산출물은 .gitignore 됨 — 매 배포마다 fresh build 해서
       # src/main/resources/admin/ 로 떨어뜨려야 Ktor staticResources 가 마운트한다.
       # 빠뜨리면 ADMIN_SLUG 가 박혀도 부팅 로그에 WARN + admin URL 404.
       - name: Set up Node.js
-        uses: actions/setup-node@v6
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6
         with:
           node-version: '20'
           cache: 'npm'
@@ -53,13 +55,13 @@ jobs:
           npm run build
 
       - name: Authenticate to Google Cloud (WIF)
-        uses: google-github-actions/auth@v3
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3
         with:
           workload_identity_provider: ${{ secrets.GCP_WIF_PROVIDER }}
           service_account: ${{ secrets.GCP_SA_EMAIL }}
 
       - name: Set up gcloud
-        uses: google-github-actions/setup-gcloud@v3
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3
         with:
           project_id: ${{ secrets.GCP_PROJECT_ID }}
 
@@ -111,7 +113,7 @@ jobs:
             --no-cpu-throttling \
             --session-affinity \
             --allow-unauthenticated \
-            --set-env-vars "^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${GEMINI_LOCATION}@PERSO_BASE_URL=${PERSO_BASE_URL}@PERSO_STORAGE_BASE_URL=${PERSO_STORAGE_BASE_URL}@STORAGE_PATH=${STORAGE_PATH}@GOOGLE_OAUTH_CLIENT_IDS=${{ secrets.GOOGLE_OAUTH_CLIENT_IDS }}@APPLE_OAUTH_CLIENT_IDS=${{ secrets.APPLE_OAUTH_CLIENT_IDS }}@CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}@R2_BUCKET=${{ vars.R2_BUCKET }}@R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}@ADMIN_SLUG=${{ secrets.ADMIN_SLUG }}@BFF_BASE_URL=${{ steps.bff_url.outputs.url }}" \
+            --set-env-vars "^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${GEMINI_LOCATION}@PERSO_BASE_URL=${PERSO_BASE_URL}@PERSO_STORAGE_BASE_URL=${PERSO_STORAGE_BASE_URL}@STORAGE_PATH=${STORAGE_PATH}@GOOGLE_OAUTH_CLIENT_IDS=${{ secrets.GOOGLE_OAUTH_CLIENT_IDS }}@APPLE_OAUTH_CLIENT_IDS=${{ secrets.APPLE_OAUTH_CLIENT_IDS }}@CORS_ALLOWED_ORIGINS=${{ vars.CORS_ALLOWED_ORIGINS }}@R2_BUCKET=${{ vars.R2_BUCKET }}@R2_ACCOUNT_ID=${{ vars.R2_ACCOUNT_ID }}@ADMIN_SLUG=${{ secrets.ADMIN_SLUG }}@BFF_BASE_URL=${{ steps.bff_url.outputs.url }}@RATE_LIMIT_TRUSTED_PROXY_HOPS=${{ vars.RATE_LIMIT_TRUSTED_PROXY_HOPS }}" \
             --set-secrets "PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest,DATABASE_URL=DATABASE_URL:latest,DB_USER=DB_USER:latest,DB_PASSWORD=DB_PASSWORD:latest,R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest" \
             --quiet
           echo "::notice title=Deployed::${{ steps.bff_url.outputs.url }}"

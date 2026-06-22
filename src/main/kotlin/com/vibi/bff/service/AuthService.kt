@@ -80,6 +80,12 @@ class AuthService(
             log.warn("Google id token aud mismatch: got={} allowed={}", info.aud, config.googleClientIds)
             throw ApiErrorException(HttpStatusCode.Unauthorized, "google_aud_mismatch")
         }
+        // iss 검증 — Apple 경로(line ~122)와 대칭. tokeninfo 가 Google-서명 토큰만 echo 하지만,
+        // 로컬 iss 가드를 둬 access-token 파생 응답 등 비-ID-token 통과를 방어심층으로 차단.
+        if (info.iss == null || info.iss !in GOOGLE_ISSUERS) {
+            log.warn("Google id token iss invalid: got={} sub={}", info.iss, info.sub)
+            throw ApiErrorException(HttpStatusCode.Unauthorized, "google_iss_mismatch")
+        }
         val expMs = (info.exp.toLongOrNull() ?: 0L) * 1000L
         if (expMs <= clock()) {
             throw ApiErrorException(HttpStatusCode.Unauthorized, "google_token_expired")
@@ -228,6 +234,7 @@ class AuthService(
         val expiresAtMs = nowMs + config.jwtExpirySeconds * 1000L
         val token = JWT.create()
             .withIssuer(ISSUER)
+            .withAudience(AUDIENCE)
             .withSubject(user.sub)
             .withClaim("email", user.email)
             .withClaim("name", user.name)
@@ -240,8 +247,13 @@ class AuthService(
     }
 
     companion object {
-        // plugins/Auth.kt 의 verifier 가 동일 issuer 로 검증 — 변경 시 두 곳 동시 갱신.
+        // plugins/Auth.kt 의 verifier 가 동일 issuer/audience 로 검증 — 변경 시 함께 갱신.
         const val ISSUER = "vibi-bff"
+        /** 발급 access token 의 aud — secret 재사용(다른 목적/서비스 토큰)에 대한 교차사용 방어.
+         *  plugins/Auth.kt#requireUser + plugins/RateLimiting 의 검증과 동기. */
+        const val AUDIENCE = "vibi-mobile"
         private const val APPLE_ISSUER = "https://appleid.apple.com"
+        /** Google ID 토큰의 적법 iss 값 (둘 다 허용). */
+        private val GOOGLE_ISSUERS = setOf("accounts.google.com", "https://accounts.google.com")
     }
 }

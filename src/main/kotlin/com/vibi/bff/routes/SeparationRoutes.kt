@@ -29,7 +29,7 @@ import java.io.File
 import java.util.UUID
 import org.slf4j.LoggerFactory
 
-private val log = LoggerFactory.getLogger("SeparationRoutes")
+private val log = LoggerFactory.getLogger("com.vibi.bff.routes.SeparationRoutes")
 
 /** Perso audio-separation 이 받는 모든 audio 포맷 — m4a (AAC), mp3, wav (PCM). 모바일이 trim
  * + audio extract 까지 끝낸 m4a 가 신규 경로의 default. mp3/wav 는 사용자가 직접 갖고 있는

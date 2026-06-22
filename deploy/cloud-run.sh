@@ -151,13 +151,15 @@ echo "▶ Building admin-ui (vite)…"
 )
 
 echo "▶ Deploying to Cloud Run (first build can take ~5min)…"
+# --timeout 은 deploy.yml(운영 단일 소스)과 600s 로 일치시킴 — submit 계열은 202+폴링이라
+# in-request 작업이 HttpClient requestTimeout(600s) 안에 끝나므로 600 이면 충분.
 gcloud run deploy "$SERVICE_NAME" \
   --source "$(dirname "$0")/.." \
   --region "$REGION" \
   --service-account "$SA_EMAIL" \
   --execution-environment gen2 \
   --cpu 1 --memory 2Gi --cpu-boost \
-  --timeout 3600 \
+  --timeout 600 \
   --concurrency 4 \
   --min-instances "$MIN_INSTANCES" --max-instances "$MAX_INSTANCES" \
   --no-cpu-throttling \

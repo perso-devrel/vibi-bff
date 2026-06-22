@@ -178,23 +178,31 @@ fun Application.module() {
     require(assetCacheTtlHours > 0) {
         "ASSET_CACHE_TTL_HOURS must be > 0 (got $assetCacheTtlHours)"
     }
+    // 원본 업로드(개인정보) retention TTL — 정상 경로는 업로드 직후 source 를 지우므로 여기 남는
+    // 것은 중도 실패 잔존분. 짧게(기본 6h) 두어 무기한 PII 보존 + disk-fill 위험 차단.
+    val uploadsTtlHours = System.getenv("UPLOADS_TTL_HOURS")?.toLongOrNull() ?: 6L
+    require(uploadsTtlHours > 0) {
+        "UPLOADS_TTL_HOURS must be > 0 (got $uploadsTtlHours)"
+    }
     cacheCleanupScope.launch {
         // Sweep once on startup (recover from crash-leftover entries), then
         // hourly. Sleeping 1h between sweeps is fine — TTL is 24h, slop tolerated.
         // 예외는 삼키되(다음 sweep 으로 계속) WARN 으로 남겨 디스크 누적 같은 cleanup 실패가
         // 관측되도록 한다 — silent swallow 면 디스크가 찰 때까지 보이지 않는다.
-        val cleanupLog = org.slf4j.LoggerFactory.getLogger("CacheCleanup")
+        val cleanupLog = org.slf4j.LoggerFactory.getLogger("com.vibi.bff.CacheCleanup")
         while (isActive) {
             runCatching { renderInputCache.cleanExpired() }
                 .onFailure { cleanupLog.warn("render input cache cleanup failed (will retry in 1h): {}", it.message, it) }
             runCatching { fileStorage.sweepAssetCacheOlderThan(TimeUnit.HOURS.toMillis(assetCacheTtlHours)) }
                 .onFailure { cleanupLog.warn("asset cache sweep failed (will retry in 1h): {}", it.message, it) }
+            runCatching { fileStorage.sweepUploadsOlderThan(TimeUnit.HOURS.toMillis(uploadsTtlHours)) }
+                .onFailure { cleanupLog.warn("uploads sweep failed (will retry in 1h): {}", it.message, it) }
             delay(TimeUnit.HOURS.toMillis(1))
         }
     }
 
     val persoClient = PersoClient(appConfig.perso, httpClient)
-    org.slf4j.LoggerFactory.getLogger("BootCheck").info(
+    org.slf4j.LoggerFactory.getLogger("com.vibi.bff.BootCheck").info(
         "Perso config: baseUrl={} spaceSeq={} pollIntervalMs={}",
         appConfig.perso.baseUrl, appConfig.perso.spaceSeq, appConfig.perso.pollIntervalMs
     )
@@ -250,7 +258,7 @@ fun Application.module() {
                 separationService.resumePollingForJob(jobId, persoProjectSeq, ownerUserId)
             }
         }.onFailure { e ->
-            org.slf4j.LoggerFactory.getLogger("BootResume")
+            org.slf4j.LoggerFactory.getLogger("com.vibi.bff.BootResume")
                 .error("Failed to resume orphaned PROCESSING jobs: {}", e.message, e)
         }
     }

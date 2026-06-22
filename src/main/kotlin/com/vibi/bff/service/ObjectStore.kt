@@ -7,6 +7,7 @@ import software.amazon.awssdk.auth.credentials.StaticCredentialsProvider
 import software.amazon.awssdk.http.urlconnection.UrlConnectionHttpClient
 import software.amazon.awssdk.regions.Region
 import software.amazon.awssdk.services.s3.S3Client
+import software.amazon.awssdk.services.s3.model.DeleteObjectRequest
 import software.amazon.awssdk.services.s3.model.GetObjectRequest
 import software.amazon.awssdk.services.s3.model.HeadObjectRequest
 import software.amazon.awssdk.services.s3.model.NoSuchKeyException
@@ -221,6 +222,21 @@ class ObjectStore(
                 .build()
         )
         return presigned.url().toString()
+    }
+
+    /**
+     * R2 오브젝트 삭제 — 회원탈퇴 콘텐츠 erasure (GDPR/CCPA) 용. S3 DeleteObject 는 멱등
+     * (없는 키도 성공). 삭제 성공/대상부재면 true, 예외면 false (caller 가 best-effort 로 계속).
+     * 로컬 dedup 캐시도 함께 무효화해 같은 인스턴스의 후속 HEAD 가 stale hit 안 되게 한다.
+     */
+    fun deleteObject(objectKey: String): Boolean = try {
+        s3.deleteObject(DeleteObjectRequest.builder().bucket(bucket).key(objectKey).build())
+        uploadedKeys.remove(objectKey)
+        downloadedKeys.remove(objectKey)
+        true
+    } catch (e: Exception) {
+        log.warn("R2 deleteObject failed: r2://{}/{} — {}", bucket, objectKey, e.message)
+        false
     }
 
     fun shutdown() {
