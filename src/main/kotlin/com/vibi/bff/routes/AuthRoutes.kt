@@ -3,6 +3,7 @@ package com.vibi.bff.routes
 import com.vibi.bff.model.AppleAuthRequest
 import com.vibi.bff.model.GoogleAuthRequest
 import com.vibi.bff.plugins.requireUser
+import com.vibi.bff.service.AccountContentEraser
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.UserRepository
 import io.ktor.http.HttpStatusCode
@@ -33,6 +34,7 @@ private val log = LoggerFactory.getLogger("com.vibi.bff.routes.AuthRoutes")
 fun Route.authRoutes(
     authService: AuthService,
     userRepository: UserRepository,
+    accountContentEraser: AccountContentEraser,
     jwtSecret: String,
 ) {
     route("/auth") {
@@ -52,8 +54,14 @@ fun Route.authRoutes(
 
         delete("/account") {
             val principal = call.requireUser(jwtSecret)
-            // FK cascade 는 user_credits / credit_transactions / render_jobs / separation_jobs 를
-            // V5 마이그레이션 정책에 따라 정리한다 (CASCADE 또는 SET NULL).
+            // GDPR 17조 / CCPA right-to-erasure: users row 삭제 BEFORE 에 사용자 콘텐츠(분리 스템·
+            // 렌더 산출물)를 로컬 디스크 + R2 에서 제거한다. user_id 가 SET NULL 되기 전에 잡을
+            // enumerate 해야 하므로 순서가 load-bearing. best-effort — 콘텐츠 삭제 실패가 계정
+            // 삭제 자체를 막지 않도록 runCatching (잔존분은 R2 lifecycle + uploads GC 가 안전망).
+            runCatching { accountContentEraser.erase(principal.userId) }
+                .onFailure { e -> log.warn("account content erase failed (proceeding with row delete) user={}: {}", principal.userId, e.message) }
+            // 이후 users row 삭제 → FK cascade 가 user_credits(CASCADE) / render_jobs ·
+            // separation_jobs · credit_transactions(SET NULL — 익명 분석/감사 보존) 정리.
             //
             // TODO(apple): Apple Sign In revocation API 호출 추가 — `POST https://appleid.apple.com/auth/revoke`
             //   로 refresh token 폐기 필요. App Store 가이드라인 5.1.1(v) 권장.

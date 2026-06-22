@@ -47,6 +47,28 @@ class FileStorageService(private val config: StorageConfig) {
         return removed
     }
 
+    /**
+     * uploads 디렉터리의 [olderThanMs] ms 이상 미수정 항목 제거 — 원본 사용자 미디어(개인정보)의
+     * 무기한 보존을 막는 retention GC. 정상 경로(분리/렌더)는 업로드 직후 source 를 즉시 지우므로
+     * 여기 남는 것은 중도 실패 / 과거 surface 의 잔존분. 짧은 TTL 로 디스크 누적 + 프라이버시
+     * 책임 + disk-fill 크래시 위험을 동시에 차단한다. Application.kt 의 hourly sweeper 가 호출.
+     *
+     * 하위 디렉터리(혹시 모를 잔존)도 함께 정리하기 위해 file/dir 모두 lastModified 기준 reap.
+     */
+    fun sweepUploadsOlderThan(olderThanMs: Long): Int {
+        val cutoff = System.currentTimeMillis() - olderThanMs
+        val entries = uploadsDir.listFiles() ?: return 0
+        var removed = 0
+        for (f in entries) {
+            if (f.lastModified() < cutoff) {
+                val ok = if (f.isDirectory) f.deleteRecursively() else f.delete()
+                if (ok) removed++
+            }
+        }
+        if (removed > 0) log.info("Uploads sweep removed {} entries (older than {}ms)", removed, olderThanMs)
+        return removed
+    }
+
     fun saveUpload(fileName: String, inputStream: InputStream, maxSize: Long = Long.MAX_VALUE): String {
         val safeName = fileName.replace(Regex("[^a-zA-Z0-9._-]"), "_")
         val blobName = "${UUID.randomUUID()}_$safeName"

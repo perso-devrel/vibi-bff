@@ -54,13 +54,32 @@ fun Application.configureRateLimiting(jwtSecret: String) {
 }
 
 /**
- * Cloud Run LB 뒤이므로 실제 클라 IP 는 `X-Forwarded-For` 의 leftmost. 헤더 부재(로컬 dev)
- * 시 소켓 remote host fallback. leftmost 는 클라가 위조 가능하지만, 레이트리밋 키 용도엔
- * 허용 가능한 수준 — 완벽한 신뢰 IP 는 trusted-proxy 설정이 필요하고 현 단계엔 과하다.
+ * 신뢰 프록시 hop 수 — `X-Forwarded-For` 의 **오른쪽에서** 이만큼 건너뛴 위치를 실제 클라 IP 로
+ * 본다. leftmost 는 클라가 임의 위조 가능하므로(가입 보너스 크레딧 파밍 우회), Cloud Run 처럼
+ * LB 가 신뢰 IP 를 오른쪽에 append 하는 환경에서는 이 값을 설정해 위조 불가 위치를 키로 쓴다.
+ *
+ *  - 미설정(기본 0): 기존 동작(leftmost) 유지 — 하위호환. 단 위조 가능하므로 운영에선 설정 권장.
+ *  - Cloud Run: 보통 1 (맨 오른쪽 GFE hop 을 건너뛴 그 앞이 LB 가 기록한 신뢰 클라 IP).
+ *    실제 프록시 체인 길이에 맞춰 조정.
+ */
+private val TRUSTED_PROXY_HOPS: Int =
+    System.getenv("RATE_LIMIT_TRUSTED_PROXY_HOPS")?.toIntOrNull()?.coerceAtLeast(0) ?: 0
+
+/**
+ * 레이트리밋 버킷 키용 클라이언트 IP. 헤더 부재(로컬 dev) 시 소켓 remote host fallback.
+ * [TRUSTED_PROXY_HOPS] 로 위조 불가 위치를 선택 (env 미설정 시 leftmost — 기존 동작).
  */
 private fun ApplicationCall.clientIpKey(): String {
-    val xff = request.header("X-Forwarded-For")?.split(",")?.firstOrNull()?.trim()
-    return "ip:" + (xff?.takeIf { it.isNotBlank() } ?: request.origin.remoteHost)
+    val xff = request.header("X-Forwarded-For")
+        ?.split(",")
+        ?.map { it.trim() }
+        ?.filter { it.isNotBlank() }
+    val ip = when {
+        xff.isNullOrEmpty() -> request.origin.remoteHost
+        TRUSTED_PROXY_HOPS > 0 -> xff.getOrNull(xff.size - 1 - TRUSTED_PROXY_HOPS) ?: xff.last()
+        else -> xff.first()
+    }
+    return "ip:$ip"
 }
 
 /**
@@ -76,6 +95,7 @@ private fun ApplicationCall.userOrIpKey(jwtSecret: String): String {
         val sub = runCatching {
             JWT.require(Algorithm.HMAC256(jwtSecret))
                 .withIssuer(AuthService.ISSUER)
+                .withAudience(AuthService.AUDIENCE)
                 .build()
                 .verify(token)
                 .subject

@@ -7,6 +7,7 @@ import com.vibi.bff.routes.authRoutes
 import com.vibi.bff.routes.creditRoutes
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.routes.separationRoutes
+import com.vibi.bff.service.AccountContentEraser
 import com.vibi.bff.service.AdminRepository
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.CreditRepository
@@ -48,7 +49,18 @@ fun Application.configureRouting(
     googleReceiptVerifier: GoogleReceiptVerifier?,
 ) {
     val log = org.slf4j.LoggerFactory.getLogger("com.vibi.bff.plugins.BootCheck")
+    // 회원탈퇴 시 사용자 콘텐츠(분리 스템·렌더 산출물)를 로컬 + R2 에서 제거 (GDPR/CCPA).
+    val accountContentEraser = AccountContentEraser(
+        separationDir = fileStorage.separationDir,
+        renderDir = fileStorage.renderDir,
+        objectStore = objectStore,
+    )
     routing {
+        // 비인증 liveness/readiness probe — Cloud Run / 외부 uptime 체크용. /api/v2 밖 +
+        // 레이트리밋 밖에 두어 콜드스타트 트래픽 라우팅 판단에 쓰이게 한다.
+        get("/healthz") {
+            call.respondText("{\"status\":\"ok\"}", ContentType.Application.Json)
+        }
         // Swagger UI — 전체 API 스펙을 무인증 노출하므로 운영에선 끈다. ENABLE_SWAGGER=true
         // (로컬 dev) 일 때만 마운트해 정찰 표면을 줄인다.
         if (System.getenv("ENABLE_SWAGGER") == "true") {
@@ -81,7 +93,7 @@ fun Application.configureRouting(
         route("/api/v2") {
             // /auth/* 는 무인증 게이트웨이 — IP 키 레이트리밋으로 가입 보너스 크레딧 양산 차단.
             rateLimit(RL_AUTH) {
-                authRoutes(authService, userRepository, jwtSecret = appConfig.auth.jwtSecret)
+                authRoutes(authService, userRepository, accountContentEraser, jwtSecret = appConfig.auth.jwtSecret)
             }
             creditRoutes(
                 creditRepository,

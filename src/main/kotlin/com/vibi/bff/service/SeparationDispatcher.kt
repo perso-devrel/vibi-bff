@@ -167,7 +167,17 @@ class SeparationDispatcher(
     }
 
     private suspend fun reapPass() {
-        queue.reapStuckSubmitting(stuckSubmittingSec, maxAttempts)
-        queue.reapStaleQueued(staleQueuedSec)
+        // reaper 가 인프라 사망으로 FAILED 처리한 잡은 라우트가 선차감한 크레딧을 환불해야 한다 —
+        // 안 하면 Cloud Run 인스턴스 교체(min=0)마다 사용자 크레딧이 소리없이 사라진다(블로커).
+        // onReapedFailed 의 refund hook 은 멱등이라 중복 호출/다른 경로와 겹쳐도 이중 환불 없음.
+        val stuck = queue.reapStuckSubmitting(stuckSubmittingSec, maxAttempts)
+        val staleFailed = queue.reapStaleQueued(staleQueuedSec)
+        (stuck.failedJobIds + staleFailed).forEach { jobId ->
+            runCatching { service.onReapedFailed(jobId) }
+                .onFailure {
+                    if (it is CancellationException) throw it
+                    log.warn("reaped-job refund failed jobId={}: {}", jobId, it.message)
+                }
+        }
     }
 }

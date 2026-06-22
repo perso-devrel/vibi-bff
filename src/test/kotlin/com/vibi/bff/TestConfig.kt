@@ -70,8 +70,8 @@ fun testAppConfig(
 
 /**
  * 라우트 owner 검증 회귀 테스트용 헬퍼. `plugins/Auth.kt#requireUser` 가 검증하는 형태
- * (issuer = AuthService.ISSUER, sub = UUID, role 클레임) 와 동일하게 발급.
- * jwtSecret 기본값은 testAppConfig 와 동일.
+ * (issuer = AuthService.ISSUER, audience = AuthService.AUDIENCE, sub = UUID, role 클레임) 와
+ * 동일하게 발급. jwtSecret 기본값은 testAppConfig 와 동일.
  */
 fun issueTestJwt(
     userId: UUID,
@@ -82,6 +82,7 @@ fun issueTestJwt(
     val now = System.currentTimeMillis()
     return JWT.create()
         .withIssuer(AuthService.ISSUER)
+        .withAudience(AuthService.AUDIENCE)
         .withSubject(userId.toString())
         .withClaim("role", role)
         .withIssuedAt(Date(now))

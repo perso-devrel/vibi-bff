@@ -178,6 +178,12 @@ fun Application.module() {
     require(assetCacheTtlHours > 0) {
         "ASSET_CACHE_TTL_HOURS must be > 0 (got $assetCacheTtlHours)"
     }
+    // 원본 업로드(개인정보) retention TTL — 정상 경로는 업로드 직후 source 를 지우므로 여기 남는
+    // 것은 중도 실패 잔존분. 짧게(기본 6h) 두어 무기한 PII 보존 + disk-fill 위험 차단.
+    val uploadsTtlHours = System.getenv("UPLOADS_TTL_HOURS")?.toLongOrNull() ?: 6L
+    require(uploadsTtlHours > 0) {
+        "UPLOADS_TTL_HOURS must be > 0 (got $uploadsTtlHours)"
+    }
     cacheCleanupScope.launch {
         // Sweep once on startup (recover from crash-leftover entries), then
         // hourly. Sleeping 1h between sweeps is fine — TTL is 24h, slop tolerated.
@@ -189,6 +195,8 @@ fun Application.module() {
                 .onFailure { cleanupLog.warn("render input cache cleanup failed (will retry in 1h): {}", it.message, it) }
             runCatching { fileStorage.sweepAssetCacheOlderThan(TimeUnit.HOURS.toMillis(assetCacheTtlHours)) }
                 .onFailure { cleanupLog.warn("asset cache sweep failed (will retry in 1h): {}", it.message, it) }
+            runCatching { fileStorage.sweepUploadsOlderThan(TimeUnit.HOURS.toMillis(uploadsTtlHours)) }
+                .onFailure { cleanupLog.warn("uploads sweep failed (will retry in 1h): {}", it.message, it) }
             delay(TimeUnit.HOURS.toMillis(1))
         }
     }

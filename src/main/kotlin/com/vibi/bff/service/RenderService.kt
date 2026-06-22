@@ -206,7 +206,6 @@ class RenderService(
             if (userId != null) {
                 analytics?.insertRenderJob(jobId, userId, sourceDurationMs, "PROCESSING")
             }
-            var process: Process? = null
             // While waiting for an ffmpeg permit, mark the job as PROCESSING with
             // progressReason="queued" so polling clients see meaningful state
             // instead of a stale PENDING. We acquire BEFORE entering the try
@@ -262,32 +261,10 @@ class RenderService(
                         separationDirectives, qualityProfile,
                     )
                     log.info("Starting legacy ffmpeg render: jobId={}", jobId)
-                    process = ProcessBuilder(command).redirectErrorStream(true).start()
-                    val durationSec = duration / 1000.0
-                    process.inputStream.bufferedReader().useLines { lines ->
-                        lines.forEach { line ->
-                            parseFfmpegProgress(line, durationSec)?.let { job.progress = it }
-                        }
-                    }
-                    val exitCode = process.waitFor()
-                    if (exitCode == 0 && outputFile.exists()) {
-                        job.status = "COMPLETED"
-                        job.progress = 100
-                        // Phase 1: bump access time so the TTL window effectively
-                        // starts at completion (not job creation) — long renders
-                        // shouldn't shrink the downstream-reference window.
-                        job.lastAccessedAt = System.currentTimeMillis()
-                        log.info("Render completed: jobId={}, size={}", jobId, outputFile.length())
-                        maybeEagerPushToR2(job)
-                    } else {
-                        job.status = "FAILED"
-                        job.error = "ffmpeg exited with code $exitCode"
-                        outputFile.delete()
-                        log.error("Render failed: jobId={}, exitCode={}", jobId, exitCode)
-                    }
+                    // 진행률 매핑은 identity (선행 step 없음). 타임아웃/완료마킹은 헬퍼가 담당.
+                    runRenderProcess(job, command, duration, label = "legacy render")
                 }
             } catch (e: Exception) {
-                process?.destroyForcibly()
                 outputFile.delete()
                 job.status = "FAILED"
                 job.error = e.message
@@ -364,39 +341,11 @@ class RenderService(
                 totalDurationMs, job.outputFile,
             )
             log.info("Starting audio-only ffmpeg render: jobId={}", job.jobId)
-            val proc = ProcessBuilder(command).redirectErrorStream(true).start()
-            try {
-                val durationSec = totalDurationMs / 1000.0
-                proc.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        parseFfmpegProgress(line, durationSec)?.let { pct ->
-                            job.progress = 95 + (pct * 5 / 100)
-                        }
-                    }
-                }
-                val exitCode = proc.waitFor()
-                if (exitCode == 0 && job.outputFile.exists()) {
-                    job.status = "COMPLETED"
-                    job.progress = 100
-                    job.lastAccessedAt = System.currentTimeMillis()
-                    log.info(
-                        "Audio-only render completed: jobId={} size={}",
-                        job.jobId, job.outputFile.length(),
-                    )
-                    maybeEagerPushToR2(job)
-                } else {
-                    job.status = "FAILED"
-                    job.error = "ffmpeg audio-only step exited with code $exitCode"
-                    job.outputFile.delete()
-                    log.error(
-                        "Audio-only render failed: jobId={} exitCode={}",
-                        job.jobId, exitCode,
-                    )
-                }
-            } catch (e: Exception) {
-                proc.destroyForcibly()
-                throw e
-            }
+            // 선행 per-segment extract 가 95% 를 차지 → 최종 패스 pct 를 95..100 으로 매핑.
+            runRenderProcess(
+                job, command, totalDurationMs, label = "audio-only step",
+                progressMapper = { 95 + (it * 5 / 100) },
+            )
         } finally {
             tempDir.deleteRecursively()
         }
@@ -657,34 +606,11 @@ class RenderService(
                 separationDirectives, qualityProfile,
             )
             log.info("Starting final ffmpeg render: jobId={}", job.jobId)
-            val proc = ProcessBuilder(command).redirectErrorStream(true).start()
-            try {
-                val durationSec = totalDurationMs / 1000.0
-                proc.inputStream.bufferedReader().useLines { lines ->
-                    lines.forEach { line ->
-                        parseFfmpegProgress(line, durationSec)?.let { pct ->
-                            job.progress = 95 + (pct * 5 / 100)
-                        }
-                    }
-                }
-                val exitCode = proc.waitFor()
-                if (exitCode == 0 && job.outputFile.exists()) {
-                    job.status = "COMPLETED"
-                    job.progress = 100
-                    // Phase 1: see submitRender — start the TTL window at completion.
-                    job.lastAccessedAt = System.currentTimeMillis()
-                    log.info("Multi-segment render completed: jobId={}", job.jobId)
-                    maybeEagerPushToR2(job)
-                } else {
-                    job.status = "FAILED"
-                    job.error = "ffmpeg final step exited with code $exitCode"
-                    job.outputFile.delete()
-                    log.error("Multi-segment render failed: jobId={}, exitCode={}", job.jobId, exitCode)
-                }
-            } catch (e: Exception) {
-                proc.destroyForcibly()
-                throw e
-            }
+            // 선행 per-segment trim + concat 가 95% → 최종 mix 패스 pct 를 95..100 으로 매핑.
+            runRenderProcess(
+                job, command, totalDurationMs, label = "final step",
+                progressMapper = { 95 + (it * 5 / 100) },
+            )
         } finally {
             tempDir.deleteRecursively()
         }
@@ -807,30 +733,65 @@ class RenderService(
     }
 
     /**
-     * 단일 ffmpeg 프로세스를 실행하고 진행률/완료 상태를 [job] 에 반영. stream-copy fast path 전용 —
-     * 선행 step(trim/concat)이 없으므로 진행률을 0~99 로 직접 매핑하고 완료 시 100.
+     * stream-copy fast path 전용 thin wrapper — [runRenderProcess] 에 위임. 진행률은 0~99 직접 매핑.
      */
     private suspend fun runFinalRenderProcess(job: RenderJob, command: List<String>, totalDurationMs: Long) {
+        runRenderProcess(job, command, totalDurationMs, label = "stream-copy step")
+    }
+
+    /**
+     * **모든** 최종/오디오/legacy/stream-copy ffmpeg mix 패스의 단일 실행 지점. 단일화 목적:
+     *   1. **timeout-bounded waitFor**: 인라인 `process.waitFor()` (무제한) 가 병리적 입력에
+     *      무한 정지하면 ffmpeg 동시성 permit 이 영구 누수돼 이후 모든 /render 가 멈춘다(전역 DoS).
+     *      [waitFor(timeout)] + [destroyForcibly] 로 hard cap.
+     *   2. **drain on daemon thread**: redirectErrorStream(true) 의 stdout 을 별도 스레드에서
+     *      흘려보내며 progress 파싱 — 본 스레드가 read 로 블록되면 waitFor(timeout) 에 도달 못 함.
+     *   3. **완료/실패 마킹 + R2 eager push** 한 곳에 모아 4중복(progress 매핑/정리)이 drift 안 되게.
+     *
+     * @param progressMapper parseFfmpegProgress 의 0..99 pct 를 job.progress 로 매핑. 기본 identity
+     *   (legacy/stream-copy = pct 직접), audio/multi-seg final 은 `{ 95 + it*5/100 }` (선행 step 95%).
+     */
+    private suspend fun runRenderProcess(
+        job: RenderJob,
+        command: List<String>,
+        totalDurationMs: Long,
+        label: String,
+        timeoutMinutes: Long = RENDER_PROCESS_TIMEOUT_MIN,
+        progressMapper: (Int) -> Int = { it },
+    ) = withContext(Dispatchers.IO) {
         val proc = ProcessBuilder(command).redirectErrorStream(true).start()
-        try {
-            val durationSec = totalDurationMs / 1000.0
+        val durationSec = totalDurationMs / 1000.0
+        val drainer = Thread {
             proc.inputStream.bufferedReader().useLines { lines ->
                 lines.forEach { line ->
-                    parseFfmpegProgress(line, durationSec)?.let { pct -> job.progress = pct.coerceIn(0, 99) }
+                    parseFfmpegProgress(line, durationSec)?.let { pct -> job.progress = progressMapper(pct) }
                 }
             }
-            val exitCode = proc.waitFor()
+        }.also { it.isDaemon = true; it.start() }
+        try {
+            val finished = proc.waitFor(timeoutMinutes, TimeUnit.MINUTES)
+            runCatching { proc.inputStream.close() }
+            drainer.join(DRAIN_JOIN_TIMEOUT_MS)
+            if (!finished) {
+                proc.destroyForcibly()
+                job.status = "FAILED"
+                job.error = "ffmpeg $label timed out after ${timeoutMinutes}min"
+                job.outputFile.delete()
+                log.error("Render timed out: jobId={} label={} after {}min", job.jobId, label, timeoutMinutes)
+                return@withContext
+            }
+            val exitCode = proc.exitValue()
             if (exitCode == 0 && job.outputFile.exists()) {
                 job.status = "COMPLETED"
                 job.progress = 100
                 job.lastAccessedAt = System.currentTimeMillis()
-                log.info("Stream-copy render completed: jobId={}, size={}", job.jobId, job.outputFile.length())
+                log.info("Render completed: jobId={} label={} size={}", job.jobId, label, job.outputFile.length())
                 maybeEagerPushToR2(job)
             } else {
                 job.status = "FAILED"
-                job.error = "ffmpeg stream-copy step exited with code $exitCode"
+                job.error = "ffmpeg $label exited with code $exitCode"
                 job.outputFile.delete()
-                log.error("Stream-copy render failed: jobId={}, exitCode={}", job.jobId, exitCode)
+                log.error("Render failed: jobId={} label={} exitCode={}", job.jobId, label, exitCode)
             }
         } catch (e: Exception) {
             proc.destroyForcibly()
@@ -844,6 +805,15 @@ class RenderService(
          * cores per ffmpeg process, so anything past CPU/2 typically thrashes. */
         fun defaultMaxConcurrent(): Int =
             (Runtime.getRuntime().availableProcessors() / 2).coerceAtLeast(1)
+
+        /** 최종 mix 패스의 hard timeout. 정상 stream-copy/오디오/mix 는 분 단위 — 30분이면
+         *  worst-case 도 충분히 덮으면서 무한 정지(permit 영구 누수)를 막는다. runFfmpegBlocking
+         *  의 per-step 30분과 동일 상한. */
+        private val RENDER_PROCESS_TIMEOUT_MIN: Long =
+            System.getenv("RENDER_PROCESS_TIMEOUT_MIN")?.toLongOrNull()?.takeIf { it > 0 } ?: 30L
+
+        /** 프로세스 종료 후 drain 스레드 join 대기 상한 — EOF 후 자연 종료가 정상이나 만약을 대비. */
+        private const val DRAIN_JOIN_TIMEOUT_MS: Long = 30_000L
     }
 
     private suspend fun concatSegments(segments: List<File>, output: File) {

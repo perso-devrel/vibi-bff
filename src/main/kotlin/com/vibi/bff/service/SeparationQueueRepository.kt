@@ -179,12 +179,13 @@ class SeparationQueueRepository {
      * attempt_count 는 claimNext 가 이미 증가시켰으므로 여기선 건드리지 않음. attempt_count 가
      * [maxAttempts] 도달하면 FAILED 로 직행 (영구 실패).
      *
-     * 반환값: (recoveredCount, permanentlyFailedCount). 로깅 / 알람용.
+     * 반환값: [ReapResult] (recovered 개수 + **영구 FAILED 된 jobId 리스트**). dispatcher 가
+     * failedJobIds 로 크레딧 환불 hook 을 부른다 — 인프라 사망으로 인한 무단 크레딧 소실 방지.
      */
     suspend fun reapStuckSubmitting(
         stuckThresholdSec: Long,
         maxAttempts: Int,
-    ): Pair<Int, Int> = newSuspendedTransaction(Dispatchers.IO) {
+    ): ReapResult = newSuspendedTransaction(Dispatchers.IO) {
         val cutoff = Instant.now().minusSeconds(stuckThresholdSec)
         val stuckRows = SeparationJobsTable
             .selectAll()
@@ -195,45 +196,65 @@ class SeparationQueueRepository {
             .toList()
 
         var recovered = 0
-        var failed = 0
+        val failedIds = mutableListOf<String>()
         stuckRows.forEach { row ->
             val id = row[SeparationJobsTable.id]
             val attempts = row[SeparationJobsTable.attemptCount]
             if (attempts >= maxAttempts) {
-                SeparationJobsTable.update({ SeparationJobsTable.id eq id }) {
+                // status 조건을 update 에도 걸어 그 사이 전이된 row 를 되돌리지 않는다.
+                val updated = SeparationJobsTable.update({
+                    (SeparationJobsTable.id eq id) and (SeparationJobsTable.status eq STATUS_SUBMITTING)
+                }) {
                     it[SeparationJobsTable.status] = STATUS_FAILED
                     it[SeparationJobsTable.finishedAt] = Instant.now()
                 }
-                failed += 1
+                if (updated > 0) failedIds += id
             } else {
-                SeparationJobsTable.update({ SeparationJobsTable.id eq id }) {
+                SeparationJobsTable.update({
+                    (SeparationJobsTable.id eq id) and (SeparationJobsTable.status eq STATUS_SUBMITTING)
+                }) {
                     it[SeparationJobsTable.status] = STATUS_QUEUED
                 }
                 recovered += 1
             }
         }
-        if (recovered > 0 || failed > 0) {
-            log.warn("Reaped stuck SUBMITTING: recovered={} permanentlyFailed={}", recovered, failed)
+        if (recovered > 0 || failedIds.isNotEmpty()) {
+            log.warn("Reaped stuck SUBMITTING: recovered={} permanentlyFailed={}", recovered, failedIds.size)
         }
-        recovered to failed
+        ReapResult(recovered, failedIds)
     }
 
     /**
      * QUEUED 인데 [staleThresholdSec] 초 이상 queued_at 이 지난 row 들을 FAILED 마킹.
      * 시나리오: enqueue 한 인스턴스가 dispatch 전에 죽음 → 소스 파일이 손실된 상태로 QUEUED 가
      * 영원히 남음. 다른 인스턴스가 이어받지 못하므로 (bff_instance_id 매칭 정책) 영구 실패 처리.
+     *
+     * 반환값: FAILED 로 전이된 **jobId 리스트**. dispatcher 가 이 목록으로 크레딧 환불 — 인프라
+     * 사망(Cloud Run 인스턴스 교체)으로 사용자 크레딧이 소리없이 사라지는 것을 막는다. SELECT 후
+     * conditional UPDATE(status eq QUEUED)로, 그 사이 dispatcher 가 claim 한 row 는 제외한다.
      */
-    suspend fun reapStaleQueued(staleThresholdSec: Long): Int = newSuspendedTransaction(Dispatchers.IO) {
+    suspend fun reapStaleQueued(staleThresholdSec: Long): List<String> = newSuspendedTransaction(Dispatchers.IO) {
         val cutoff = Instant.now().minusSeconds(staleThresholdSec)
-        val updated = SeparationJobsTable.update({
-            (SeparationJobsTable.status eq STATUS_QUEUED) and
-                (SeparationJobsTable.queuedAt less cutoff)
-        }) {
-            it[SeparationJobsTable.status] = STATUS_FAILED
-            it[SeparationJobsTable.finishedAt] = Instant.now()
+        val staleIds = SeparationJobsTable
+            .select(SeparationJobsTable.id)
+            .where {
+                (SeparationJobsTable.status eq STATUS_QUEUED) and
+                    (SeparationJobsTable.queuedAt less cutoff)
+            }
+            .map { it[SeparationJobsTable.id] }
+
+        val failedIds = mutableListOf<String>()
+        staleIds.forEach { id ->
+            val updated = SeparationJobsTable.update({
+                (SeparationJobsTable.id eq id) and (SeparationJobsTable.status eq STATUS_QUEUED)
+            }) {
+                it[SeparationJobsTable.status] = STATUS_FAILED
+                it[SeparationJobsTable.finishedAt] = Instant.now()
+            }
+            if (updated > 0) failedIds += id
         }
-        if (updated > 0) log.warn("Reaped stale QUEUED rows: {}", updated)
-        updated
+        if (failedIds.isNotEmpty()) log.warn("Reaped stale QUEUED rows: {}", failedIds.size)
+        failedIds
     }
 
     /**
@@ -331,6 +352,15 @@ class SeparationQueueRepository {
         const val STATUS_FAILED = "FAILED"
     }
 }
+
+/**
+ * [SeparationQueueRepository.reapStuckSubmitting] 결과. [failedJobIds] 는 영구 FAILED 로
+ * 전이된 잡 — dispatcher 가 이 목록으로 크레딧 환불 hook 을 호출한다.
+ */
+data class ReapResult(
+    val recovered: Int,
+    val failedJobIds: List<String>,
+)
 
 /** boot resumption 대상. SeparationService.resumePollingForJob 의 입력. */
 data class ResumableJob(

@@ -21,6 +21,8 @@ import io.ktor.server.routing.Route
 import io.ktor.server.routing.get
 import io.ktor.server.routing.post
 import io.ktor.server.routing.route
+import java.time.Instant
+import java.time.temporal.ChronoUnit
 import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -154,6 +156,23 @@ fun Route.creditRoutes(
             val req = call.receive<AdminGrantRequest>()
             val credits = CreditCatalog.creditsFor(req.productId)
                 ?: throw ApiErrorException(HttpStatusCode.BadRequest, "unknown_product")
+
+            // 일일 상한 — admin JWT 유출/탈취 시 무제한 자가 적립을 막는 방어심층. 호출자가
+            // 직전 24h 동안 admin 적립한 합 + 이번 요청이 cap 을 넘으면 거부. 운영 default 1000,
+            // ADMIN_GRANT_DAILY_CAP 로 조정. (per-call 은 CreditCatalog 최대치로 이미 bounded.)
+            val dailyCap = System.getenv("ADMIN_GRANT_DAILY_CAP")?.toIntOrNull() ?: 1000
+            val since = Instant.now().minus(24, ChronoUnit.HOURS)
+            val grantedRecently = withContext(Dispatchers.IO) {
+                creditRepository.adminGrantedCreditsSince(principal.userId, since)
+            }
+            if (grantedRecently + credits > dailyCap) {
+                log.warn("admin-grant daily cap exceeded user={} recent={} cap={}", principal.userId, grantedRecently, dailyCap)
+                throw ApiErrorException(
+                    HttpStatusCode.TooManyRequests,
+                    "admin_grant_daily_cap_exceeded",
+                    "granted=$grantedRecently cap=$dailyCap in 24h",
+                )
+            }
 
             val txId = "admin-${UUID.randomUUID()}"
             val outcome = withContext(Dispatchers.IO) {

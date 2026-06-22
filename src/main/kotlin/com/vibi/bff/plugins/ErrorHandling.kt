@@ -83,6 +83,18 @@ fun Application.configureErrorHandling() {
             )
             call.respond(cause.statusCode, ErrorResponse(error = cause.errorCode, detail = cause.detail))
         }
+        exception<io.ktor.server.plugins.BadRequestException> { call, cause ->
+            // call.receive<T>() 가 malformed/누락 필드 JSON 에 던지는 예외 (ContentTransformation
+            // Exception 포함). 기존엔 generic Throwable 핸들러로 떨어져 500 → 클라가 서버 장애로
+            // 오인 + Sentry 가 클라 검증 오류로 도배. 안정적 400 + 머신리더블 코드로 통일.
+            // 내부 메시지는 노출하지 않는다 (sanitize 규약).
+            log.info("4xx {} {} -> 400 (bad_request: {})",
+                call.request.local.method.value,
+                call.request.local.uri,
+                cause.message,
+            )
+            call.respond(HttpStatusCode.BadRequest, ErrorResponse(error = "bad_request"))
+        }
         exception<IllegalArgumentException> { call, cause ->
             log.info("4xx {} {} -> 400 ({})",
                 call.request.local.method.value,
