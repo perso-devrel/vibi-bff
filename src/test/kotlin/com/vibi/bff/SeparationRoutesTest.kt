@@ -83,10 +83,22 @@ class SeparationRoutesTest {
     }
 
     @Test
-    fun `GET stem without token returns 400`() = testApp {
+    fun `GET stem without token or bearer returns 401`() = testApp(jwtSecret = testJwtSecret) {
+        // 토큰 없이 호출하면 Bearer JWT 가 필수 — 토큰·헤더 둘 다 없으면 401.
         val response = client.get("/api/v2/separate/sep-x/stem/background")
-        assertEquals(HttpStatusCode.BadRequest, response.status)
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
     }
+
+    @Test
+    fun `GET stem without token but with valid bearer is accepted (404 for missing job)`() =
+        testApp(jwtSecret = testJwtSecret) {
+            // UXP 패널 경로: 토큰 대신 Bearer 로 인증 → token-required 안 나고 정상 진입(잡 없으면 404).
+            coEvery { separationService.getJob("sep-z") } returns null
+            val response = client.get("/api/v2/separate/sep-z/stem/background") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(UUID.randomUUID(), testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.NotFound, response.status)
+        }
 
     @Test
     fun `GET stem with invalid token returns 403`() = testApp {
@@ -183,11 +195,11 @@ class SeparationRoutesTest {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
         // probeDurationMs 실패 → size-based duration fallback 경로 검증. 8MB / 8KB/s = 1000s
-        // = 1_000_000ms ≈ 16.7분 → 시작된 5분 블록 4개 → reserve cost = 4. probe-fail 만으로
+        // = 1_000_000ms ≈ 16.7분 → 시작된 1분 블록 17개 → reserve cost = 17. probe-fail 만으로
         // floor 1 credit 으로 떨어지는 undercharge 우회가 막혔음을 비례 차감 값으로 실증한다.
         val bigBytes = ByteArray(8_000_000) { 0 }
-        every { creditRepo.reserve(eq(callerId), any(), eq(4)) } returns
-            CreditRepository.ReserveOutcome(charged = 4, balance = 100)
+        every { creditRepo.reserve(eq(callerId), any(), eq(17)) } returns
+            CreditRepository.ReserveOutcome(charged = 17, balance = 100)
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
         coEvery { MediaTrimmer.probeDurationMs(any()) } returns null
@@ -206,7 +218,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(4)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(17)) }
         }
     }
 
@@ -333,12 +345,12 @@ class SeparationRoutesTest {
     }
 
     @Test
-    fun `POST separate charges credits proportional to audio duration in 5min blocks`() {
+    fun `POST separate charges credits proportional to audio duration in 1min blocks`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
         every { creditRepo.reserve(any(), any(), any()) } returns
-            CreditRepository.ReserveOutcome(charged = 3, balance = 1)
-        // probed duration 12분 → 시작된 5분 블록 3개 → reserve cost = 3. 라우트가 측정 길이를
+            CreditRepository.ReserveOutcome(charged = 12, balance = 1)
+        // probed duration 12분 → 시작된 1분 블록 12개 → reserve cost = 12. 라우트가 측정 길이를
         // CreditCost.forSeparation 으로 그대로 반영하는지 (견적-차감 단일 source) 검증.
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
@@ -358,7 +370,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(3)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(12)) }
             verify(exactly = 0) { creditRepo.refund(any()) }
         }
     }

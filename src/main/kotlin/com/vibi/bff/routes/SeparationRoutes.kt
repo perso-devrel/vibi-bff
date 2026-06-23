@@ -204,40 +204,48 @@ fun Route.separationRoutes(
             ))
         }
 
-        // GET /api/v2/separate/{jobId}/stem/{stemId}?token=... — streamed audio
+        // GET /api/v2/separate/{jobId}/stem/{stemId} — 다운로드. 인증 두 경로:
+        //  - ?token=<HMAC> : capability 토큰(모바일 status 응답의 서명 URL). → 검증 후 302 redirect.
+        //  - 토큰 없음      : Bearer JWT(identity)로 인증 + owner 매칭. UXP 패널이 헤더만 보내는 경로.
+        //                     UXP fetch 는 302 를 못 따라가므로 { url } JSON 으로 응답(클라가 분기 보유).
         get("/{jobId}/stem/{stemId}") {
             val jobId = call.parameters["jobId"]
                 ?: throw NotFoundException("jobId required")
             val stemId = call.parameters["stemId"]
                 ?: throw NotFoundException("stemId required")
             val token = call.request.queryParameters["token"]
-                ?: throw IllegalArgumentException("token required")
 
-            if (!signer.verify(jobId, stemId, token)) {
+            // 토큰이 있으면 capability 검증. 없으면 Bearer 필수(테스트 분기 jwtSecret==null 제외).
+            if (token != null && !signer.verify(jobId, stemId, token)) {
                 call.respond(HttpStatusCode.Forbidden)
                 return@get
+            }
+            // capability(토큰) + identity(Bearer) 이중 인증을 한 곳으로 통합:
+            //  - 토큰 경로: 헤더가 있고 valid 면 principal 확보(owner 매칭 강제), 만료 JWT 면 null →
+            //    capability 단독 통과(모바일이 토큰 만료 중 재생해도 streaming 안 깨지게).
+            //  - 토큰 없음: requireUser 가 401(헤더 부재/invalid) → owner 매칭 강제.
+            //  - jwtSecret 미주입(테스트): 양쪽 모두 null → 인증 skip.
+            val principal = when {
+                jwtSecret == null -> null
+                token == null -> call.requireUser(jwtSecret) // 401 if missing/invalid
+                call.request.header(HttpHeaders.Authorization) != null ->
+                    runCatching { call.requireUser(jwtSecret) }.getOrNull()
+                else -> null
             }
 
             val job = separationService.getJob(jobId)
                 ?: throw NotFoundException("Separation job not found: $jobId")
 
-            // capability (HMAC 토큰) + identity (Authorization 헤더) 이중 검증.
-            // 헤더가 있고 valid 면 owner 매칭 강제. 헤더가 invalid (만료 JWT) 면
-            // capability 단독으로 통과 — 모바일 default-bearer-header 클라이언트가
-            // 토큰 만료 중 stem 재생을 시도해도 streaming 깨지지 않도록.
-            // jwtSecret 미주입 (테스트) 분기 / 헤더 부재는 token 단독 신뢰.
-            if (jwtSecret != null && call.request.header(HttpHeaders.Authorization) != null) {
-                val principal = runCatching { call.requireUser(jwtSecret) }.getOrNull()
-                if (principal != null && job.ownerUserId != null && job.ownerUserId != principal.userId) {
-                    throw NotFoundException("Separation job not found: $jobId")
-                }
+            // owner 가 set 된 잡은 인증된 caller 와 매칭. mismatch 는 not-found(IDOR existence oracle 차단).
+            if (principal != null && job.ownerUserId != null && job.ownerUserId != principal.userId) {
+                throw NotFoundException("Separation job not found: $jobId")
             }
 
             val stem = job.stems.firstOrNull { it.stemId == stemId }
                 ?: throw NotFoundException("Stem not found: $stemId")
             // 로컬 file 존재 체크 의도적 제거 — R2 가 source-of-truth. DB fallback 으로 재구축된
             // SeparationJob 은 placeholder File 을 들고 있고 실체는 R2. ObjectStore.uploadIfAbsent
-            // 가 HEAD 로 R2 hit 확인 후 signed URL 302. R2 도 없으면 그 안에서 throw.
+            // 가 HEAD 로 R2 hit 확인 후 signed URL. R2 도 없으면 그 안에서 throw.
             val ext = stem.file.extension.ifBlank { "wav" }
             call.respondDownload(
                 file = stem.file,
@@ -245,6 +253,8 @@ fun Route.separationRoutes(
                 contentType = contentTypeForExtension(ext, ContentType("audio", "wav")),
                 downloadFilename = "${stem.stemId}.$ext",
                 store = objectStore,
+                // 토큰 경로(모바일)는 302 유지. Bearer-only(UXP)는 {url} JSON.
+                asJsonUrl = token == null,
             )
         }
     }

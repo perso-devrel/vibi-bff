@@ -203,20 +203,20 @@ class CreditRepositoryTest {
     // ── CreditCost ──────────────────────────────────────────────────────────
 
     @Test
-    fun `CreditCost forSeparation charges 1 credit per started 5min block with boundary grace`() {
-        // 정책: 시작된 5분 블록당 1 크레딧 (ceil), 최소 1. block 경계는 BOUNDARY_GRACE_MS(1초)
-        // 만큼 뒤로 밀려 인코더 패딩 off-by-one 을 흡수한다.
+    fun `CreditCost forSeparation charges 1 credit per started 1min block with boundary grace`() {
+        // 정책: 시작된 1분 블록당 1 크레딧 (ceil), 최소 1. block 경계는 BOUNDARY_GRACE_MS(1초)
+        // 만큼 뒤로 밀려 인코더 패딩 off-by-one 을 흡수한다. 모바일·플러그인 공통 단가.
         assertEquals(1, CreditCost.forSeparation(0))             // 0 → floor 1
         assertEquals(1, CreditCost.forSeparation(-100))          // 음수(probe 완전 실패) → floor 1
         assertEquals(1, CreditCost.forSeparation(1))             // 1ms → 1
-        assertEquals(1, CreditCost.forSeparation(60_000))        // 1분 → 1
-        assertEquals(1, CreditCost.forSeparation(300_000))       // 정확히 5분 → 1
-        assertEquals(1, CreditCost.forSeparation(300_500))       // 5분+0.5초 (패딩) → grace 흡수 → 1
-        assertEquals(1, CreditCost.forSeparation(301_000))       // 5분+1초 (grace 경계) → 1
-        assertEquals(2, CreditCost.forSeparation(301_001))       // 5분+1초+1ms → 2
-        assertEquals(2, CreditCost.forSeparation(600_000))       // 10분 → 2
-        assertEquals(2, CreditCost.forSeparation(601_000))       // 10분+1초 → 2
-        assertEquals(3, CreditCost.forSeparation(601_001))       // 10분+1초+1ms → 3
-        assertEquals(12, CreditCost.forSeparation(60 * 60_000L)) // 60분 → 12
+        assertEquals(1, CreditCost.forSeparation(60_000))        // 정확히 1분 → 1
+        assertEquals(1, CreditCost.forSeparation(60_500))        // 1분+0.5초 (패딩) → grace 흡수 → 1
+        assertEquals(1, CreditCost.forSeparation(61_000))        // 1분+1초 (grace 경계) → 1
+        assertEquals(2, CreditCost.forSeparation(61_001))        // 1분+1초+1ms → 2
+        assertEquals(2, CreditCost.forSeparation(120_000))       // 2분 → 2
+        assertEquals(2, CreditCost.forSeparation(121_000))       // 2분+1초 → 2
+        assertEquals(3, CreditCost.forSeparation(121_001))       // 2분+1초+1ms → 3
+        assertEquals(5, CreditCost.forSeparation(300_000))       // 5분 → 5
+        assertEquals(60, CreditCost.forSeparation(60 * 60_000L)) // 60분 → 60
     }
 }

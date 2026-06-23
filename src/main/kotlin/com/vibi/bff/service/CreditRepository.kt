@@ -31,29 +31,30 @@ class InsufficientCreditsException(
 ) : RuntimeException("insufficient credits: required=$required balance=$balance")
 
 /**
- * 잡 길이 → 크레딧 비용. **시작된 5분 블록당 1 크레딧** (`ceil(durationMs / 5분)`, 최소 1).
- * 라우트(선차감)와 `/credits/cost` endpoint (모바일 견적) 양쪽이 이 단일 source 를 쓰므로
- * 견적·차감·402 required 가 항상 같은 값.
+ * 잡 길이 → 크레딧 비용. **시작된 1분 블록당 1 크레딧** (`ceil(durationMs / 1분)`, 최소 1).
+ * 라우트(선차감)와 `/credits/cost` endpoint (견적) 양쪽이 이 단일 source 를 쓰므로
+ * 견적·차감·402 required 가 항상 같은 값. 모바일 앱과 Adobe 플러그인이 같은 BFF·같은 DB 를
+ * 쓰므로 두 클라이언트의 분리 단가가 이 단일 공식으로 통일된다(분당 1 크레딧).
  *
  * 길이 비례인 이유: Perso 분리 API 원가가 분당 과금이라, 고정 1 크레딧이면 롱폼(영상·팟캐스트)
- * 에서 매출은 그대로인데 원가만 비례해 마진이 침식된다. 5분 블록 단위로 끊어 매출을 원가에
- * 정렬한다 — 크레딧당 변동원가 상한 = (분당 원가 × 5분). durationMs 는
+ * 에서 매출은 그대로인데 원가만 비례해 마진이 침식된다. 1분 블록 단위로 끊어 매출을 원가에
+ * 정렬한다 — 크레딧당 변동원가 = 분당 Perso 원가(≈$0.01). durationMs 는
  * [com.vibi.bff.routes.computeSeparationSourceDurationMs] 가 ffprobe (실패 시 size 기반 보수
  * 추정) 로 산출하므로, corrupt-header 로 probe 만 막아 undercharge 하는 우회가 차단된다.
  *
  * **경계 grace ([BOUNDARY_GRACE_MS])**: 견적(`/credits/cost`)은 모바일 trim 윈도우 길이(clean
  * ms) 기준이지만 실제 차감은 업로드된 추출 m4a 의 ffprobe 길이 기준 — AAC 인코더 패딩으로
- * 후자가 수십~수백 ms 더 길게 측정될 수 있다. grace 없이는 정확히 5분 배수 경계에서 견적 1
+ * 후자가 수십~수백 ms 더 길게 측정될 수 있다. grace 없이는 정확히 분 배수 경계에서 견적 1
  * vs 차감 2 처럼 사용자가 동의한 것보다 더 빠지는 off-by-one 이 가능하다. block 경계를
  * [BOUNDARY_GRACE_MS] 만큼 뒤로 밀어 패딩을 흡수한다 (사용자에게 유리한 방향 — 블록당 최대 1초
  * 추가 무료).
  *
- * 경계: duration ≤ 0 (probe 완전 실패 / 0-byte) → floor 1 크레딧. (5분+1초) 까지 → 1,
- * (5분+1초)+1ms → 2.
+ * 경계: duration ≤ 0 (probe 완전 실패 / 0-byte) → floor 1 크레딧. (1분+1초) 까지 → 1,
+ * (1분+1초)+1ms → 2.
  */
 object CreditCost {
-    /** 1 크레딧이 커버하는 audio 길이 = 5분. Perso 분당 원가 × 5분 = 크레딧당 변동원가 상한. */
-    const val BILLABLE_BLOCK_MS: Long = 5 * 60 * 1000L
+    /** 1 크레딧이 커버하는 audio 길이 = 1분. Perso 분당 원가(≈$0.01) = 크레딧당 변동원가. */
+    const val BILLABLE_BLOCK_MS: Long = 60 * 1000L
 
     /**
      * block 경계 grace — 인코더 패딩으로 ffprobe 길이가 trim 윈도우보다 약간 길어 다음 블록으로
