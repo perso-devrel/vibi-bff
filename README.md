@@ -1,19 +1,27 @@
 # vibi BFF
 
-Kotlin/Ktor Backend-For-Frontend for the vibi mobile app (Android + iOS, KMP/CMP).
-Current surface:
+Kotlin/Ktor Backend-For-Frontend serving two clients off one surface and one
+Postgres: the vibi **mobile app** (Android + iOS, KMP/CMP) and the vibi
+**Adobe Premiere Pro plugin** (UXP panel). Current surface:
 
 - Proxies **Perso AI** for audio source separation (background / all-voice /
-  per-speaker stems). Stem volume preview is mixed locally on the mobile client;
-  final composition merges stems into the render pipeline server-side.
+  per-speaker stems). Stem volume preview is mixed locally on the client; final
+  composition merges stems into the render pipeline server-side. Saved separations
+  are listable per project (`GET /separations`) and the diarized script the
+  separation already produced is exposed (`GET /separate/{id}/script`) so the plugin
+  can restore result cards across devices.
 - Runs a local **ffmpeg** render pipeline (multi-segment concat, BGM
-  `atrim`+`amix` sub-range mixing, separation stem `amix normalize=0`).
+  `atrim`+`amix` sub-range mixing, separation stem `amix normalize=0`) and computes
+  input-waveform **peaks** (`POST /peaks`) for clients that can't decode AAC locally.
 - Gateways **Google Sign In** + **Apple Sign In** ID Token verification → upserts
   the user in **Postgres** → issues an HS256 access token whose `sub` is the
-  internal UUID (reusable as IAP `appAccountToken`).
+  internal UUID (reusable as IAP `appAccountToken`). The Adobe panel signs in via an
+  **RFC 8628 device-code** flow (browser consent page → server-side Google OAuth code
+  exchange) that reuses the same verification path.
 - Meters usage with a **credit** ledger (Postgres): separation is billed
-  **length-proportionally (1 credit per started 5 minutes)**, reserved up front and
-  refunded on failure. New users get a 3-credit signup bonus. Top-ups validate
+  **length-proportionally (1 credit per started minute)**, reserved up front and
+  refunded on failure. A per-job length cap (`MAX_SEPARATION_MINUTES`, default 60)
+  bounds worst-case cost. New users get a 3-credit signup bonus. Top-ups validate
   **StoreKit2 / Play Billing** receipts before granting.
 - Serves a read-only **admin** dashboard (`/api/v2/admin/*`): KPI overview, usage /
   signup trends, Perso reliability, a revenue / IAP panel, and a job success/failure
@@ -88,8 +96,9 @@ Full config reference is under [Configuration](#configuration); build/test comma
 
 ## API Reference
 
-The mobile client (Android + iOS, KMP/CMP) targets `/api/v2` exclusively. v1 is retired.
-`GET /healthz`, `/swagger` (gated by `ENABLE_SWAGGER`), and the admin SPA (`/<ADMIN_SLUG>/`,
+The mobile client (Android + iOS, KMP/CMP) and the Adobe Premiere Pro plugin (UXP) both
+target `/api/v2` exclusively. v1 is retired. `GET /healthz`, the device-login page
+(`GET /device`), `/swagger` (gated by `ENABLE_SWAGGER`), and the admin SPA (`/<ADMIN_SLUG>/`,
 gated by `ADMIN_SLUG`) sit outside `/api/v2` and outside rate limiting. Render outputs and
 separation stems are never static-mounted — each download either streams via `respondFile`
 or `302`-redirects to an R2 presigned URL when `R2_BUCKET` is set.
@@ -100,6 +109,10 @@ or `302`-redirects to an R2 presigned URL when `R2_BUCKET` is set.
 |--------|----------------------------------------------|---------------------------------------------------------------|
 | POST   | `/api/v2/auth/google`                        | Google ID Token → BFF JWT (see [Sign-In](#sign-in)). Rate-limited. |
 | POST   | `/api/v2/auth/apple`                         | Apple ID Token → BFF JWT (503 when `APPLE_OAUTH_CLIENT_IDS` blank). Rate-limited. |
+| POST   | `/api/v2/auth/device/start`                  | Begin RFC 8628 device-code login (Adobe panel) → `{deviceCode, userCode, verificationUri(Complete), expiresIn, interval}`. Rate-limited (device). |
+| POST   | `/api/v2/auth/device/poll`                   | Poll a device code → `authorization_pending` / `authorized` (carries the JWT, single-use) / `404 invalid_device_code` / `410 expired`. Rate-limited (device). |
+| GET    | `/api/v2/auth/google/start`                  | Browser step 1: redirect to Google consent (`?code=<userCode>&ack=on`, server-side OAuth). Rate-limited (auth). |
+| GET    | `/api/v2/auth/google/callback`              | Browser step 2: Google redirect target — exchanges code, verifies, authorizes the device code, returns an HTML result page. Rate-limited (auth). |
 | DELETE | `/api/v2/auth/account`                       | Delete the authenticated user, erase their render/separation content, cascade their jobs. |
 | GET    | `/api/v2/credits`                            | Current credit balance → `{ "balance": N }`.                  |
 | GET    | `/api/v2/credits/cost`                       | Separation cost estimate (`?durationMs=…` → credits). Same formula as the actual charge. |
@@ -111,9 +124,13 @@ or `302`-redirects to an R2 presigned URL when `R2_BUCKET` is set.
 | POST   | `/api/v2/render/v3`                          | Asset-by-reference render — segments/BGM reference R2 keys, no multipart bytes. |
 | GET    | `/api/v2/render/{jobId}/status`              | `PENDING` / `PROCESSING` / `COMPLETED` / `FAILED` + `progress`. |
 | GET    | `/api/v2/render/{jobId}/download`            | Binary mp4. With `R2_BUCKET`, `302` to an R2 presigned URL.   |
-| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Audio-only (`m4a`/`mp3`/`wav`, ≤ `MAX_SEPARATION_AUDIO_MB`). Reserves credits. Rate-limited. |
-| GET    | `/api/v2/separate/{jobId}`                   | Status + signed stem URLs when `READY`.                       |
-| GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream (gated by `?token=…`).                      |
+| POST   | `/api/v2/separate`                           | Multipart separation job (see [Separation](#separation-endpoints)). Audio-only (`m4a`/`mp3`/`wav`, ≤ `MAX_SEPARATION_AUDIO_MB`). Reserves credits. `422 audio_too_long` past `MAX_SEPARATION_MINUTES`. Rate-limited. |
+| GET    | `/api/v2/separate/{jobId}`                   | Status (`+ progress`, `queuePosition`, `estimatedWaitSec`, `actualDurationMs`) + signed stem URLs when `READY`. |
+| GET    | `/api/v2/separate/{jobId}/stem/{stemId}`     | Stem audio stream. Gated by `?token=…` (FLAC, `302` to R2) **or** Bearer JWT (plugin path: transcoded WAV, `{url}` JSON). |
+| GET    | `/api/v2/separate/{jobId}/script`            | Diarized script the separation already produced (`409 not_ready` before `READY`). |
+| DELETE | `/api/v2/separate/{jobId}`                   | Delete a saved separation (row + R2 stem purge). Owner-only, idempotent `204`. |
+| GET    | `/api/v2/separations`                        | Saved READY separations for the caller (`?projectId` bucket), newest first. |
+| POST   | `/api/v2/peaks`                              | Input-waveform peaks from an uploaded audio file (`m4a`/`mp3`/`wav`). No credit charge; auth required; `503 server_busy` past `MAX_CONCURRENT_PEAKS`. |
 
 ### Admin (read-only, `admin` role)
 
@@ -145,7 +162,8 @@ intentionally **not** limited.
 
 | Group                                    | Limit    | Key                              |
 |------------------------------------------|----------|----------------------------------|
-| `/api/v2/auth/*`                         | 10 / min | client IP (blocks signup-bonus farming). |
+| `/api/v2/auth/*` (incl. `google/start`+`callback`) | 10 / min | client IP (blocks signup-bonus farming). |
+| `POST /api/v2/auth/device/{start,poll}`  | 60 / min | client IP (panel polls every 2s — no credits created here). |
 | `POST /api/v2/render` + `/render/inputs` | 10 / min | JWT subject (falls back to IP).  |
 | `POST /api/v2/separate`                  | 20 / min | JWT subject (falls back to IP).  |
 
@@ -194,11 +212,14 @@ BGM clips are `atrim`+`asetpts` sub-ranged then `amix`-ed (`normalize=0`) with t
 ### Separation endpoints
 
 `POST /api/v2/separate` accepts an **already-trimmed audio file** (m4a / mp3 / wav), submits
-it to Perso's audio-separation pipeline, and exposes the byproduct stems for the mobile client
-to pick and locally mix for preview. The client handles trim + audio extract locally (iOS
+it to Perso's audio-separation pipeline, and exposes the byproduct stems for the client to
+pick and locally mix for preview. The mobile client handles trim + audio extract locally (iOS
 `AVAssetExportPresetAppleM4A`), so the BFF does no ffmpeg work before the upstream upload.
 Final stem amix happens once at `/render` time via `SeparationDirective.selections[]` — there
-is no server-side mix endpoint.
+is no server-side mix endpoint. A per-job cap rejects sources longer than
+`MAX_SEPARATION_MINUTES` (default 60) with `422 audio_too_long`, measured server-side so a
+client-supplied duration hint can't bypass it. The optional `spec` fields `projectId` /
+`fileName` / `byteLength` are stored on submit so `GET /separations` can rebuild history cards.
 
 | Field  | Description                                                        |
 |--------|--------------------------------------------------------------------|
@@ -210,17 +231,19 @@ is no server-side mix endpoint.
 | `file` / `spec` missing                     | `400` (`file is required` / `spec is required`) |
 | Extension outside whitelist                 | `400 unsupported_audio_format` |
 | Multipart exceeds `MAX_SEPARATION_AUDIO_MB` | `413`                          |
+| Source longer than `MAX_SEPARATION_MINUTES` | `422 audio_too_long`           |
 | Balance insufficient                        | `402 insufficient_credits`     |
 | Rate limit exceeded (20 / min)              | `429`                          |
 
 **Credits & pricing.** Separation is billed length-proportionally:
 
 ```
-cost = max(1, ceil( (durationMs − 1000) / 300000 ))   // 1 credit per started 5-minute block
+cost = max(1, ceil( (durationMs − 1000) / 60000 ))   // 1 credit per started 1-minute block
 ```
 
-i.e. 1 credit per started 5 minutes, with a 1-second boundary grace (so 5min+1s = 1 credit,
-absorbing AAC trim padding), minimum 1. The same `CreditCost.forSeparation` powers both
+i.e. 1 credit per started minute, with a 1-second boundary grace (so 1min+1s = 1 credit,
+absorbing AAC trim padding), minimum 1. Mobile and the Adobe plugin share this one formula
+(`CreditCost.forSeparation`), which powers both
 `GET /credits/cost` (estimate) and the actual reservation, so estimate == charge. Charge
 duration is measured by ffprobe on the upload; on probe failure it falls back to a
 conservative size-based estimate to block undercharge. The reservation is row-locked and
@@ -241,19 +264,29 @@ Per-speaker stems appear only when `numberOfSpeakers >= 2`. On save, mobile buil
 `RenderConfig` whose `separationDirectives[].selections[]` carries each stem's signed URL +
 final volume, and `/render` amixes them into the final mp4 in one ffmpeg pass.
 
-**Security & lifecycle.** Stems are never static-mounted; downloads require a short-lived
+**Two download paths.** `GET /separate/{jobId}/stem/{stemId}` serves the same stem two ways:
+
+- **Capability token** (`?token=…`) — the signed-URL path the mobile client uses. Returns the
+  stem in its native codec (FLAC), `302`-redirecting to an R2 presigned URL when `R2_BUCKET` is set.
+- **Bearer JWT** (no `?token`) — the Adobe panel path. UXP can't follow `302` and only plays
+  WAV PCM, so the BFF transcodes the stem to WAV and responds with `{ url }` JSON. The
+  transcode is cached in R2 (converted once, presigned thereafter); on delete / account erase
+  the lazily-created WAV cache object is purged alongside the native stem.
+
+**Security & lifecycle.** Stems are never static-mounted; token downloads require a short-lived
 HMAC token bound to `{jobId, resourceId, expiry}` (TTL `SEPARATION_URL_TTL_SEC`) — re-call
-`GET /separate/{jobId}` to mint fresh URLs after expiry. Access logs mask `?token=***`,
-`id_token`, `access_token`, and OAuth `code`; client HTTP logging is `NONE` so Perso keys /
-SAS URLs never leak. Abandoned `READY` separations are reaped after `SEPARATION_ABANDON_TTL_MS`
-(7 days); there is no explicit dispose endpoint. Rotating `SEPARATION_SIGNING_SECRET`
-invalidates every outstanding token at once.
+`GET /separate/{jobId}` to mint fresh URLs after expiry. Owner-scoped jobs match the
+authenticated caller and answer mismatches with `404` (no IDOR existence oracle). Access logs
+mask `?token=***`, `id_token`, `access_token`, and OAuth `code`; client HTTP logging is `NONE`
+so Perso keys / SAS URLs never leak. Abandoned `READY` separations are reaped after
+`SEPARATION_ABANDON_TTL_MS` (7 days); callers can also `DELETE /separate/{jobId}` explicitly.
+Rotating `SEPARATION_SIGNING_SECRET` invalidates every outstanding token at once.
 
 ### Sign-In
 
 Both providers follow the same pattern: the native SDK (GoogleSignIn iOS SPM / Android
-Credential Manager / Apple `AuthenticationServices`) returns an ID Token which the mobile
-client forwards to BFF. BFF verifies, upserts a row in `users` (`(provider, provider_sub)`
+Credential Manager / Apple `AuthenticationServices`) returns an ID Token which the client
+forwards to BFF. BFF verifies, upserts a row in `users` (`(provider, provider_sub)`
 unique), and returns its own HS256 JWT whose `sub` is the internal UUID (reusable as IAP
 `appAccountToken`).
 
@@ -268,6 +301,18 @@ Enabling Apple in production needs a paid Apple Developer Program membership (Pe
 builds hit runtime error 1000), `APPLE_OAUTH_CLIENT_IDS` set to the iOS bundle id, and the
 `com.apple.developer.applesignin` entitlement (`iosApp/iosApp.entitlements` via `project.yml`;
 run `xcodegen generate` after pulling).
+
+**Device-code flow (Adobe panel).** The UXP panel has no native sign-in SDK, so it uses an
+RFC 8628 device flow: it calls `POST /auth/device/start`, opens `verificationUriComplete`
+(`<BFF_BASE_URL>/device?code=…`) in the user's browser, and polls `POST /auth/device/poll`
+every ~2s. The `/device` page requires an explicit "I started this from the Vibi Separate
+panel" confirmation (consent-relay phishing mitigation, re-checked server-side as `ack=on`)
+before `GET /auth/google/start` redirects to Google. The callback exchanges the auth code
+server-side for an `id_token` and reuses the same `verifyGoogleIdToken` path (users upsert +
+signup bonus), then authorizes the pending device code; the next `poll` returns the JWT and
+consumes the code (single-use). This needs `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET`
+(a Google **web** client) set, with `<BFF_BASE_URL>/api/v2/auth/google/callback` registered as
+an authorized redirect URI; the client id is auto-merged into the verified `aud` allow-list.
 
 ## Configuration
 
@@ -303,6 +348,7 @@ optional values fall back to the listed default.
 | `RENDER_PROCESS_TIMEOUT_MIN` | `30`                     | Hard timeout (min) for the final ffmpeg mix pass; guards against a leaked concurrency permit. |
 | `UPLOADS_TTL_HOURS`          | `6`                      | Retention TTL (h) for leftover uploaded source media (PII cleanup; normal path deletes immediately). |
 | `MAX_UPLOAD_FILE_SIZE_MB`    | `500`                    | Multipart upload cap (MB) for render endpoints.      |
+| `MAX_CONCURRENT_PEAKS`       | `2`                      | Concurrent `/peaks` ffmpeg decodes; exceeding → `503 server_busy` (no queueing). |
 | `HTTP_CONNECT_TIMEOUT_MS` / `HTTP_REQUEST_TIMEOUT_MS` / `HTTP_SOCKET_TIMEOUT_MS` | `120000` / `600000` / `600000` | Upstream HttpClient timeouts. |
 
 ### Separation lifecycle
@@ -311,6 +357,7 @@ optional values fall back to the listed default.
 |------------------------------|--------------------------|------------------------------------------------------|
 | `SEPARATION_SIGNING_SECRET`  | —                        | **Required.** HMAC key (≥32 chars) for stem URL signing. `openssl rand -hex 32`. |
 | `MAX_SEPARATION_AUDIO_MB`    | `100`                    | Audio-only upload cap (MB) for `/separate`; exceeding → `413`. |
+| `MAX_SEPARATION_MINUTES`     | `60`                     | Per-job measured-length cap; longer source → `422 audio_too_long`. |
 | `SEPARATION_ABANDON_TTL_MS`  | `604800000` (7 days)     | Reap READY-but-unclaimed separations after this many ms (≥ 60000). |
 | `SEPARATION_URL_TTL_SEC`     | `604800` (7 days)        | Stem URL token lifetime (60..604800). Must be ≤ abandon TTL. |
 | `SEPARATION_MAX_PERSO_IN_FLIGHT` | `2`                  | BFF-side cap on concurrent Perso jobs (1..5), enforced cross-instance via the Postgres queue. |
@@ -320,6 +367,7 @@ optional values fall back to the listed default.
 | Key                          | Default                  | Description                                          |
 |------------------------------|--------------------------|------------------------------------------------------|
 | `GOOGLE_OAUTH_CLIENT_IDS`    | —                        | **Required.** Comma-separated Google OAuth client IDs (iOS / Android / Web). `aud` must match. |
+| `GOOGLE_OAUTH_CLIENT_ID` / `GOOGLE_OAUTH_CLIENT_SECRET` | *(blank = device flow disabled)* | Google **web** client for the Adobe panel's device-flow code exchange. Both required to enable `/auth/google/start`; the id is auto-merged into the `aud` allow-list. |
 | `APPLE_OAUTH_CLIENT_IDS`     | *(blank = disabled)*     | Comma-separated Apple client IDs (typically `com.vibi.ios`). Blank → `/auth/apple` returns 503. |
 | `AUTH_JWT_SECRET`            | —                        | **Required.** HMAC-SHA256 key (≥32 chars) for access token signing. |
 | `AUTH_JWT_EXPIRY_SECONDS`    | `604800` (7 days)        | Issued token lifetime (60..2592000, i.e. max 30 days — no refresh tokens). |
@@ -395,7 +443,7 @@ Kotlin 2.0 · Ktor 3 · Netty · Exposed + HikariCP · kotlinx.serialization, on
 src/main/kotlin/com/vibi/bff/
 ├── Application.kt   # entry point: config load, DI wiring, HttpClient, Sentry, shutdown hooks
 ├── config/          # HOCON + env loading with boot-time fail-fast (AppConfig)
-├── db/              # HikariCP + Exposed tables + Flyway migrations (users, credits, jobs, calls)
+├── db/              # HikariCP + Exposed tables + Flyway migrations (users, credits, jobs, calls, device codes, separation history)
 ├── plugins/         # CORS, serialization, JWT auth, rate limiting, routing, error handling
 ├── model/           # request/response DTOs (Auth, Credit, Admin, Bff, Perso)
 ├── routes/          # /api/v2 handlers (auth, credits, assets, render, separate, admin)
