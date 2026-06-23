@@ -13,6 +13,7 @@ import com.vibi.bff.service.UserRepository
 import io.ktor.server.plugins.ratelimit.rateLimit
 import com.vibi.bff.service.CreditCost
 import com.vibi.bff.service.CreditRepository
+import com.vibi.bff.service.FfmpegRunner
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.InsufficientCreditsException
 import com.vibi.bff.service.MediaTrimmer
@@ -252,15 +253,55 @@ fun Route.separationRoutes(
             // 로컬 file 존재 체크 의도적 제거 — R2 가 source-of-truth. DB fallback 으로 재구축된
             // SeparationJob 은 placeholder File 을 들고 있고 실체는 R2. ObjectStore.uploadIfAbsent
             // 가 HEAD 로 R2 hit 확인 후 signed URL. R2 도 없으면 그 안에서 throw.
-            val ext = stem.file.extension.ifBlank { "wav" }
+            val ext = stem.file.extension.ifBlank { "flac" }
+            if (token == null) {
+                // 플러그인(UXP) 경로: pure-JS mix/재생이 WAV PCM 만 처리하므로 stem(FLAC)을
+                // 44.1k/stereo/16bit WAV 로 transcode 해 inline 전송. (모바일=토큰 경로는 FLAC 그대로
+                // presigned/302 — R2 저장/egress 효율 유지.)
+                val srcKey = ObjectKey.separationStem(jobId, stem.stemId, ext)
+                val srcIsTemp = !stem.file.exists()
+                val srcFile: File = if (!srcIsTemp) {
+                    stem.file
+                } else {
+                    val store = objectStore ?: throw NotFoundException("Stem bytes not found: $stemId")
+                    withContext(Dispatchers.IO) { store.downloadIfAbsent(srcKey, File.createTempFile("stem-src-", ".$ext")) }
+                }
+                val wav = withContext(Dispatchers.IO) { File.createTempFile("stem-wav-", ".wav") }
+                try {
+                    FfmpegRunner.run(
+                        listOf(
+                            "ffmpeg", "-y", "-v", "error",
+                            "-i", srcFile.absolutePath,
+                            "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
+                            wav.absolutePath,
+                        ),
+                        label = "stem flac->wav ${stem.stemId}",
+                        timeoutMinutes = 2,
+                    )
+                    call.response.header(
+                        HttpHeaders.ContentDisposition,
+                        ContentDisposition.Attachment.withParameter(
+                            ContentDisposition.Parameters.FileName, "${stem.stemId}.wav",
+                        ).toString(),
+                    )
+                    call.response.header(HttpHeaders.ContentType, ContentType("audio", "wav").toString())
+                    call.respondFile(wav)
+                } finally {
+                    withContext(Dispatchers.IO) {
+                        wav.delete()
+                        if (srcIsTemp) srcFile.delete()
+                    }
+                }
+                return@get
+            }
+            // 모바일(토큰) 경로: FLAC 그대로 (R2 presigned 302).
             call.respondDownload(
                 file = stem.file,
                 objectKey = ObjectKey.separationStem(jobId, stem.stemId, ext),
                 contentType = contentTypeForExtension(ext, ContentType("audio", "wav")),
                 downloadFilename = "${stem.stemId}.$ext",
                 store = objectStore,
-                // 토큰 경로(모바일)는 302 유지. Bearer-only(UXP)는 {url} JSON.
-                asJsonUrl = token == null,
+                asJsonUrl = false,
             )
         }
 

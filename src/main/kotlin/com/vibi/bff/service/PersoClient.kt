@@ -344,7 +344,12 @@ class PersoClient(
                 if (cursorId != null) parameter("cursorId", cursorId)
             }
             checkResponse(response)
-            response.body<PersoEnvelope<PersoScriptPage>>().result
+            // Perso 의 audio-separation/script 는 getProjectInfo 처럼 envelope({"result":...}) 없이
+            // raw object 로 응답하는 케이스가 있다 → 둘 다 수용(result 있으면 벗기고 없으면 그대로).
+            val element = response.body<kotlinx.serialization.json.JsonElement>()
+            val obj = element as? kotlinx.serialization.json.JsonObject
+                ?: throw PersoApiException(500, "audio-separation/script: expected JSON object, got $element")
+            AppJson.decodeFromJsonElement(PersoScriptPage.serializer(), obj["result"] ?: obj)
         }
     }
 
