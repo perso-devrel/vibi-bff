@@ -32,7 +32,7 @@ data class CreditBalanceResponse(
  * 음원 분리 비용 견적 — 모바일 확인 팝업 ("X 크레딧 사용, 잔액 Y → Z, 진행?") 표시용.
  *
  * - [durationMs] — 견적 기준 입력 길이 (요청에서 echo back).
- * - [credits]    — [CreditCost.forSeparation] 결과. 현재 정책: 영상 1개당 고정 1 크레딧.
+ * - [credits]    — [CreditCost.forSeparation] 결과. 현재 정책: 시작된 5분당 1 크레딧 (ceil).
  * - [balance]    — 호출 시점 잔액.
  * - [sufficient] — balance >= credits 여부. false 면 모바일은 "충전 필요" UI 분기.
  */
