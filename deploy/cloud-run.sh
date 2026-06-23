@@ -8,6 +8,7 @@
 #      - DATABASE_URL / DB_USER / DB_PASSWORD (Neon 등 managed Postgres)
 #      - R2_BUCKET / R2_ACCOUNT_ID / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY (Cloudflare R2)
 #      - APPLE_OAUTH_CLIENT_IDS (선택 — 비우면 Apple 로그인 비활성)
+#      - IAP_APPLE_* (선택 — Apple 인앱결제. 5개 모두 채워야 활성, 비우면 결제 비활성)
 # 멱등 (중복 실행해도 안전): 이미 존재하면 update / skip. R2 lifecycle 도 매번 PUT —
 # S3 PutBucketLifecycleConfiguration 은 전체 교체 semantics 라 drift 자연 차단.
 
@@ -53,6 +54,16 @@ set -a; source "$ENV_FILE"; set +a
 # Vertex AI 가 활성화된 프로젝트가 Cloud Run 배포 프로젝트와 다를 수 있어 (cross-project) 별도 변수.
 # .env 의 GEMINI_PROJECT_ID 가 있으면 그 값, 없으면 PROJECT_ID fallback.
 : "${GEMINI_PROJECT_ID:=$PROJECT_ID}"
+# IAP (StoreKit2 / Play Billing) 영수증 검증 자격증명 — 모두 옵션. 비우면 해당 플랫폼 결제 비활성
+# (purchase 시 iap_unconfigured 400). Apple 은 5개를 모두 채워야 활성화. IAP_APPLE_PRIVATE_KEY 는
+# .p8 PEM 본문 — 한 줄로 넣을 땐 개행을 \n literal 로 (AppConfig 가 복원). Google(Android) service
+# account JSON 은 '@' 가 ^@^ env 구분자와 충돌 + 비밀이라 env 부적합 → 실연동 시 Secret Manager 로.
+: "${IAP_APPLE_ISSUER_ID:=}"
+: "${IAP_APPLE_KEY_ID:=}"
+: "${IAP_APPLE_PRIVATE_KEY:=}"
+: "${IAP_APPLE_BUNDLE_ID:=}"
+: "${IAP_APPLE_ENV:=}"
+: "${IAP_GOOGLE_PACKAGE_NAME:=}"
 
 command -v gcloud >/dev/null || { echo "❌ gcloud CLI not found — install from https://cloud.google.com/sdk/docs/install" >&2; exit 1; }
 command -v aws    >/dev/null || { echo "❌ aws CLI not found (필요: R2 lifecycle 적용) — install from https://docs.aws.amazon.com/cli/latest/userguide/getting-started-install.html" >&2; exit 1; }
@@ -165,7 +176,7 @@ gcloud run deploy "$SERVICE_NAME" \
   --no-cpu-throttling \
   --session-affinity \
   --allow-unauthenticated \
-  --set-env-vars="^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${REGION}@PERSO_BASE_URL=https://api.perso.ai@PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai@STORAGE_PATH=/tmp/storage@GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS}@APPLE_OAUTH_CLIENT_IDS=${APPLE_OAUTH_CLIENT_IDS}@CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}@R2_BUCKET=${R2_BUCKET}@R2_ACCOUNT_ID=${R2_ACCOUNT_ID}@SIGNED_URL_TTL_SEC=${SIGNED_URL_TTL_SEC}@ADMIN_SLUG=${ADMIN_SLUG}" \
+  --set-env-vars="^@^GEMINI_PROJECT_ID=${GEMINI_PROJECT_ID}@GEMINI_LOCATION=${REGION}@PERSO_BASE_URL=https://api.perso.ai@PERSO_STORAGE_BASE_URL=https://portal-media.perso.ai@STORAGE_PATH=/tmp/storage@GOOGLE_OAUTH_CLIENT_IDS=${GOOGLE_OAUTH_CLIENT_IDS}@APPLE_OAUTH_CLIENT_IDS=${APPLE_OAUTH_CLIENT_IDS}@CORS_ALLOWED_ORIGINS=${CORS_ALLOWED_ORIGINS}@R2_BUCKET=${R2_BUCKET}@R2_ACCOUNT_ID=${R2_ACCOUNT_ID}@SIGNED_URL_TTL_SEC=${SIGNED_URL_TTL_SEC}@ADMIN_SLUG=${ADMIN_SLUG}@IAP_APPLE_ISSUER_ID=${IAP_APPLE_ISSUER_ID}@IAP_APPLE_KEY_ID=${IAP_APPLE_KEY_ID}@IAP_APPLE_PRIVATE_KEY=${IAP_APPLE_PRIVATE_KEY}@IAP_APPLE_BUNDLE_ID=${IAP_APPLE_BUNDLE_ID}@IAP_APPLE_ENV=${IAP_APPLE_ENV}@IAP_GOOGLE_PACKAGE_NAME=${IAP_GOOGLE_PACKAGE_NAME}" \
   --set-secrets="PERSO_API_KEY=PERSO_API_KEY:latest,PERSO_SPACE_SEQ=PERSO_SPACE_SEQ:latest,AUTH_JWT_SECRET=AUTH_JWT_SECRET:latest,SEPARATION_SIGNING_SECRET=SEPARATION_SIGNING_SECRET:latest,DATABASE_URL=DATABASE_URL:latest,DB_USER=DB_USER:latest,DB_PASSWORD=DB_PASSWORD:latest,R2_ACCESS_KEY_ID=R2_ACCESS_KEY_ID:latest,R2_SECRET_ACCESS_KEY=R2_SECRET_ACCESS_KEY:latest"
 
 URL=$(gcloud run services describe "$SERVICE_NAME" --region "$REGION" --format='value(status.url)')
