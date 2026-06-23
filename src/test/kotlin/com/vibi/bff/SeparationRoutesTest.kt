@@ -4,12 +4,19 @@ import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.configureErrorHandling
 import com.vibi.bff.plugins.configureRateLimiting
 import com.vibi.bff.plugins.configureSerialization
+import com.vibi.bff.model.PersoScriptPage
+import com.vibi.bff.model.PersoScriptSentence
+import com.vibi.bff.model.PersoScriptSpeaker
 import com.vibi.bff.routes.separationRoutes
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.InsufficientCreditsException
 import com.vibi.bff.service.MediaTrimmer
+import com.vibi.bff.service.PersoClient
+import com.vibi.bff.service.ScriptJobRow
+import com.vibi.bff.service.SeparationHistoryRow
 import com.vibi.bff.service.SeparationJob
+import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.UserRepository
@@ -51,6 +58,8 @@ class SeparationRoutesTest {
         jwtSecret: String? = null,
         creditRepository: CreditRepository? = null,
         userRepository: UserRepository? = null,
+        queueRepository: SeparationQueueRepository? = null,
+        persoClient: PersoClient? = null,
         block: suspend ApplicationTestBuilder.() -> Unit,
     ) = testApplication {
         application {
@@ -64,9 +73,11 @@ class SeparationRoutesTest {
                 separationRoutes(
                     separationService, signer, fileStorage,
                     appConfig, objectStore = null,
+                    queueRepository = queueRepository,
                     jwtSecret = jwtSecret,
                     creditRepository = creditRepository,
                     userRepository = userRepository,
+                    persoClient = persoClient,
                 )
             }
         }
@@ -372,6 +383,100 @@ class SeparationRoutesTest {
             assertEquals(HttpStatusCode.Accepted, response.status)
             verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(12)) }
             verify(exactly = 0) { creditRepo.refund(any()) }
+        }
+    }
+
+    // ── Adobe history (목록/삭제/script) ──────────────────────────────────────
+
+    @Test
+    fun `GET separations returns the owner's ready history`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        coEvery { queue.listReadyHistory(callerId, null) } returns listOf(
+            SeparationHistoryRow(
+                jobId = "sep-1",
+                fileName = "song.mp3",
+                byteLength = 1000L,
+                durationMs = 60_000L,
+                createdAtMs = 1_700_000_000_000L,
+                stemsJson = """[{"stemId":"background","label":"BG","ext":"wav"}]""",
+                hasScript = true,
+            ),
+        )
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue) {
+            val res = client.get("/api/v2/separations") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.OK, res.status)
+            val seps = AppJson.parseToJsonElement(res.bodyAsText()).jsonObject["separations"]!!.jsonArray
+            assertEquals(1, seps.size)
+            val first = seps[0].jsonObject
+            assertEquals("sep-1", first["jobId"]!!.jsonPrimitive.content)
+            assertEquals(true, first["hasScript"]!!.jsonPrimitive.boolean)
+            assertEquals("background", first["stems"]!!.jsonArray[0].jsonObject["stemId"]!!.jsonPrimitive.content)
+        }
+        coVerify { queue.listReadyHistory(callerId, null) }
+    }
+
+    @Test
+    fun `GET separations is empty without auth`() = testApp(queueRepository = mockk()) {
+        // jwtSecret 미주입 → principal null → 빈 목록(인증 강제 못 하는 dev/테스트 분기).
+        val res = client.get("/api/v2/separations")
+        assertEquals(HttpStatusCode.OK, res.status)
+        assertEquals(0, AppJson.parseToJsonElement(res.bodyAsText()).jsonObject["separations"]!!.jsonArray.size)
+    }
+
+    @Test
+    fun `DELETE separation returns 204`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        coEvery { queue.deleteOwnedReturningStemsJson("sep-9", callerId) } returns null
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue) {
+            val res = client.delete("/api/v2/separate/sep-9") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.NoContent, res.status)
+        }
+        coVerify { queue.deleteOwnedReturningStemsJson("sep-9", callerId) }
+    }
+
+    @Test
+    fun `GET script returns assembled draft from Perso projectSeq`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        val perso = mockk<PersoClient>()
+        coEvery { queue.loadForScript("sep-7") } returns ScriptJobRow(callerId, "READY", 42L)
+        coEvery { perso.getFullAudioSeparationScript(42L) } returns PersoScriptPage(
+            hasNext = false,
+            nextCursorId = null,
+            sentences = listOf(
+                PersoScriptSentence(seq = 1, speakerOrderIndex = 1, offsetMs = 0, durationMs = 1000, originalText = "hello"),
+            ),
+            speakers = listOf(PersoScriptSpeaker(speakerOrderIndex = 1)),
+        )
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue, persoClient = perso) {
+            val res = client.get("/api/v2/separate/sep-7/script") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.OK, res.status)
+            val body = AppJson.parseToJsonElement(res.bodyAsText()).jsonObject
+            assertEquals(1, body["speakers"]!!.jsonArray.size)
+            val seg = body["segments"]!!.jsonArray[0].jsonObject
+            assertEquals("hello", seg["text"]!!.jsonPrimitive.content)
+            assertEquals(1000, seg["endMs"]!!.jsonPrimitive.int)
+        }
+    }
+
+    @Test
+    fun `GET script returns 409 when not ready`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        coEvery { queue.loadForScript("sep-x") } returns ScriptJobRow(callerId, "QUEUED", null)
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue, persoClient = mockk()) {
+            val res = client.get("/api/v2/separate/sep-x/script") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.Conflict, res.status)
         }
     }
 }

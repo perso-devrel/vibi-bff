@@ -138,6 +138,7 @@ fun Application.configureRouting(
                 jwtSecret = appConfig.auth.jwtSecret,
                 creditRepository = creditRepository,
                 userRepository = userRepository,
+                persoClient = persoClient,
             )
             adminRoutes(adminRepository, jwtSecret = appConfig.auth.jwtSecret)
 

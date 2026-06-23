@@ -6,7 +6,9 @@ import java.util.UUID
 import kotlinx.coroutines.Dispatchers
 import org.jetbrains.exposed.sql.SortOrder
 import org.jetbrains.exposed.sql.SqlExpressionBuilder
+import org.jetbrains.exposed.sql.SqlExpressionBuilder.eq
 import org.jetbrains.exposed.sql.and
+import org.jetbrains.exposed.sql.deleteWhere
 import org.jetbrains.exposed.sql.insert
 import org.jetbrains.exposed.sql.selectAll
 import org.jetbrains.exposed.sql.transactions.experimental.newSuspendedTransaction
@@ -344,6 +346,65 @@ class SeparationQueueRepository {
             .count()
     }
 
+    // ── Adobe 플러그인 history (목록/삭제/script) ───────────────────────────────
+
+    /** owner+project 의 READY 분리 목록(최신순). projectId NULL 은 NULL row 와 매칭(null-safe eq). */
+    suspend fun listReadyHistory(userId: UUID, projectId: String?): List<SeparationHistoryRow> =
+        newSuspendedTransaction(Dispatchers.IO) {
+            SeparationJobsTable
+                .selectAll()
+                .where {
+                    (SeparationJobsTable.userId eq userId) and
+                        (SeparationJobsTable.status eq STATUS_READY) and
+                        (SeparationJobsTable.projectId eq projectId)
+                }
+                .orderBy(SeparationJobsTable.createdAt, SortOrder.DESC)
+                .map { row ->
+                    SeparationHistoryRow(
+                        jobId = row[SeparationJobsTable.id],
+                        fileName = row[SeparationJobsTable.fileName],
+                        byteLength = row[SeparationJobsTable.byteLength],
+                        durationMs = row[SeparationJobsTable.sourceDurationMs],
+                        createdAtMs = row[SeparationJobsTable.createdAt].toEpochMilli(),
+                        stemsJson = row[SeparationJobsTable.stemsJson],
+                        hasScript = row[SeparationJobsTable.persoProjectSeq] != null,
+                    )
+                }
+        }
+
+    /**
+     * owner 의 분리 1건 삭제. 삭제된 row 의 stems_json 반환(R2 purge 용), 매칭 row 없으면 null.
+     * id+owner 매칭이라 남의 잡은 못 지움(no-op → null). 라우트는 항상 204(멱등·존재 비노출).
+     */
+    suspend fun deleteOwnedReturningStemsJson(jobId: String, userId: UUID): String? =
+        newSuspendedTransaction(Dispatchers.IO) {
+            val row = SeparationJobsTable
+                .selectAll()
+                .where { (SeparationJobsTable.id eq jobId) and (SeparationJobsTable.userId eq userId) }
+                .firstOrNull() ?: return@newSuspendedTransaction null
+            val stemsJson = row[SeparationJobsTable.stemsJson]
+            SeparationJobsTable.deleteWhere {
+                (SeparationJobsTable.id eq jobId) and (SeparationJobsTable.userId eq userId)
+            }
+            stemsJson
+        }
+
+    /** script 라우트용 — owner/status/persoProjectSeq 만 가볍게 로드. */
+    suspend fun loadForScript(jobId: String): ScriptJobRow? =
+        newSuspendedTransaction(Dispatchers.IO) {
+            SeparationJobsTable
+                .selectAll()
+                .where { SeparationJobsTable.id eq jobId }
+                .firstOrNull()
+                ?.let {
+                    ScriptJobRow(
+                        ownerUserId = it[SeparationJobsTable.userId],
+                        status = it[SeparationJobsTable.status],
+                        persoProjectSeq = it[SeparationJobsTable.persoProjectSeq],
+                    )
+                }
+        }
+
     companion object {
         const val STATUS_QUEUED = "QUEUED"
         const val STATUS_SUBMITTING = "SUBMITTING"
@@ -367,6 +428,24 @@ data class ResumableJob(
     val jobId: String,
     val persoProjectSeq: Long,
     val ownerUserId: java.util.UUID?,
+)
+
+/** [SeparationQueueRepository.listReadyHistory] 반환 — Adobe history 카드 1건의 메타. */
+data class SeparationHistoryRow(
+    val jobId: String,
+    val fileName: String?,
+    val byteLength: Long?,
+    val durationMs: Long?,
+    val createdAtMs: Long,
+    val stemsJson: String?,
+    val hasScript: Boolean,
+)
+
+/** [SeparationQueueRepository.loadForScript] 반환 — script 라우트의 owner/status/projectSeq 게이트용. */
+data class ScriptJobRow(
+    val ownerUserId: java.util.UUID?,
+    val status: String,
+    val persoProjectSeq: Long?,
 )
 
 /** [SeparationQueueRepository.loadReady] 반환. 새 인스턴스의 in-memory 재구축용 ─

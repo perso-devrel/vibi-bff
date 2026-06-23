@@ -4,6 +4,7 @@ import com.vibi.bff.MAX_SEPARATION_AUDIO_SIZE
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.model.*
 import com.vibi.bff.plugins.ApiErrorException
+import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.NotFoundException
 import com.vibi.bff.plugins.RL_SEPARATE
 import com.vibi.bff.plugins.requireUser
@@ -16,9 +17,12 @@ import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.InsufficientCreditsException
 import com.vibi.bff.service.MediaTrimmer
 import com.vibi.bff.service.ObjectStore
+import com.vibi.bff.service.PersoClient
 import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
+import com.vibi.bff.service.StemMeta
+import kotlinx.serialization.builtins.ListSerializer
 import io.ktor.http.*
 import io.ktor.server.request.*
 import io.ktor.server.response.*
@@ -51,6 +55,8 @@ fun Route.separationRoutes(
     creditRepository: CreditRepository? = null,
     /** 삭제된 계정의 잔존 JWT 차단용 존재 확인. null 이면 skip (테스트/dev). 운영에선 항상 주입. */
     userRepository: UserRepository? = null,
+    /** Adobe history script 조회용 Perso 클라이언트. null 이면 script 라우트 비활성(테스트/dev). */
+    persoClient: PersoClient? = null,
 ) {
     route("/separate") {
         // submit(POST)만 레이트리밋 — 크레딧이 1차 방어, 보조 상한. 상태 조회/stem GET 은 제외.
@@ -257,7 +263,106 @@ fun Route.separationRoutes(
                 asJsonUrl = token == null,
             )
         }
+
+        // DELETE /api/v2/separate/{jobId} — 저장된 분리 삭제(행 + R2 stem purge). 멱등 204.
+        // owner 매칭으로만 삭제 — 남의 잡/이미 없는 잡은 no-op 후에도 204(존재 비노출).
+        delete("/{jobId}") {
+            val jobId = call.parameters["jobId"] ?: throw NotFoundException("jobId required")
+            val principal = jwtSecret?.let { call.requireUser(it) }
+            if (principal == null || queueRepository == null) {
+                call.respond(HttpStatusCode.NoContent)
+                return@delete
+            }
+            val stemsJson = queueRepository.deleteOwnedReturningStemsJson(jobId, principal.userId)
+            // 삭제된 row 의 stems 만 R2 에서 purge. ObjectStore 없으면(dev) skip.
+            if (stemsJson != null && objectStore != null) {
+                val metas = runCatching {
+                    AppJson.decodeFromString(ListSerializer(StemMeta.serializer()), stemsJson)
+                }.getOrDefault(emptyList())
+                metas.forEach { m ->
+                    val ext = m.ext.ifBlank { "flac" }
+                    withContext(Dispatchers.IO) {
+                        objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, ext))
+                    }
+                }
+            }
+            call.respond(HttpStatusCode.NoContent)
+        }
+
+        // GET /api/v2/separate/{jobId}/script — 분리가 이미 만든 diarized script(새 STT 잡 없음).
+        // 분리의 Perso projectSeq 에서 바로 읽는다.
+        get("/{jobId}/script") {
+            val jobId = call.parameters["jobId"] ?: throw NotFoundException("jobId required")
+            val principal = jwtSecret?.let { call.requireUser(it) }
+            val row = queueRepository?.loadForScript(jobId)
+                ?: throw NotFoundException("Separation job not found: $jobId")
+            // owner 매칭(미스매치는 not-found, IDOR existence oracle 차단).
+            if (principal != null && row.ownerUserId != null && row.ownerUserId != principal.userId) {
+                throw NotFoundException("Separation job not found: $jobId")
+            }
+            if (row.status != SeparationQueueRepository.STATUS_READY || row.persoProjectSeq == null) {
+                throw ApiErrorException(HttpStatusCode.Conflict, "not_ready")
+            }
+            val pc = persoClient
+                ?: throw ApiErrorException(HttpStatusCode.ServiceUnavailable, "script_unavailable")
+            val page = try {
+                pc.getFullAudioSeparationScript(row.persoProjectSeq)
+            } catch (e: Exception) {
+                log.warn("script fetch failed jobId={}: {}", jobId, e.message)
+                throw ApiErrorException(HttpStatusCode.BadGateway, "script_failed")
+            }
+            call.respond(HttpStatusCode.OK, assembleScriptDraft(page))
+        }
     }
+
+    // GET /api/v2/separations — owner+project 의 저장된 분리 목록(최신순). 패널 오픈/로그인 시
+    // 결과 카드 복원용(서버가 cross-device source-of-truth). projectId 생략 → NULL(no-project) 버킷.
+    get("/separations") {
+        val principal = jwtSecret?.let { call.requireUser(it) }
+        val projectId = call.request.queryParameters["projectId"]?.trim()?.takeIf { it.isNotEmpty() }
+        if (principal == null || queueRepository == null) {
+            call.respond(HttpStatusCode.OK, SeparationHistoryResponse(emptyList()))
+            return@get
+        }
+        val items = queueRepository.listReadyHistory(principal.userId, projectId).map { r ->
+            val stems = r.stemsJson?.let { json ->
+                runCatching { AppJson.decodeFromString(ListSerializer(StemMeta.serializer()), json) }
+                    .getOrDefault(emptyList())
+            }?.map { HistoryStem(it.stemId, it.label) } ?: emptyList()
+            SeparationHistoryItem(
+                jobId = r.jobId,
+                fileName = r.fileName,
+                byteLength = r.byteLength,
+                durationMs = r.durationMs,
+                createdAt = r.createdAtMs,
+                hasScript = r.hasScript,
+                stems = stems,
+            )
+        }
+        call.respond(HttpStatusCode.OK, SeparationHistoryResponse(items))
+    }
+}
+
+/**
+ * Perso script page → 클라이언트 ScriptDraft 매핑. plugin server/ 의 assembleDraft 포팅:
+ * 화자 인덱스를 모아 "Speaker N" 라벨링, 문장을 segment(offset~offset+duration)로 변환.
+ */
+private fun assembleScriptDraft(page: PersoScriptPage): ScriptDraftResponse {
+    val indices = sortedSetOf<Int>()
+    page.speakers.forEach { indices.add(it.speakerOrderIndex) }
+    page.sentences.forEach { indices.add(it.speakerOrderIndex) }
+    if (indices.isEmpty()) indices.add(1)
+    val speakers = indices.map { ScriptSpeaker(index = it, label = "Speaker $it") }
+    val segments = page.sentences.mapIndexed { idx, s ->
+        ScriptSegment(
+            id = "seg-${if (s.seq != 0L) s.seq else (idx + 1).toLong()}",
+            speakerIndex = s.speakerOrderIndex,
+            text = s.originalText,
+            startMs = s.offsetMs,
+            endMs = s.offsetMs + s.durationMs,
+        )
+    }
+    return ScriptDraftResponse(speakers = speakers, segments = segments)
 }
 
 /**

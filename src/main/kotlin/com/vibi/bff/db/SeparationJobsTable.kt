@@ -37,5 +37,11 @@ object SeparationJobsTable : Table("separation_jobs") {
     val stemsJson = text("stems_json").nullable()
     val actualDurationMs = long("actual_duration_ms").nullable()
 
+    // V12: Adobe 플러그인 history 메타. projectId 는 Premiere 프로젝트 버킷(모바일 NULL),
+    // fileName/byteLength 는 복원 카드 표시용. 모두 plugin 제출 경로가 채운다(없으면 NULL).
+    val projectId = text("project_id").nullable()
+    val fileName = text("file_name").nullable()
+    val byteLength = long("byte_length").nullable()
+
     override val primaryKey = PrimaryKey(id)
 }
