@@ -313,4 +313,39 @@ class PersoClient(
         }
     }
 
+    // ── Audio-separation diarized script ─────────────────────────────────────
+    /**
+     * 분리 프로젝트의 diarized script 전체를 cursor 페이지네이션으로 모아 반환. 새 STT 잡 없이
+     * 분리가 이미 만든 script 를 읽는다. plugin server/ 의 getFullAudioSeparationScript 포팅.
+     * guard: 무한 cursor 루프 방지(최대 100 page).
+     */
+    suspend fun getFullAudioSeparationScript(projectSeq: Long): PersoScriptPage {
+        val sentences = mutableListOf<PersoScriptSentence>()
+        var speakers: List<PersoScriptSpeaker> = emptyList()
+        var cursorId: Long? = null
+        repeat(100) {
+            val page = getAudioSeparationScriptPage(projectSeq, cursorId)
+            sentences += page.sentences
+            if (page.speakers.isNotEmpty()) speakers = page.speakers
+            if (!page.hasNext || page.nextCursorId == null) {
+                return PersoScriptPage(hasNext = false, nextCursorId = null, sentences = sentences, speakers = speakers)
+            }
+            cursorId = page.nextCursorId
+        }
+        return PersoScriptPage(hasNext = false, nextCursorId = null, sentences = sentences, speakers = speakers)
+    }
+
+    private suspend fun getAudioSeparationScriptPage(projectSeq: Long, cursorId: Long?): PersoScriptPage {
+        return withTransientRetry("getAudioSeparationScript($projectSeq,${cursorId ?: "start"})") {
+            val response = httpClient.get(url(
+                "/video-translator/api/v1/projects/$projectSeq/spaces/${config.spaceSeq}/audio-separation/script"
+            )) {
+                authHeader()
+                if (cursorId != null) parameter("cursorId", cursorId)
+            }
+            checkResponse(response)
+            response.body<PersoEnvelope<PersoScriptPage>>().result
+        }
+    }
+
 }

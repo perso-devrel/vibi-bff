@@ -6,16 +6,20 @@ import io.ktor.server.application.*
 import io.ktor.server.response.*
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
+import kotlinx.serialization.Serializable
 import java.io.File
 
 /**
  * 큰 산출물 다운로드 응답 단일 진입점.
  *
- * - [store] != null  → 파일을 R2 에 (idempotent) 업로드 후 SigV4 presigned URL 로 302 redirect.
+ * - [store] != null  → 파일을 R2 에 (idempotent) 업로드 후 SigV4 presigned URL 로 응답:
+ *     - [asJsonUrl] == false (기본) → 302 redirect. 네이티브 HTTP 클라(모바일)가 그대로 따라감.
+ *     - [asJsonUrl] == true → `{ url }` JSON. UXP(Adobe 패널) fetch 가 302 를 깔끔히 못 따라가므로
+ *       capability-token 없이 Bearer 로 인증한 호출엔 JSON 으로 내려 클라가 url 을 직접(헤더 없이) 받게 한다.
  *   Cloud Run 인스턴스가 바이트 전송으로 잠기지 않아 동시 다운로드 처리량 회복. R2 egress 무료.
- * - [store] == null  → 기존 respondFile streaming fallback (로컬 dev / R2 미사용).
+ * - [store] == null  → 기존 respondFile streaming fallback (로컬 dev / R2 미사용). asJsonUrl 무관(바이트 스트림).
  *
- * 호출 전 caller 가 token 검증 / status 체크 / file.exists() 확인 끝낸 상태여야 함.
+ * 호출 전 caller 가 token/Bearer 인증 / status 체크 / file.exists() 확인 끝낸 상태여야 함.
  */
 suspend fun ApplicationCall.respondDownload(
     file: File,
@@ -23,6 +27,7 @@ suspend fun ApplicationCall.respondDownload(
     contentType: ContentType,
     downloadFilename: String?,
     store: ObjectStore?,
+    asJsonUrl: Boolean = false,
 ) {
     if (store != null) {
         val url = withContext(Dispatchers.IO) {
@@ -33,7 +38,11 @@ suspend fun ApplicationCall.respondDownload(
                 contentType = contentType.toString(),
             )
         }
-        respondRedirect(url, permanent = false)
+        if (asJsonUrl) {
+            respond(HttpStatusCode.OK, SignedDownloadUrl(url))
+        } else {
+            respondRedirect(url, permanent = false)
+        }
         return
     }
 
@@ -78,6 +87,14 @@ object ObjectKey {
     private val SHA256_HEX_RE = Regex("^[0-9a-f]{64}$")
     val ALLOWED_ASSET_EXTS: Set<String> = setOf("mp4", "mov", "m4a", "mp3", "wav", "aac")
 }
+
+/**
+ * R2 presigned 다운로드 URL 을 redirect 대신 JSON 으로 내려줄 때의 body. UXP(Adobe 패널) fetch 가
+ * 302 를 못 따라가므로 capability-token 없이 Bearer 로 인증한 stem 다운로드엔 `{ url }` 로 응답한다.
+ * 필드명 `url` 은 plugin 클라(`src/jobs/separationClient.ts`)가 읽는 키와 1:1.
+ */
+@Serializable
+data class SignedDownloadUrl(val url: String)
 
 /** 확장자 → Content-Type. 알 수 없는 확장자는 [fallback] 반환. */
 fun contentTypeForExtension(ext: String, fallback: ContentType): ContentType =

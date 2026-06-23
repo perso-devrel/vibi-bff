@@ -32,6 +32,7 @@ import kotlin.time.Duration.Companion.minutes
 val RL_AUTH = RateLimitName("auth")
 val RL_RENDER = RateLimitName("render")
 val RL_SEPARATE = RateLimitName("separate")
+val RL_DEVICE = RateLimitName("device")
 
 fun Application.configureRateLimiting(jwtSecret: String) {
     install(RateLimit) {
@@ -49,6 +50,12 @@ fun Application.configureRateLimiting(jwtSecret: String) {
         register(RL_SEPARATE) {
             rateLimiter(limit = 20, refillPeriod = 1.minutes)
             requestKey { call -> call.userOrIpKey(jwtSecret) }
+        }
+        // device-flow start/poll — 패널이 2초마다 폴링(분당 ~30)하므로 RL_AUTH(10/분)보다 관대.
+        // 크레딧/유저를 만들지 않는 경로라(돈 무관) 상한을 넉넉히. IP 키.
+        register(RL_DEVICE) {
+            rateLimiter(limit = 60, refillPeriod = 1.minutes)
+            requestKey { call -> call.clientIpKey() }
         }
     }
 }

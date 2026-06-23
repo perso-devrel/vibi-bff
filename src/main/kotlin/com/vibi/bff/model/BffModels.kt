@@ -282,6 +282,11 @@ data class RenderInputCacheResponse(
 @Serializable
 data class SeparationSpec(
     val sourceLanguageCode: String = "auto",
+    // Adobe 플러그인 history 메타(모바일은 omit → null). 제출이 separation_jobs 에 저장해
+    // GET /separations 카드 복원에 쓴다. 분리 파라미터가 아니라 메타지만 단일 spec JSON 으로 전달.
+    val projectId: String? = null,
+    val fileName: String? = null,
+    val byteLength: Long? = null,
 )
 
 @Serializable

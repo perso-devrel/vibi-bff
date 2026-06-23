@@ -4,12 +4,19 @@ import com.vibi.bff.plugins.AppJson
 import com.vibi.bff.plugins.configureErrorHandling
 import com.vibi.bff.plugins.configureRateLimiting
 import com.vibi.bff.plugins.configureSerialization
+import com.vibi.bff.model.PersoScriptPage
+import com.vibi.bff.model.PersoScriptSentence
+import com.vibi.bff.model.PersoScriptSpeaker
 import com.vibi.bff.routes.separationRoutes
 import com.vibi.bff.service.CreditRepository
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.InsufficientCreditsException
 import com.vibi.bff.service.MediaTrimmer
+import com.vibi.bff.service.PersoClient
+import com.vibi.bff.service.ScriptJobRow
+import com.vibi.bff.service.SeparationHistoryRow
 import com.vibi.bff.service.SeparationJob
+import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.UserRepository
@@ -51,6 +58,8 @@ class SeparationRoutesTest {
         jwtSecret: String? = null,
         creditRepository: CreditRepository? = null,
         userRepository: UserRepository? = null,
+        queueRepository: SeparationQueueRepository? = null,
+        persoClient: PersoClient? = null,
         block: suspend ApplicationTestBuilder.() -> Unit,
     ) = testApplication {
         application {
@@ -64,9 +73,11 @@ class SeparationRoutesTest {
                 separationRoutes(
                     separationService, signer, fileStorage,
                     appConfig, objectStore = null,
+                    queueRepository = queueRepository,
                     jwtSecret = jwtSecret,
                     creditRepository = creditRepository,
                     userRepository = userRepository,
+                    persoClient = persoClient,
                 )
             }
         }
@@ -83,10 +94,22 @@ class SeparationRoutesTest {
     }
 
     @Test
-    fun `GET stem without token returns 400`() = testApp {
+    fun `GET stem without token or bearer returns 401`() = testApp(jwtSecret = testJwtSecret) {
+        // 토큰 없이 호출하면 Bearer JWT 가 필수 — 토큰·헤더 둘 다 없으면 401.
         val response = client.get("/api/v2/separate/sep-x/stem/background")
-        assertEquals(HttpStatusCode.BadRequest, response.status)
+        assertEquals(HttpStatusCode.Unauthorized, response.status)
     }
+
+    @Test
+    fun `GET stem without token but with valid bearer is accepted (404 for missing job)`() =
+        testApp(jwtSecret = testJwtSecret) {
+            // UXP 패널 경로: 토큰 대신 Bearer 로 인증 → token-required 안 나고 정상 진입(잡 없으면 404).
+            coEvery { separationService.getJob("sep-z") } returns null
+            val response = client.get("/api/v2/separate/sep-z/stem/background") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(UUID.randomUUID(), testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.NotFound, response.status)
+        }
 
     @Test
     fun `GET stem with invalid token returns 403`() = testApp {
@@ -183,11 +206,11 @@ class SeparationRoutesTest {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
         // probeDurationMs 실패 → size-based duration fallback 경로 검증. 8MB / 8KB/s = 1000s
-        // = 1_000_000ms ≈ 16.7분 → 시작된 5분 블록 4개 → reserve cost = 4. probe-fail 만으로
+        // = 1_000_000ms ≈ 16.7분 → 시작된 1분 블록 17개 → reserve cost = 17. probe-fail 만으로
         // floor 1 credit 으로 떨어지는 undercharge 우회가 막혔음을 비례 차감 값으로 실증한다.
         val bigBytes = ByteArray(8_000_000) { 0 }
-        every { creditRepo.reserve(eq(callerId), any(), eq(4)) } returns
-            CreditRepository.ReserveOutcome(charged = 4, balance = 100)
+        every { creditRepo.reserve(eq(callerId), any(), eq(17)) } returns
+            CreditRepository.ReserveOutcome(charged = 17, balance = 100)
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
         coEvery { MediaTrimmer.probeDurationMs(any()) } returns null
@@ -206,7 +229,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(4)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(17)) }
         }
     }
 
@@ -333,12 +356,12 @@ class SeparationRoutesTest {
     }
 
     @Test
-    fun `POST separate charges credits proportional to audio duration in 5min blocks`() {
+    fun `POST separate charges credits proportional to audio duration in 1min blocks`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
         every { creditRepo.reserve(any(), any(), any()) } returns
-            CreditRepository.ReserveOutcome(charged = 3, balance = 1)
-        // probed duration 12분 → 시작된 5분 블록 3개 → reserve cost = 3. 라우트가 측정 길이를
+            CreditRepository.ReserveOutcome(charged = 12, balance = 1)
+        // probed duration 12분 → 시작된 1분 블록 12개 → reserve cost = 12. 라우트가 측정 길이를
         // CreditCost.forSeparation 으로 그대로 반영하는지 (견적-차감 단일 source) 검증.
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
@@ -358,8 +381,102 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(3)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(12)) }
             verify(exactly = 0) { creditRepo.refund(any()) }
+        }
+    }
+
+    // ── Adobe history (목록/삭제/script) ──────────────────────────────────────
+
+    @Test
+    fun `GET separations returns the owner's ready history`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        coEvery { queue.listReadyHistory(callerId, null) } returns listOf(
+            SeparationHistoryRow(
+                jobId = "sep-1",
+                fileName = "song.mp3",
+                byteLength = 1000L,
+                durationMs = 60_000L,
+                createdAtMs = 1_700_000_000_000L,
+                stemsJson = """[{"stemId":"background","label":"BG","ext":"wav"}]""",
+                hasScript = true,
+            ),
+        )
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue) {
+            val res = client.get("/api/v2/separations") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.OK, res.status)
+            val seps = AppJson.parseToJsonElement(res.bodyAsText()).jsonObject["separations"]!!.jsonArray
+            assertEquals(1, seps.size)
+            val first = seps[0].jsonObject
+            assertEquals("sep-1", first["jobId"]!!.jsonPrimitive.content)
+            assertEquals(true, first["hasScript"]!!.jsonPrimitive.boolean)
+            assertEquals("background", first["stems"]!!.jsonArray[0].jsonObject["stemId"]!!.jsonPrimitive.content)
+        }
+        coVerify { queue.listReadyHistory(callerId, null) }
+    }
+
+    @Test
+    fun `GET separations is empty without auth`() = testApp(queueRepository = mockk()) {
+        // jwtSecret 미주입 → principal null → 빈 목록(인증 강제 못 하는 dev/테스트 분기).
+        val res = client.get("/api/v2/separations")
+        assertEquals(HttpStatusCode.OK, res.status)
+        assertEquals(0, AppJson.parseToJsonElement(res.bodyAsText()).jsonObject["separations"]!!.jsonArray.size)
+    }
+
+    @Test
+    fun `DELETE separation returns 204`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        coEvery { queue.deleteOwnedReturningStemsJson("sep-9", callerId) } returns null
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue) {
+            val res = client.delete("/api/v2/separate/sep-9") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.NoContent, res.status)
+        }
+        coVerify { queue.deleteOwnedReturningStemsJson("sep-9", callerId) }
+    }
+
+    @Test
+    fun `GET script returns assembled draft from Perso projectSeq`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        val perso = mockk<PersoClient>()
+        coEvery { queue.loadForScript("sep-7") } returns ScriptJobRow(callerId, "READY", 42L)
+        coEvery { perso.getFullAudioSeparationScript(42L) } returns PersoScriptPage(
+            hasNext = false,
+            nextCursorId = null,
+            sentences = listOf(
+                PersoScriptSentence(seq = 1, speakerOrderIndex = 1, offsetMs = 0, durationMs = 1000, originalText = "hello"),
+            ),
+            speakers = listOf(PersoScriptSpeaker(speakerOrderIndex = 1)),
+        )
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue, persoClient = perso) {
+            val res = client.get("/api/v2/separate/sep-7/script") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.OK, res.status)
+            val body = AppJson.parseToJsonElement(res.bodyAsText()).jsonObject
+            assertEquals(1, body["speakers"]!!.jsonArray.size)
+            val seg = body["segments"]!!.jsonArray[0].jsonObject
+            assertEquals("hello", seg["text"]!!.jsonPrimitive.content)
+            assertEquals(1000, seg["endMs"]!!.jsonPrimitive.int)
+        }
+    }
+
+    @Test
+    fun `GET script returns 409 when not ready`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        coEvery { queue.loadForScript("sep-x") } returns ScriptJobRow(callerId, "QUEUED", null)
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue, persoClient = mockk()) {
+            val res = client.get("/api/v2/separate/sep-x/script") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.Conflict, res.status)
         }
     }
 }

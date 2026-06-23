@@ -226,7 +226,16 @@ class SeparationService(
             // runQueuedJob 호출. 본 호출은 그 자리에서 DB INSERT 만 — Perso 호출은 dispatcher 가.
             scope.launch {
                 runCatching {
-                    queue.enqueue(jobId, userId, renderJobId, sourceDurationMs, bffInstanceId)
+                    queue.enqueue(
+                        jobId = jobId,
+                        userId = userId,
+                        renderJobId = renderJobId,
+                        sourceDurationMs = sourceDurationMs,
+                        bffInstanceId = bffInstanceId,
+                        projectId = spec.projectId,
+                        fileName = spec.fileName,
+                        byteLength = spec.byteLength,
+                    )
                 }.onFailure { e ->
                     // enqueue 실패면 dispatcher 가 영원히 모름 → in-memory 도 FAILED 마킹.
                     log.error("Failed to enqueue separation jobId={}: {}", jobId, e.message, e)

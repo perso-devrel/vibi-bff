@@ -7,7 +7,9 @@ import io.sentry.Sentry
 import com.vibi.bff.service.AdminRepository
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.CreditRepository
+import com.vibi.bff.service.DeviceCodeRepository
 import com.vibi.bff.service.ExternalApiCallsRepository
+import com.vibi.bff.service.GoogleOAuthClient
 import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.JobAnalyticsRepository
@@ -106,6 +108,7 @@ fun Application.module() {
     val separationQueueRepository = SeparationQueueRepository()
     val adminRepository = AdminRepository()
     val creditRepository = CreditRepository()
+    val deviceCodeRepository = DeviceCodeRepository()
 
     // BFF 인스턴스 단위 UUID — SeparationDispatcher 가 "자기 인스턴스가 enqueue 한 QUEUED 만
     // claim" 정책의 키. Cloud Run 이 새 컨테이너 띄울 때마다 새 UUID, 같은 인스턴스 lifetime
@@ -197,6 +200,9 @@ fun Application.module() {
                 .onFailure { cleanupLog.warn("asset cache sweep failed (will retry in 1h): {}", it.message, it) }
             runCatching { fileStorage.sweepUploadsOlderThan(TimeUnit.HOURS.toMillis(uploadsTtlHours)) }
                 .onFailure { cleanupLog.warn("uploads sweep failed (will retry in 1h): {}", it.message, it) }
+            // 만료된 device-code(로그인 미완료/중단분) 정리 — TTL 10분이라 1h sweep 으로 충분.
+            runCatching { deviceCodeRepository.deleteExpired() }
+                .onFailure { cleanupLog.warn("device code sweep failed (will retry in 1h): {}", it.message, it) }
             delay(TimeUnit.HOURS.toMillis(1))
         }
     }
@@ -265,6 +271,20 @@ fun Application.module() {
 
     val authService = AuthService(appConfig.auth, httpClient, userRepository, creditRepository)
 
+    // UXP 패널 device-flow 의 server-side Google OAuth. client id/secret 둘 다 set 일 때만 활성
+    // (아니면 null → /auth/google/start 가 "not configured"). redirect URI 는 BFF base + 콜백 경로.
+    val googleOAuthClient = appConfig.auth.googleOauthClientId
+        ?.let { clientId ->
+            appConfig.auth.googleOauthClientSecret?.let { clientSecret ->
+                GoogleOAuthClient(
+                    httpClient = httpClient,
+                    clientId = clientId,
+                    clientSecret = clientSecret,
+                    redirectUri = "${appConfig.baseUrl}/api/v2/auth/google/callback",
+                )
+            }
+        }
+
     // IAP receipt verifiers — config 가 null (미설정) 이면 verifier 도 null. 라우트가 null
     // 분기로 `iap_unconfigured` 400 응답하므로 stub 통과 없음. 출시 외 환경 (dev/test) 에서도
     // 영수증 검증을 진짜로 통과시키려면 sandbox env + sandbox tester 영수증 필요.
@@ -302,6 +322,7 @@ fun Application.module() {
         adminRepository,
         userRepository, creditRepository,
         appleReceiptVerifier, googleReceiptVerifier,
+        deviceCodeRepository, googleOAuthClient,
     )
 
     val shutdownHooks: List<() -> Unit> = listOf(
