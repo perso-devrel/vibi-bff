@@ -79,3 +79,35 @@ internal suspend inline fun <reified T> parseOptionalUploadAndSpec(
     }
     return sourceFile to spec
 }
+
+/**
+ * spec 없이 단일 파일 업로드만 받는 멀티파트 파서(예: /peaks 의 "audio"). 업로드를 디스크로
+ * 스트리밍해 RAM 에 전체 바디를 들지 않는다. 파싱 도중 throw 시 누적 파일 정리 후 rethrow.
+ */
+internal suspend fun parseSingleFileUpload(
+    multipart: MultiPartData,
+    fileStorage: FileStorageService,
+    maxFileSize: Long,
+    fileFieldName: String,
+    defaultFileName: String = "audio.bin",
+): File? {
+    var file: File? = null
+    try {
+        multipart.forEachPart { part ->
+            if (part is PartData.FileItem && part.name == fileFieldName) {
+                @Suppress("DEPRECATION")
+                val blobPath = fileStorage.saveUpload(
+                    part.originalFileName ?: defaultFileName,
+                    part.streamProvider(),
+                    maxFileSize,
+                )
+                file = fileStorage.getUploadFile(blobPath)
+            }
+            part.dispose()
+        }
+    } catch (e: Throwable) {
+        file?.let { runCatching { it.delete() } }
+        throw e
+    }
+    return file
+}

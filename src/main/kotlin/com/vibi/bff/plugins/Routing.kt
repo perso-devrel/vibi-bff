@@ -7,6 +7,7 @@ import com.vibi.bff.routes.authRoutes
 import com.vibi.bff.routes.creditRoutes
 import com.vibi.bff.routes.deviceAuthRoutes
 import com.vibi.bff.routes.devicePageHtml
+import com.vibi.bff.routes.peaksRoutes
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.routes.separationRoutes
 import com.vibi.bff.service.AccountContentEraser
@@ -140,6 +141,8 @@ fun Application.configureRouting(
                 userRepository = userRepository,
                 persoClient = persoClient,
             )
+            // 입력 파형 미리보기(UXP 가 mp3/AAC 디코드 불가). 무차감 — 자체 in-flight cap 으로 보호.
+            peaksRoutes(fileStorage, jwtSecret = appConfig.auth.jwtSecret)
             adminRoutes(adminRepository, jwtSecret = appConfig.auth.jwtSecret)
 
             // 임시 — 음성분리 mock. testdata/<startSec>-<endSec>/ 디렉터리 구조.
