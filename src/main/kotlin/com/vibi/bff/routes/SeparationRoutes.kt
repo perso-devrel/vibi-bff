@@ -42,6 +42,10 @@ private val log = LoggerFactory.getLogger("com.vibi.bff.routes.SeparationRoutes"
  * ogg 등은 모두 reject — flac 은 Perso 가 silent fail 하는 회귀 (CLAUDE.md 참조). */
 private val SEPARATION_AUDIO_EXTENSIONS = setOf("m4a", "mp3", "wav")
 
+/** 단일 분리 잡의 측정 길이 상한(분). Perso 는 분당 과금 + WAV stem egress 도 분 비례 → 무제한 길이는
+ *  무제한 비용. 서버 측정 길이(computeSeparationSourceDurationMs)에 적용. env MAX_SEPARATION_MINUTES 조정. */
+private val MAX_SEPARATION_MINUTES = (System.getenv("MAX_SEPARATION_MINUTES")?.toIntOrNull() ?: 60).coerceAtLeast(1)
+
 fun Route.separationRoutes(
     separationService: SeparationService,
     signer: SignedUrlService,
@@ -114,6 +118,15 @@ fun Route.separationRoutes(
             var sourceOwned = true
             try {
                 val sourceDurationMs = computeSeparationSourceDurationMs(sourceFile)
+                // 단일 잡 측정 길이 상한 — 한 번의 submit 으로 임의 장시간 paid 잡(Perso 비용 + egress)이
+                // 도는 것 차단. 서버 측정 길이 기준(클라 durationMs hint 는 과금/캡에 안 씀). 초과 시 422.
+                if (sourceDurationMs > MAX_SEPARATION_MINUTES * 60_000L) {
+                    throw ApiErrorException(
+                        HttpStatusCode.UnprocessableEntity,
+                        "audio_too_long",
+                        "최대 ${MAX_SEPARATION_MINUTES}분까지 분리 가능합니다.",
+                    )
+                }
 
                 // 라우트가 jobId 를 미리 생성해 차감 ledger 의 키로 사용.
                 val newJobId = "sep-${UUID.randomUUID()}"

@@ -74,6 +74,30 @@ class PersoClient(
         throw lastErr ?: RuntimeException("$label failed after 3 attempts")
     }
 
+    /**
+     * BILLABLE submit(audio-separation) 전용 retry. [withTransientRetry] 와 달리 **Perso 5xx 만**
+     * 재시도한다 — 5xx 는 Perso 가 요청을 받고 에러 응답한 것이라 과금 프로젝트가 생성되지 않아 retry 가
+     * 안전(흔한 F5001 INTERNAL_SERVER_ERROR 회복). 반대로 timeout/IOException 은 **응답이 안 온 것**이라
+     * Perso 가 이미 프로젝트를 만들었을 수 있고, 그 상태로 retry 하면 **두 번째 과금 프로젝트**가 생긴다
+     * (Perso 는 Idempotency-Key/dedup API 없음). → timeout/IO 는 재시도하지 않고 즉시 throw 해서
+     * 잡 실패 → onJobFailed 환불 → 사용자가 재시도(플러그인 재시도 버튼)하도록 한다.
+     */
+    private suspend fun <T> withBillableSubmitRetry(label: String, block: suspend () -> T): T {
+        var lastErr: PersoApiException? = null
+        repeat(3) { attempt ->
+            try {
+                return block()
+            } catch (e: PersoApiException) {
+                if (e.statusCode in 400..499) throw e // 4xx 는 재시도 무의미
+                lastErr = e
+                log.warn("{} {} (attempt {}/3) — retrying in 3s: {}", label, e.statusCode, attempt + 1, e.message)
+                kotlinx.coroutines.delay(3000)
+            }
+            // timeout(HttpRequestTimeoutException)/IOException 등은 catch 안 함 → 즉시 전파(이중과금 방지).
+        }
+        throw lastErr ?: RuntimeException("$label failed after 3 attempts")
+    }
+
     // ── Step 1: Get SAS token ────────────────────────────────────────────────
     suspend fun getSasToken(fileName: String): PersoSasTokenResponse {
         val encoded = URLEncoder.encode(fileName, Charsets.UTF_8)
@@ -177,7 +201,10 @@ class PersoClient(
     ): Long {
         log.info("Perso submitAudioSeparation: mediaSeq={} isVideoProject={} title={}",
             mediaSeq, isVideoProject, title)
-        return withTransientRetry("submitAudioSeparation(mediaSeq=$mediaSeq)") {
+        // BILLABLE submit — withBillableSubmitRetry 로 Perso 5xx 만 재시도(에러 응답=프로젝트 미생성→
+        // 재시도 안전, 흔한 F5001 회복). timeout/IOException(응답 없음=성공했을 수도)은 재시도 안 함 →
+        // 이중 프로젝트=이중 Perso 과금 방지. 실패는 잡 실패 → 환불 → 사용자 재시도(플러그인 재시도 버튼).
+        return withBillableSubmitRetry("submitAudioSeparation(mediaSeq=$mediaSeq)") {
             val response = httpClient.post(url("/video-translator/api/v1/projects/spaces/${config.spaceSeq}/audio-separation")) {
                 authHeader()
                 contentType(ContentType.Application.Json)
