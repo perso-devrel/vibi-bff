@@ -360,6 +360,8 @@ fun Route.separationRoutes(
                     val ext = m.ext.ifBlank { "flac" }
                     withContext(Dispatchers.IO) {
                         objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, ext))
+                        // 플러그인 경로가 lazy 로 만든 WAV transcode 캐시(StemMeta 에 없어 ext 로 안 잡힘)도 purge — orphan 방지.
+                        if (ext != "wav") objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, "wav"))
                     }
                 }
             }

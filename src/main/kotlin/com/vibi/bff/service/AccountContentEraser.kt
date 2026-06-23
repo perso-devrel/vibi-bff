@@ -69,8 +69,10 @@ class AccountContentEraser(
                     AppJson.decodeFromString(ListSerializer(StemMeta.serializer()), stemsJson)
                 }.getOrDefault(emptyList())
                 for (m in metas) {
-                    val key = ObjectKey.separationStem(jobId, m.stemId, m.ext.ifBlank { "flac" })
-                    if (objectStore.deleteObject(key)) r2Deleted++
+                    val ext = m.ext.ifBlank { "flac" }
+                    if (objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, ext))) r2Deleted++
+                    // 플러그인 경로가 lazy 로 만든 WAV transcode 캐시(StemMeta 에 없어 ext 로 안 잡힘)도 purge — right-to-erasure 완전성.
+                    if (ext != "wav" && objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, "wav"))) r2Deleted++
                 }
             }
         }

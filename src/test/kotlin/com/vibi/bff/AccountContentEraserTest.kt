@@ -5,9 +5,13 @@ import com.vibi.bff.db.DbBootstrap
 import com.vibi.bff.model.AuthProvider
 import com.vibi.bff.service.AccountContentEraser
 import com.vibi.bff.service.JobAnalyticsRepository
+import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.UserRepository
 import com.zaxxer.hikari.HikariDataSource
+import io.mockk.every
+import io.mockk.mockk
+import io.mockk.verify
 import java.io.File
 import java.nio.file.Files
 import java.util.UUID
@@ -87,6 +91,24 @@ class AccountContentEraserTest {
         assertFalse(sepDir.exists(), "victim 분리 outputDir 삭제되어야 함")
         assertFalse(renderFile.exists(), "victim 렌더 산출물 삭제되어야 함")
         assertTrue(otherDir.exists(), "다른 사용자 콘텐츠는 보존되어야 함")
+    }
+
+    @Test
+    fun `erase purges both the source stem and the derived WAV plugin cache from R2`() = runBlocking {
+        val victim = users.upsert(AuthProvider.GOOGLE, "g-wav", "w@example.com", "W", null).id
+        val sepJob = "sep-${UUID.randomUUID()}"
+        queue.enqueue(sepJob, victim, null, 1_000, "inst-1")
+        queue.markReady(sepJob, stemsJson = """[{"stemId":"speaker_0","label":"Speaker 0","ext":"flac"}]""")
+
+        val store = mockk<ObjectStore>(relaxed = true)
+        every { store.deleteObject(any()) } returns true
+        val eraserWithR2 = AccountContentEraser(separationDir, renderDir, objectStore = store)
+
+        eraserWithR2.erase(victim)
+
+        // 소스 FLAC 키 + 플러그인 경로가 lazy 로 만든 파생 WAV 캐시 키 둘 다 purge 되어야 함 (orphan/erasure 완전성).
+        verify { store.deleteObject("separation/$sepJob/speaker_0.flac") }
+        verify { store.deleteObject("separation/$sepJob/speaker_0.wav") }
     }
 
     @Test
