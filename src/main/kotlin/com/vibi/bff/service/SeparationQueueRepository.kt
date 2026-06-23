@@ -44,6 +44,10 @@ class SeparationQueueRepository {
         renderJobId: String?,
         sourceDurationMs: Long,
         bffInstanceId: String,
+        // Adobe 플러그인 history 메타(모바일은 null). GET /separations 카드 복원에 쓰인다.
+        projectId: String? = null,
+        fileName: String? = null,
+        byteLength: Long? = null,
     ) = newSuspendedTransaction(Dispatchers.IO) {
         val now = Instant.now()
         SeparationJobsTable.insert {
@@ -56,6 +60,9 @@ class SeparationQueueRepository {
             it[SeparationJobsTable.queuedAt] = now
             it[SeparationJobsTable.bffInstanceId] = bffInstanceId
             it[SeparationJobsTable.attemptCount] = 0
+            it[SeparationJobsTable.projectId] = projectId
+            it[SeparationJobsTable.fileName] = fileName
+            it[SeparationJobsTable.byteLength] = byteLength
         }
         Unit
     }
