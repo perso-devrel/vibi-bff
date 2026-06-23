@@ -5,12 +5,16 @@ import com.vibi.bff.routes.adminRoutes
 import com.vibi.bff.routes.assetRoutes
 import com.vibi.bff.routes.authRoutes
 import com.vibi.bff.routes.creditRoutes
+import com.vibi.bff.routes.deviceAuthRoutes
+import com.vibi.bff.routes.devicePageHtml
 import com.vibi.bff.routes.renderRoutes
 import com.vibi.bff.routes.separationRoutes
 import com.vibi.bff.service.AccountContentEraser
 import com.vibi.bff.service.AdminRepository
 import com.vibi.bff.service.AuthService
 import com.vibi.bff.service.CreditRepository
+import com.vibi.bff.service.DeviceCodeRepository
+import com.vibi.bff.service.GoogleOAuthClient
 import com.vibi.bff.service.FileStorageService
 import com.vibi.bff.service.ObjectStore
 import com.vibi.bff.service.PersoClient
@@ -27,6 +31,7 @@ import io.ktor.server.application.*
 import io.ktor.server.http.content.*
 import io.ktor.server.plugins.ratelimit.*
 import io.ktor.server.plugins.swagger.*
+import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import java.io.File
@@ -47,6 +52,8 @@ fun Application.configureRouting(
     creditRepository: CreditRepository,
     appleReceiptVerifier: AppleReceiptVerifier?,
     googleReceiptVerifier: GoogleReceiptVerifier?,
+    deviceCodeRepository: DeviceCodeRepository,
+    googleOAuthClient: GoogleOAuthClient?,
 ) {
     val log = org.slf4j.LoggerFactory.getLogger("com.vibi.bff.plugins.BootCheck")
     // 회원탈퇴 시 사용자 콘텐츠(분리 스템·렌더 산출물)를 로컬 + R2 에서 제거 (GDPR/CCPA).
@@ -60,6 +67,12 @@ fun Application.configureRouting(
         // 레이트리밋 밖에 두어 콜드스타트 트래픽 라우팅 판단에 쓰이게 한다.
         get("/healthz") {
             call.respondText("{\"status\":\"ok\"}", ContentType.Application.Json)
+        }
+        // device-flow 로그인 페이지 — 비-/api/v2, 브라우저가 직접 연다. `code` 쿼리로 패널이 보여준
+        // user-code 를 받아 명시 동의(RFC 8628 피싱 완화) 후 /api/v2/auth/google/start 로 제출.
+        get("/device") {
+            val code = call.request.queryParameters["code"].orEmpty()
+            call.respondText(devicePageHtml(code), ContentType.Text.Html)
         }
         // Swagger UI — 전체 API 스펙을 무인증 노출하므로 운영에선 끈다. ENABLE_SWAGGER=true
         // (로컬 dev) 일 때만 마운트해 정찰 표면을 줄인다.
@@ -95,6 +108,15 @@ fun Application.configureRouting(
             rateLimit(RL_AUTH) {
                 authRoutes(authService, userRepository, accountContentEraser, jwtSecret = appConfig.auth.jwtSecret)
             }
+            // UXP 패널 device-code 로그인. 자체적으로 RL_DEVICE(start/poll)·RL_AUTH(google)을
+            // 적용하므로 바깥 rateLimit 으로 감싸지 않는다.
+            deviceAuthRoutes(
+                deviceCodeRepository,
+                authService,
+                googleOAuthClient,
+                baseUrl = appConfig.baseUrl,
+                jwtSecret = appConfig.auth.jwtSecret,
+            )
             creditRoutes(
                 creditRepository,
                 appleVerifier = appleReceiptVerifier,

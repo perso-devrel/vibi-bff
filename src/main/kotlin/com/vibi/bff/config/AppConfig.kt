@@ -209,12 +209,18 @@ data class PersoConfig(
  *   진입 시 명시적으로 거부.
  * - [jwtSecret] — HMAC-SHA256 서명 키. 32+ chars (`openssl rand -hex 32`).
  * - [jwtExpirySeconds] — 발급된 access token 의 만료까지 초.
+ * - [googleOauthClientId] / [googleOauthClientSecret] — UXP 패널 device-flow 의 server-side
+ *   OAuth code 교환용 web 클라이언트. 둘 다 set 일 때만 Google device 로그인 활성(아니면
+ *   `/auth/google/start` 가 500 "not configured"). [googleOauthClientId] 는 교환된 id_token 의
+ *   aud 이므로 loadConfig 가 [googleClientIds] 에 자동 병합해 verifyGoogleIdToken 을 통과시킨다.
  */
 data class AuthConfig(
     val googleClientIds: List<String>,
     val appleClientIds: List<String>,
     val jwtSecret: String,
     val jwtExpirySeconds: Long,
+    val googleOauthClientId: String? = null,
+    val googleOauthClientSecret: String? = null,
 ) {
     init {
         require(googleClientIds.isNotEmpty()) { "GOOGLE_OAUTH_CLIENT_IDS must not be empty (comma-separated)" }
@@ -343,18 +349,30 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
             maxPersoInFlight = separation.property("maxPersoInFlight").getString().toInt(),
             stuckSubmittingSec = separation.property("stuckSubmittingSec").getString().toLong(),
         ),
-        auth = AuthConfig(
-            googleClientIds = auth.property("googleClientIds").getString()
+        auth = run {
+            val oauthClientId = auth.propertyOrNull("googleOauthClientId")?.getString()?.trim()
+                ?.takeIf { it.isNotBlank() }
+            val oauthClientSecret = auth.propertyOrNull("googleOauthClientSecret")?.getString()?.trim()
+                ?.takeIf { it.isNotBlank() }
+            val baseGoogleIds = auth.property("googleClientIds").getString()
                 .split(',')
                 .map { it.trim() }
-                .filter { it.isNotEmpty() },
-            appleClientIds = auth.propertyOrNull("appleClientIds")?.getString().orEmpty()
-                .split(',')
-                .map { it.trim() }
-                .filter { it.isNotEmpty() },
-            jwtSecret = auth.property("jwtSecret").getString(),
-            jwtExpirySeconds = auth.property("jwtExpirySeconds").getString().toLong(),
-        ),
+                .filter { it.isNotEmpty() }
+            // device-flow web 클라이언트 id 를 검증 허용 aud 에 병합 — 교환된 id_token 의 aud 가
+            // 이 client id 라 verifyGoogleIdToken(aud in googleClientIds)을 통과해야 한다.
+            val googleClientIds = (baseGoogleIds + listOfNotNull(oauthClientId)).distinct()
+            AuthConfig(
+                googleClientIds = googleClientIds,
+                appleClientIds = auth.propertyOrNull("appleClientIds")?.getString().orEmpty()
+                    .split(',')
+                    .map { it.trim() }
+                    .filter { it.isNotEmpty() },
+                jwtSecret = auth.property("jwtSecret").getString(),
+                jwtExpirySeconds = auth.property("jwtExpirySeconds").getString().toLong(),
+                googleOauthClientId = oauthClientId,
+                googleOauthClientSecret = oauthClientSecret,
+            )
+        },
         db = DbConfig(
             jdbcUrl = db.property("jdbcUrl").getString(),
             user = db.property("user").getString(),
