@@ -42,6 +42,10 @@ private val log = LoggerFactory.getLogger("com.vibi.bff.routes.SeparationRoutes"
  * ogg 등은 모두 reject — flac 은 Perso 가 silent fail 하는 회귀 (CLAUDE.md 참조). */
 private val SEPARATION_AUDIO_EXTENSIONS = setOf("m4a", "mp3", "wav")
 
+/** 단일 분리 잡의 측정 길이 상한(분). Perso 는 분당 과금 + WAV stem egress 도 분 비례 → 무제한 길이는
+ *  무제한 비용. 서버 측정 길이(computeSeparationSourceDurationMs)에 적용. env MAX_SEPARATION_MINUTES 조정. */
+private val MAX_SEPARATION_MINUTES = (System.getenv("MAX_SEPARATION_MINUTES")?.toIntOrNull() ?: 60).coerceAtLeast(1)
+
 fun Route.separationRoutes(
     separationService: SeparationService,
     signer: SignedUrlService,
@@ -114,6 +118,15 @@ fun Route.separationRoutes(
             var sourceOwned = true
             try {
                 val sourceDurationMs = computeSeparationSourceDurationMs(sourceFile)
+                // 단일 잡 측정 길이 상한 — 한 번의 submit 으로 임의 장시간 paid 잡(Perso 비용 + egress)이
+                // 도는 것 차단. 서버 측정 길이 기준(클라 durationMs hint 는 과금/캡에 안 씀). 초과 시 422.
+                if (sourceDurationMs > MAX_SEPARATION_MINUTES * 60_000L) {
+                    throw ApiErrorException(
+                        HttpStatusCode.UnprocessableEntity,
+                        "audio_too_long",
+                        "최대 ${MAX_SEPARATION_MINUTES}분까지 분리 가능합니다.",
+                    )
+                }
 
                 // 라우트가 jobId 를 미리 생성해 차감 ledger 의 키로 사용.
                 val newJobId = "sep-${UUID.randomUUID()}"
@@ -255,25 +268,51 @@ fun Route.separationRoutes(
             // 가 HEAD 로 R2 hit 확인 후 signed URL. R2 도 없으면 그 안에서 throw.
             val ext = stem.file.extension.ifBlank { "flac" }
             if (token == null) {
-                // 플러그인(UXP) 경로: pure-JS mix/재생이 WAV PCM 만 처리하므로 stem(FLAC)을
-                // 44.1k/stereo/16bit WAV 로 transcode 해 inline 전송. (모바일=토큰 경로는 FLAC 그대로
-                // presigned/302 — R2 저장/egress 효율 유지.)
-                val srcKey = ObjectKey.separationStem(jobId, stem.stemId, ext)
-                val srcIsTemp = !stem.file.exists()
-                val srcFile: File = if (!srcIsTemp) {
-                    stem.file
-                } else {
-                    val store = objectStore ?: throw NotFoundException("Stem bytes not found: $stemId")
-                    withContext(Dispatchers.IO) { store.downloadIfAbsent(srcKey, File.createTempFile("stem-src-", ".$ext")) }
+                // 플러그인(UXP) 경로: pure-JS mix/재생이 WAV PCM 만 처리하므로 stem(FLAC)을 WAV 로 제공.
+                // R2 가 있으면 transcode 한 WAV 를 캐시(첫 1회만 변환→업로드, 이후 presigned 로 즉시) —
+                // 매 다운로드 transcode 로 history 복원이 느려지는 것 방지. R2 없으면(dev) 변환 후 inline.
+                val store = objectStore
+                if (store != null) {
+                    val wavKey = ObjectKey.separationStem(jobId, stem.stemId, "wav")
+                    if (!withContext(Dispatchers.IO) { store.objectExists(wavKey) }) {
+                        val srcKey = ObjectKey.separationStem(jobId, stem.stemId, ext)
+                        val srcIsTemp = !stem.file.exists()
+                        val srcFile: File = if (!srcIsTemp) {
+                            stem.file
+                        } else {
+                            withContext(Dispatchers.IO) { store.downloadIfAbsent(srcKey, File.createTempFile("stem-src-", ".$ext")) }
+                        }
+                        val wav = File.createTempFile("stem-wav-", ".wav")
+                        try {
+                            FfmpegRunner.run(
+                                listOf(
+                                    "ffmpeg", "-y", "-v", "error", "-i", srcFile.absolutePath,
+                                    "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", wav.absolutePath,
+                                ),
+                                label = "stem flac->wav ${stem.stemId}",
+                                timeoutMinutes = 2,
+                            )
+                            withContext(Dispatchers.IO) { store.uploadIfAbsent(wav, wavKey, "audio/wav") }
+                        } finally {
+                            withContext(Dispatchers.IO) {
+                                wav.delete()
+                                if (srcIsTemp) srcFile.delete()
+                            }
+                        }
+                    }
+                    val url = withContext(Dispatchers.IO) {
+                        store.signedUrl(objectKey = wavKey, downloadFilename = "${stem.stemId}.wav", contentType = "audio/wav")
+                    }
+                    call.respond(HttpStatusCode.OK, SignedDownloadUrl(url))
+                    return@get
                 }
-                val wav = withContext(Dispatchers.IO) { File.createTempFile("stem-wav-", ".wav") }
+                // R2 미사용(dev): 변환 후 inline stream.
+                val wav = File.createTempFile("stem-wav-", ".wav")
                 try {
                     FfmpegRunner.run(
                         listOf(
-                            "ffmpeg", "-y", "-v", "error",
-                            "-i", srcFile.absolutePath,
-                            "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le",
-                            wav.absolutePath,
+                            "ffmpeg", "-y", "-v", "error", "-i", stem.file.absolutePath,
+                            "-ar", "44100", "-ac", "2", "-c:a", "pcm_s16le", wav.absolutePath,
                         ),
                         label = "stem flac->wav ${stem.stemId}",
                         timeoutMinutes = 2,
@@ -287,10 +326,7 @@ fun Route.separationRoutes(
                     call.response.header(HttpHeaders.ContentType, ContentType("audio", "wav").toString())
                     call.respondFile(wav)
                 } finally {
-                    withContext(Dispatchers.IO) {
-                        wav.delete()
-                        if (srcIsTemp) srcFile.delete()
-                    }
+                    wav.delete()
                 }
                 return@get
             }
