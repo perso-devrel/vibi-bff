@@ -1,0 +1,12 @@
+-- credit_transactions 의 created_at 단독 인덱스.
+--
+-- V5 의 유일한 인덱스 credit_transactions_user_idx 는 (user_id, created_at DESC) 로 선두
+-- 컬럼이 user_id 라, admin 대시보드의 수익 쿼리처럼 user_id 조건 없이 created_at 범위/시간
+-- 분기만 쓰는 경우 range scan 을 못 타고 테이블 풀스캔이 된다:
+--   * AdminRepository.getRevenueDaily — WHERE created_at >= ? AND created_at < ?
+--   * AdminRepository.getRevenue      — 30일 윈도우 CASE 집계 (created_at >= now-30d)
+--
+-- render_jobs_created_idx / separation_jobs_created_idx (V3) 와 동일 패턴으로 created_at
+-- 단독 인덱스를 추가해 daily/30일 쿼리가 인덱스 range scan 을 타게 한다. 누적(전기간) KPI 는
+-- 본질적으로 풀스캔이라 이 인덱스로도 안 빨라지지만, 시간 윈도우 쿼리는 테이블 성장 시 이득.
+CREATE INDEX credit_transactions_created_idx ON credit_transactions (created_at);

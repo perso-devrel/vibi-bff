@@ -128,3 +128,31 @@ export interface AdminSignupDaily {
   googleCount: number;
   appleCount: number;
 }
+
+export interface AdminRevenue {
+  payingUsers: number;
+  purchaseCount: number;
+  creditsSold: number;
+  purchaseCount30d: number;
+  creditsSold30d: number;
+  applePurchaseCount: number;
+  googlePurchaseCount: number;
+  appleCredits: number;
+  googleCredits: number;
+  adminGrantedCredits: number;
+}
+
+export interface AdminRevenueDaily {
+  date: string;
+  appleCredits: number;
+  googleCredits: number;
+  purchaseCount: number;
+}
+
+export interface AdminJobStatusBreakdown {
+  jobType: string;
+  total: number;
+  succeeded: number;
+  failed: number;
+  inProgress: number;
+}

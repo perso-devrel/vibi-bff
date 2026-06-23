@@ -182,11 +182,12 @@ class SeparationRoutesTest {
     fun `POST separate uses size-based duration fallback when probeDurationMs fails`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
-        // probeDurationMs 실패 → size-based duration fallback 경로를 타는지 검증. 비용 정책은
-        // 영상 1개당 고정 1 크레딧이라 duration 과 무관하게 reserve cost 인자는 1.
+        // probeDurationMs 실패 → size-based duration fallback 경로 검증. 8MB / 8KB/s = 1000s
+        // = 1_000_000ms ≈ 16.7분 → 시작된 5분 블록 4개 → reserve cost = 4. probe-fail 만으로
+        // floor 1 credit 으로 떨어지는 undercharge 우회가 막혔음을 비례 차감 값으로 실증한다.
         val bigBytes = ByteArray(8_000_000) { 0 }
-        every { creditRepo.reserve(eq(callerId), any(), eq(1)) } returns
-            CreditRepository.ReserveOutcome(charged = 1, balance = 100)
+        every { creditRepo.reserve(eq(callerId), any(), eq(4)) } returns
+            CreditRepository.ReserveOutcome(charged = 4, balance = 100)
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
         coEvery { MediaTrimmer.probeDurationMs(any()) } returns null
@@ -205,7 +206,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(1)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), any(), eq(4)) }
         }
     }
 
@@ -332,15 +333,16 @@ class SeparationRoutesTest {
     }
 
     @Test
-    fun `POST separate charges flat 1 credit regardless of audio duration`() {
+    fun `POST separate charges credits proportional to audio duration in 5min blocks`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
         every { creditRepo.reserve(any(), any(), any()) } returns
-            CreditRepository.ReserveOutcome(charged = 1, balance = 1)
-        // audio 가 120s 여도 정책상 영상 1개당 고정 1 크레딧.
+            CreditRepository.ReserveOutcome(charged = 3, balance = 1)
+        // probed duration 12분 → 시작된 5분 블록 3개 → reserve cost = 3. 라우트가 측정 길이를
+        // CreditCost.forSeparation 으로 그대로 반영하는지 (견적-차감 단일 source) 검증.
         mockkObject(MediaTrimmer)
         coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 120_000L
+        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 12 * 60_000L
         every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
             "sep-new"
 
@@ -356,7 +358,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Accepted, response.status)
-            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(1)) }
+            verify(exactly = 1) { creditRepo.reserve(eq(callerId), match { it.startsWith("sep-") }, eq(3)) }
             verify(exactly = 0) { creditRepo.refund(any()) }
         }
     }

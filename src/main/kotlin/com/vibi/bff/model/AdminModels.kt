@@ -123,3 +123,64 @@ data class AdminSignupDaily(
     val googleCount: Long,
     val appleCount: Long,
 )
+
+/**
+ * 수익/IAP 요약. 출시 직전 "실제로 결제하는 사용자가 있는가" 에 답하는 패널.
+ *
+ * 주의 — BFF 는 영수증의 화폐 금액(₩/$)을 저장하지 않는다. credit_transactions 는
+ * platform/product_id/credits 만 보관하므로 매출은 "판매된 크레딧 수" 로 표현한다.
+ * admin-grant(platform='admin') 는 수익이 아니므로 모든 매출 집계에서 제외하고,
+ * [adminGrantedCredits] 로만 참고 노출한다.
+ *
+ * - [payingUsers] — 실결제 1건 이상 보유 distinct user (탈퇴로 user_id NULL 인 row 는 제외).
+ * - [creditsSold] — 누적 판매 크레딧 (apple+google).
+ * - [...30d] — 최근 30일 윈도우 (rolling, now-30d 기준).
+ *
+ * 비대칭 주의 — [payingUsers] 는 탈퇴(user_id NULL) 결제자를 제외하지만 [creditsSold]/
+ * [purchaseCount]/platform 별 합계는 탈퇴자 결제 row 도 포함한다. 따라서 두 값을 나눠
+ * ARPU 류 파생 지표를 만들면 분자(크레딧)에 탈퇴자가 있고 분모(결제자)엔 없어 왜곡된다 —
+ * 파생 지표 추가 시 분자/분모 기준을 일치시킬 것.
+ */
+@Serializable
+data class AdminRevenue(
+    val payingUsers: Long,
+    val purchaseCount: Long,
+    val creditsSold: Long,
+    val purchaseCount30d: Long,
+    val creditsSold30d: Long,
+    val applePurchaseCount: Long,
+    val googlePurchaseCount: Long,
+    val appleCredits: Long,
+    val googleCredits: Long,
+    val adminGrantedCredits: Long,
+)
+
+/**
+ * 일별 IAP 추세. admin-grant 제외. credits 는 platform 별로 분리해 스택 차트로 표시.
+ */
+@Serializable
+data class AdminRevenueDaily(
+    val date: String,
+    val appleCredits: Long,
+    val googleCredits: Long,
+    val purchaseCount: Long,
+)
+
+/**
+ * 잡 성공/실패 분해 — Overview 의 status 무관 COUNT(*) 가 가리지 못하는 "실제로 동작하는가".
+ *
+ * 성공 status 가 잡 종류마다 다름: render=COMPLETED, separation=READY. 실패는 둘 다 FAILED.
+ * 그 외(PROCESSING/QUEUED/SUBMITTING)는 [inProgress] 로 합산. 성공률은 terminal(succeeded+failed)
+ * 기준으로 프론트에서 계산 — in-progress 가 분모를 흐리지 않도록.
+ *
+ * - [jobType] — 'render' / 'separation'
+ * - [total] — succeeded + failed + inProgress (전체 시도)
+ */
+@Serializable
+data class AdminJobStatusBreakdown(
+    val jobType: String,
+    val total: Long,
+    val succeeded: Long,
+    val failed: Long,
+    val inProgress: Long,
+)

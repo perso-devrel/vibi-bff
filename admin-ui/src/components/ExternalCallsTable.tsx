@@ -1,7 +1,7 @@
 import type { AdminExternalCallDaily } from "../lib/api";
 
 /**
- * Perso/Gemini 외부 호출 일별 표 — 차트보다 표가 더 정보 밀도 높음 (provider × endpoint × date).
+ * Perso 외부 호출 일별 표 — 차트보다 표가 더 정보 밀도 높음 (provider × endpoint × date).
  * 빈 응답이면 안내 메시지. 실패율은 callCount=0 이면 표시 안 함.
  */
 export default function ExternalCallsTable({ rows }: { rows: AdminExternalCallDaily[] }) {

@@ -89,6 +89,25 @@ fun Route.adminRoutes(
             call.respondDailyRange(jwtSecret, adminRepository::getSignupDaily)
         }
 
+        // 수익/IAP 요약 — 결제자 수 + 판매 크레딧 + platform 분포 (admin-grant 제외).
+        get("/revenue") {
+            call.requireAdmin(jwtSecret)
+            val data = withContext(Dispatchers.IO) { adminRepository.getRevenue() }
+            call.respond(HttpStatusCode.OK, data)
+        }
+
+        // 일별 IAP 추세 (admin-grant 제외). from/to 기본 30일.
+        get("/revenue/daily") {
+            call.respondDailyRange(jwtSecret, adminRepository::getRevenueDaily)
+        }
+
+        // 잡 성공/실패 분해 — Overview 의 status 무관 카운트가 가리는 실동작 가시화.
+        get("/jobs/status-breakdown") {
+            call.requireAdmin(jwtSecret)
+            val data = withContext(Dispatchers.IO) { adminRepository.getJobStatusBreakdown() }
+            call.respond(HttpStatusCode.OK, data)
+        }
+
         // 사용자별 render 잡 + 영상 당 분리 횟수.
         get("/users/{userId}/jobs") {
             call.requireAdmin(jwtSecret)
