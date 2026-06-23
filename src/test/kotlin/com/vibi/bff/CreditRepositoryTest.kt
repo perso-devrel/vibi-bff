@@ -24,28 +24,20 @@ import kotlin.test.assertTrue
  */
 class CreditRepositoryTest {
 
-    private lateinit var dataSource: HikariDataSource
+    private val testDb = TestDatabase()
     private lateinit var users: UserRepository
     private lateinit var credits: CreditRepository
 
     @BeforeTest
     fun setup() {
-        val unique = "test_" + System.nanoTime()
-        dataSource = DbBootstrap.init(
-            DbConfig(
-                jdbcUrl = "jdbc:h2:mem:$unique;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-                user = "sa",
-                password = "",
-                maxPoolSize = 2,
-            )
-        )
+        testDb.start()
         users = UserRepository()
         credits = CreditRepository()
     }
 
     @AfterTest
     fun teardown() {
-        dataSource.close()
+        testDb.stop()
     }
 
     @Test

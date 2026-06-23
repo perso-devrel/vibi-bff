@@ -23,26 +23,18 @@ import kotlin.test.assertTrue
  */
 class SeparationQueueReaperTest {
 
-    private lateinit var dataSource: HikariDataSource
+    private val testDb = TestDatabase()
     private lateinit var queue: SeparationQueueRepository
 
     @BeforeTest
     fun setup() {
-        val unique = "test_" + System.nanoTime()
-        dataSource = DbBootstrap.init(
-            DbConfig(
-                jdbcUrl = "jdbc:h2:mem:$unique;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-                user = "sa",
-                password = "",
-                maxPoolSize = 2,
-            )
-        )
+        testDb.start()
         queue = SeparationQueueRepository()
     }
 
     @AfterTest
     fun teardown() {
-        dataSource.close()
+        testDb.stop()
     }
 
     @Test

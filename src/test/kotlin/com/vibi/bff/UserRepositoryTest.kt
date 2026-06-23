@@ -20,29 +20,20 @@ import org.jetbrains.exposed.sql.update
 
 class UserRepositoryTest {
 
-    private lateinit var dataSource: HikariDataSource
+    private val testDb = TestDatabase()
     private lateinit var repo: UserRepository
 
     @BeforeTest
     fun setup() {
-        // H2 PostgreSQL compatibility mode 로 Flyway + Exposed 동일 코드 경로 검증.
-        // 매 테스트마다 fresh DB — DB_CLOSE_DELAY=-1 없으면 connection 닫힐 때 schema 날아가지만,
-        // 우리는 매 테스트 새로 init 하므로 default 가 안전.
-        val unique = "test_" + System.nanoTime()
-        dataSource = DbBootstrap.init(
-            DbConfig(
-                jdbcUrl = "jdbc:h2:mem:$unique;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-                user = "sa",
-                password = "",
-                maxPoolSize = 2,
-            )
-        )
+        // H2 PostgreSQL mode + Flyway. TestDatabase 가 매 테스트 fresh DB + teardown 에서
+        // Exposed 레지스트리 정리(공유 IO 스레드 cross-test 오염 방지).
+        testDb.start()
         repo = UserRepository()
     }
 
     @AfterTest
     fun teardown() {
-        dataSource.close()
+        testDb.stop()
     }
 
     @Test

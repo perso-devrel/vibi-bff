@@ -21,24 +21,16 @@ import kotlin.test.assertTrue
  */
 class DeviceCodeRepositoryTest {
 
-    private lateinit var dataSource: HikariDataSource
+    private val testDb = TestDatabase()
 
     @BeforeTest
     fun setup() {
-        val unique = "test_" + System.nanoTime()
-        dataSource = DbBootstrap.init(
-            DbConfig(
-                jdbcUrl = "jdbc:h2:mem:$unique;MODE=PostgreSQL;DATABASE_TO_LOWER=TRUE;DB_CLOSE_DELAY=-1",
-                user = "sa",
-                password = "",
-                maxPoolSize = 2,
-            )
-        )
+        testDb.start()
     }
 
     @AfterTest
     fun teardown() {
-        dataSource.close()
+        testDb.stop()
     }
 
     private fun user(): AuthUser = AuthUser(
