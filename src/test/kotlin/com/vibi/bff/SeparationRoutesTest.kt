@@ -430,14 +430,48 @@ class SeparationRoutesTest {
     fun `DELETE separation returns 204`() {
         val callerId = UUID.randomUUID()
         val queue = mockk<SeparationQueueRepository>()
-        coEvery { queue.deleteOwnedReturningStemsJson("sep-9", callerId) } returns null
+        coEvery { queue.deleteOwnedReturning("sep-9", callerId) } returns null
         testApp(jwtSecret = testJwtSecret, queueRepository = queue) {
             val res = client.delete("/api/v2/separate/sep-9") {
                 header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
             }
             assertEquals(HttpStatusCode.NoContent, res.status)
         }
-        coVerify { queue.deleteOwnedReturningStemsJson("sep-9", callerId) }
+        coVerify { queue.deleteOwnedReturning("sep-9", callerId) }
+        // no-op 삭제(null)면 대기 잡 정리는 호출되지 않는다.
+        coVerify(exactly = 0) { separationService.onQueuedDeleted(any()) }
+    }
+
+    @Test
+    fun `DELETE of a QUEUED job triggers waiting-queue cleanup`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        // 아직 대기 중(QUEUED, stems 없음)인 잡 삭제 → onQueuedDeleted 로 환불/정리/nudge.
+        coEvery { queue.deleteOwnedReturning("sep-q", callerId) } returns
+            com.vibi.bff.service.DeletedJob(SeparationQueueRepository.STATUS_QUEUED, null)
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue) {
+            val res = client.delete("/api/v2/separate/sep-q") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.NoContent, res.status)
+        }
+        coVerify(exactly = 1) { separationService.onQueuedDeleted("sep-q") }
+    }
+
+    @Test
+    fun `DELETE of a READY job does not trigger waiting-queue cleanup`() {
+        val callerId = UUID.randomUUID()
+        val queue = mockk<SeparationQueueRepository>()
+        // 완료(READY) 잡 삭제 → 대기 잡 정리는 호출되지 않는다(R2 purge 만, ObjectStore 미주입이라 skip).
+        coEvery { queue.deleteOwnedReturning("sep-r", callerId) } returns
+            com.vibi.bff.service.DeletedJob(SeparationQueueRepository.STATUS_READY, null)
+        testApp(jwtSecret = testJwtSecret, queueRepository = queue) {
+            val res = client.delete("/api/v2/separate/sep-r") {
+                header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
+            }
+            assertEquals(HttpStatusCode.NoContent, res.status)
+        }
+        coVerify(exactly = 0) { separationService.onQueuedDeleted(any()) }
     }
 
     @Test

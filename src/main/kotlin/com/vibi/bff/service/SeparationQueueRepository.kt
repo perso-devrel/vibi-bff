@@ -133,12 +133,16 @@ class SeparationQueueRepository {
      *
      * 둘 다 NULL 허용 (V7 마이그레이션 이전 row 호환 + 테스트 분기) — null 이면 단순 status
      * 전이만.
+     *
+     * 반환은 **갱신된 row 수** — 보통 1. **0 이면 row 가 사라진 것**(잡이 진행 중 삭제됨 /
+     * 계정 erase). caller(runPipelineDownloadPhase)는 이때 방금 eager-upload 한 R2 stem 이
+     * orphan 이 되므로 즉시 purge 한다.
      */
     suspend fun markReady(
         jobId: String,
         stemsJson: String? = null,
         actualDurationMs: Long? = null,
-    ) {
+    ): Int =
         newSuspendedTransaction(Dispatchers.IO) {
             SeparationJobsTable.update({ SeparationJobsTable.id eq jobId }) {
                 it[SeparationJobsTable.status] = STATUS_READY
@@ -147,7 +151,6 @@ class SeparationQueueRepository {
                 if (actualDurationMs != null) it[SeparationJobsTable.actualDurationMs] = actualDurationMs
             }
         }
-    }
 
     /**
      * 새 인스턴스의 in-memory 재구축용 — status=READY + stems_json 이 모두 살아있는 row 만 반환.
@@ -380,20 +383,30 @@ class SeparationQueueRepository {
         }
 
     /**
-     * owner 의 분리 1건 삭제. 삭제된 row 의 stems_json 반환(R2 purge 용), 매칭 row 없으면 null.
-     * id+owner 매칭이라 남의 잡은 못 지움(no-op → null). 라우트는 항상 204(멱등·존재 비노출).
+     * owner 의 분리 1건 삭제. 삭제 직전 row 의 status + stems_json 을 반환(R2 purge / 대기 잡
+     * 환불 분기용), 매칭 row 없으면 null. id+owner 매칭이라 남의 잡은 못 지움(no-op → null).
+     * 라우트는 항상 204(멱등·존재 비노출).
+     *
+     * SELECT 에 FOR UPDATE — dispatcher.claimNext(QUEUED→SUBMITTING, SKIP LOCKED)와 직렬화해
+     * "삭제 시점 status" 판정을 atomic 하게 만든다. QUEUED 로 읽혀 삭제되면 라우트가 선차감
+     * 크레딧 환불 + in-memory 정리를, 그 사이 이미 claim 되어 SUBMITTING 이면 진행 중 잡으로
+     * 보고 행만 제거(기존 동작).
      */
-    suspend fun deleteOwnedReturningStemsJson(jobId: String, userId: UUID): String? =
+    suspend fun deleteOwnedReturning(jobId: String, userId: UUID): DeletedJob? =
         newSuspendedTransaction(Dispatchers.IO) {
             val row = SeparationJobsTable
                 .selectAll()
                 .where { (SeparationJobsTable.id eq jobId) and (SeparationJobsTable.userId eq userId) }
+                .forUpdate()
                 .firstOrNull() ?: return@newSuspendedTransaction null
-            val stemsJson = row[SeparationJobsTable.stemsJson]
+            val deleted = DeletedJob(
+                status = row[SeparationJobsTable.status],
+                stemsJson = row[SeparationJobsTable.stemsJson],
+            )
             SeparationJobsTable.deleteWhere {
                 (SeparationJobsTable.id eq jobId) and (SeparationJobsTable.userId eq userId)
             }
-            stemsJson
+            deleted
         }
 
     /** script 라우트용 — owner/status/persoProjectSeq 만 가볍게 로드. */
@@ -429,6 +442,13 @@ data class ReapResult(
     val recovered: Int,
     val failedJobIds: List<String>,
 )
+
+/**
+ * [SeparationQueueRepository.deleteOwnedReturning] 결과 — 삭제된 row 의 삭제 직전 상태.
+ * [status] 가 QUEUED 면 라우트가 대기 잡 취소 정리(환불 + in-memory + nudge)를 수행한다.
+ * [stemsJson] 은 READY 잡의 R2 stem purge 용 (대기 잡은 보통 null).
+ */
+data class DeletedJob(val status: String, val stemsJson: String?)
 
 /** boot resumption 대상. SeparationService.resumePollingForJob 의 입력. */
 data class ResumableJob(
