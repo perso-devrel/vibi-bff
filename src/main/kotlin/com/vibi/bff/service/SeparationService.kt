@@ -367,6 +367,20 @@ class SeparationService(
     }
 
     /**
+     * 사용자가 **대기 중(QUEUED)** 잡을 삭제했을 때의 정리. DB row 삭제는 라우트가
+     * [SeparationQueueRepository.deleteOwnedReturning] 으로 이미 끝낸 뒤 호출 — 본 메서드는
+     * (1) in-memory 잡 + outputDir 정리([dispose]), (2) 선차감 크레딧 환불([onJobFailed], 멱등),
+     * (3) dispatcher 깨우기([onJobChange]) 로 비워진 capacity 를 다음 QUEUED 가 즉시 채우게 한다.
+     * 진행 중(SUBMITTING/PROCESSING)·완료(READY) 잡엔 호출하지 않는다(라우트가 status 로 분기).
+     */
+    suspend fun onQueuedDeleted(jobId: String) {
+        dispose(jobId)
+        runCatching { onJobFailed?.invoke(jobId) }
+            .onFailure { ex -> log.warn("refund hook failed (queued-delete) jobId={}: {}", jobId, ex.message) }
+        onJobChange?.invoke()
+    }
+
+    /**
      * 큐 레벨 reaper(인스턴스 사망 → stale QUEUED / 영구 FAILED SUBMITTING)가 FAILED 처리한 잡의
      * 크레딧 환불 + in-memory 상태 정리. [SeparationDispatcher.reapPass] 가 reaper 결과의
      * failedJobIds 마다 호출한다. onJobFailed(=CreditRepository.refund) 는 멱등이라 다른 경로의
@@ -515,7 +529,17 @@ class SeparationService(
             ListSerializer(StemMeta.serializer()),
             local.map { StemMeta(it.stemId, it.label, it.file.extension.ifBlank { "flac" }) },
         )
-        queue?.markReady(job.jobId, stemsJson, measuredDurationMs)
+        // markReady 가 0행이면 잡이 **진행 중 삭제**됨 (사용자 DELETE / 계정 erase 가 row 를 지움).
+        // 이미 (1) 에서 eager-upload 한 stem 이 DB row 없이 R2 에 남아 orphan 이 되므로 즉시 purge +
+        // in-memory 정리 후 종료 — status=READY 로 commit 하지 않는다. queue==null (로컬 dev) 이면
+        // 삭제 감지 대상 자체가 없어 null 반환 → 정상 흐름 유지.
+        val updated = queue?.markReady(job.jobId, stemsJson, measuredDurationMs)
+        if (updated == 0) {
+            log.info("Separation job deleted mid-flight — purging R2 stems & disposing: jobId={}", job.jobId)
+            purgeUploadedStems(job)
+            dispose(job.jobId)
+            return
+        }
 
         // (3) Commit — status=READY 후 route 가 stems list 를 응답에 노출.
         job.progress = 100
@@ -545,6 +569,24 @@ class SeparationService(
             }
         }
         log.info("Eager R2 upload completed: jobId={} stems={}", job.jobId, job.stems.size)
+    }
+
+    /**
+     * 진행 중 삭제된 잡의 eager-upload 된 stem 을 R2 에서 제거 — [eagerUploadStems] 의 역연산.
+     * markReady 0행(=row 사라짐) 감지 시 호출. stem 키를 in-memory [SeparationJob.stems] 로 정확히
+     * 알고 있어 prefix 스캔 없이 정확 삭제. ext != wav 면 플러그인 lazy WAV transcode 캐시 키도
+     * 함께 시도(라우트 DELETE 의 purge 와 동일 — orphan 방지). objectStore null (dev) 이면 skip.
+     */
+    private suspend fun purgeUploadedStems(job: SeparationJob) {
+        val store = objectStore ?: return
+        withContext(Dispatchers.IO) {
+            job.stems.forEach { stem ->
+                val ext = stem.file.extension.ifBlank { "flac" }
+                store.deleteObject(ObjectKey.separationStem(job.jobId, stem.stemId, ext))
+                if (ext != "wav") store.deleteObject(ObjectKey.separationStem(job.jobId, stem.stemId, "wav"))
+            }
+        }
+        log.info("Purged R2 stems for deleted job: jobId={} stems={}", job.jobId, job.stems.size)
     }
 
     // ── Speaker collection (.tar) 다운로드 + 풀이 ──────────────────────────────

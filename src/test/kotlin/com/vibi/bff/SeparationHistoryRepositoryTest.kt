@@ -89,19 +89,42 @@ class SeparationHistoryRepositoryTest {
     }
 
     @Test
-    fun `deleteOwnedReturningStemsJson removes the row and returns stems`() = runBlocking {
+    fun `deleteOwnedReturning removes the row and returns status plus stems`() = runBlocking {
         val u = users.upsert(AuthProvider.GOOGLE, "g-del", "d@example.com", "D", null)
         val other = users.upsert(AuthProvider.GOOGLE, "g-del2", "d2@example.com", "D2", null)
         queue.enqueue("sep-d", u.id, null, 1000L, "inst-1", projectId = "proj-1")
         queue.markReady("sep-d", stemsJson, 1000L)
         // 남의 잡 삭제 시도 → no-op(null), row 보존.
-        assertNull(queue.deleteOwnedReturningStemsJson("sep-d", other.id))
+        assertNull(queue.deleteOwnedReturning("sep-d", other.id))
         assertEquals(1, queue.listReadyHistory(u.id, "proj-1").size)
-        // owner 삭제 → stems_json 반환 + row 제거.
-        val returned = queue.deleteOwnedReturningStemsJson("sep-d", u.id)
-        assertNotNull(returned)
-        assertTrue(returned.contains("background"))
+        // owner 삭제 → status(READY) + stems_json 반환 + row 제거.
+        val deleted = queue.deleteOwnedReturning("sep-d", u.id)
+        assertNotNull(deleted)
+        assertEquals(SeparationQueueRepository.STATUS_READY, deleted!!.status)
+        assertTrue(deleted.stemsJson!!.contains("background"))
         assertEquals(0, queue.listReadyHistory(u.id, "proj-1").size)
+    }
+
+    @Test
+    fun `markReady returns rows updated — 1 when present, 0 when row was deleted mid-flight`() = runBlocking {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-mr", "mr@example.com", "MR", null)
+        queue.enqueue("sep-mr", u.id, null, 1000L, "inst-1", projectId = null)
+        // 정상 — 존재하는 row 갱신 → 1.
+        assertEquals(1, queue.markReady("sep-mr", stemsJson, 1000L))
+        // 진행 중 삭제 시뮬레이션 — row 가 없으면 0 (파이프라인이 R2 stem self-purge 하는 신호).
+        queue.deleteOwnedReturning("sep-mr", u.id)
+        assertEquals(0, queue.markReady("sep-mr", stemsJson, 1000L))
+    }
+
+    @Test
+    fun `deleteOwnedReturning reports QUEUED status for a still-waiting job`() = runBlocking {
+        val u = users.upsert(AuthProvider.GOOGLE, "g-delq", "dq@example.com", "DQ", null)
+        // 아직 dispatcher 가 claim 안 한 대기 잡 — stems_json 은 null.
+        queue.enqueue("sep-dq", u.id, null, 1000L, "inst-1", projectId = "proj-q")
+        val deleted = queue.deleteOwnedReturning("sep-dq", u.id)
+        assertNotNull(deleted)
+        assertEquals(SeparationQueueRepository.STATUS_QUEUED, deleted!!.status)
+        assertNull(deleted.stemsJson)
     }
 
     @Test
