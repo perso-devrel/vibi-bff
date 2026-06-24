@@ -12,6 +12,8 @@ import com.vibi.bff.routes.contentTypeForExtension
 import io.ktor.http.ContentType
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -557,16 +559,22 @@ class SeparationService(
      */
     private suspend fun eagerUploadStems(job: SeparationJob) {
         val store = objectStore ?: return
+        // stem 들은 서로 독립 key — 순차 (HEAD+PUT) × N 은 WAN 왕복이 직렬로 쌓여 READY commit
+        // 직전 사용자 대기를 늘린다. async 로 병렬 업로드 (uploadIfAbsent 가 HEAD-first 멱등이라
+        // 안전, 한 건 실패 시 awaitAll throw → executePipeline catch 가 FAILED 처리, 재시도는
+        // 멱등하게 누락분만 다시 올림).
         withContext(Dispatchers.IO) {
-            job.stems.forEach { stem ->
-                val ext = stem.file.extension.ifBlank { "flac" }
-                val contentType = contentTypeForExtension(ext, ContentType("audio", "flac")).toString()
-                store.uploadIfAbsent(
-                    file = stem.file,
-                    objectKey = ObjectKey.separationStem(job.jobId, stem.stemId, ext),
-                    contentType = contentType,
-                )
-            }
+            job.stems.map { stem ->
+                async {
+                    val ext = stem.file.extension.ifBlank { "flac" }
+                    val contentType = contentTypeForExtension(ext, ContentType("audio", "flac")).toString()
+                    store.uploadIfAbsent(
+                        file = stem.file,
+                        objectKey = ObjectKey.separationStem(job.jobId, stem.stemId, ext),
+                        contentType = contentType,
+                    )
+                }
+            }.awaitAll()
         }
         log.info("Eager R2 upload completed: jobId={} stems={}", job.jobId, job.stems.size)
     }
@@ -579,12 +587,16 @@ class SeparationService(
      */
     private suspend fun purgeUploadedStems(job: SeparationJob) {
         val store = objectStore ?: return
+        // 독립 key 라 병렬 삭제. deleteObject 는 내부에서 에러를 swallow(Boolean) 하므로 awaitAll
+        // 이 throw 하지 않는다 (best-effort purge).
         withContext(Dispatchers.IO) {
-            job.stems.forEach { stem ->
-                val ext = stem.file.extension.ifBlank { "flac" }
-                store.deleteObject(ObjectKey.separationStem(job.jobId, stem.stemId, ext))
-                if (ext != "wav") store.deleteObject(ObjectKey.separationStem(job.jobId, stem.stemId, "wav"))
-            }
+            job.stems.map { stem ->
+                async {
+                    val ext = stem.file.extension.ifBlank { "flac" }
+                    store.deleteObject(ObjectKey.separationStem(job.jobId, stem.stemId, ext))
+                    if (ext != "wav") store.deleteObject(ObjectKey.separationStem(job.jobId, stem.stemId, "wav"))
+                }
+            }.awaitAll()
         }
         log.info("Purged R2 stems for deleted job: jobId={} stems={}", job.jobId, job.stems.size)
     }

@@ -29,6 +29,8 @@ import io.ktor.server.request.*
 import io.ktor.server.response.*
 import io.ktor.server.routing.*
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitAll
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.util.UUID
@@ -358,13 +360,17 @@ fun Route.separationRoutes(
                     val metas = runCatching {
                         AppJson.decodeFromString(ListSerializer(StemMeta.serializer()), stemsJson)
                     }.getOrDefault(emptyList())
-                    metas.forEach { m ->
-                        val ext = m.ext.ifBlank { "flac" }
-                        withContext(Dispatchers.IO) {
-                            objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, ext))
-                            // 플러그인 경로가 lazy 로 만든 WAV transcode 캐시(StemMeta 에 없어 ext 로 안 잡힘)도 purge — orphan 방지.
-                            if (ext != "wav") objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, "wav"))
-                        }
+                    // 독립 key 라 병렬 삭제 — 순차면 stem 수 × (ext + wav) 만큼 R2 왕복이 직렬로
+                    // 쌓여 DELETE 응답이 느려진다. deleteObject 는 에러 swallow 라 awaitAll throw 없음.
+                    withContext(Dispatchers.IO) {
+                        metas.map { m ->
+                            async {
+                                val ext = m.ext.ifBlank { "flac" }
+                                objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, ext))
+                                // 플러그인 경로가 lazy 로 만든 WAV transcode 캐시(StemMeta 에 없어 ext 로 안 잡힘)도 purge — orphan 방지.
+                                if (ext != "wav") objectStore.deleteObject(ObjectKey.separationStem(jobId, m.stemId, "wav"))
+                            }
+                        }.awaitAll()
                     }
                 }
                 // 대기 중(QUEUED) 잡을 지운 경우: 대기 큐에서 빠진 김에 선차감 크레딧 환불 +
