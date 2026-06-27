@@ -65,7 +65,7 @@ fun testAppConfig(
         maxPoolSize = 2,
     ),
     admin = AdminConfig(slug = ""),
-    iap = IapConfig(apple = null, google = null),
+    iap = IapConfig(apple = null, google = null, admob = null),
 )
 
 /**

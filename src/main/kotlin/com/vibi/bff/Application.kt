@@ -21,6 +21,7 @@ import com.vibi.bff.service.RenderService
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.UserRepository
+import com.vibi.bff.service.iap.AdMobSsvVerifier
 import com.vibi.bff.service.iap.AppleReceiptVerifier
 import com.vibi.bff.service.iap.GoogleReceiptVerifier
 import java.io.File
@@ -290,6 +291,8 @@ fun Application.module() {
     // 영수증 검증을 진짜로 통과시키려면 sandbox env + sandbox tester 영수증 필요.
     val appleReceiptVerifier = appConfig.iap.apple?.let { AppleReceiptVerifier(it, httpClient) }
     val googleReceiptVerifier = appConfig.iap.google?.let { GoogleReceiptVerifier(it, httpClient) }
+    // AdMob SSV — 공개 검증키로만 동작하므로 비밀값 없이 기본 활성. config null(=disabled) 이면 null.
+    val adMobSsvVerifier = appConfig.iap.admob?.let { AdMobSsvVerifier(httpClient) }
 
     install(CallLogging) {
         level = Level.INFO
@@ -321,7 +324,7 @@ fun Application.module() {
         authService, objectStore,
         adminRepository,
         userRepository, creditRepository,
-        appleReceiptVerifier, googleReceiptVerifier,
+        appleReceiptVerifier, googleReceiptVerifier, adMobSsvVerifier,
         deviceCodeRepository, googleOAuthClient,
     )
 

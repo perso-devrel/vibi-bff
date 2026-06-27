@@ -25,6 +25,7 @@ import com.vibi.bff.service.SeparationQueueRepository
 import com.vibi.bff.service.SeparationService
 import com.vibi.bff.service.SignedUrlService
 import com.vibi.bff.service.UserRepository
+import com.vibi.bff.service.iap.AdMobSsvVerifier
 import com.vibi.bff.service.iap.AppleReceiptVerifier
 import com.vibi.bff.service.iap.GoogleReceiptVerifier
 import io.ktor.http.*
@@ -53,6 +54,7 @@ fun Application.configureRouting(
     creditRepository: CreditRepository,
     appleReceiptVerifier: AppleReceiptVerifier?,
     googleReceiptVerifier: GoogleReceiptVerifier?,
+    adMobSsvVerifier: AdMobSsvVerifier?,
     deviceCodeRepository: DeviceCodeRepository,
     googleOAuthClient: GoogleOAuthClient?,
 ) {
@@ -122,6 +124,8 @@ fun Application.configureRouting(
                 creditRepository,
                 appleVerifier = appleReceiptVerifier,
                 googleVerifier = googleReceiptVerifier,
+                adMobVerifier = adMobSsvVerifier,
+                adMobDailyCap = appConfig.iap.admob?.dailyCap ?: com.vibi.bff.config.AdMobConfig.DEFAULT_DAILY_CAP,
                 jwtSecret = appConfig.auth.jwtSecret,
             )
             assetRoutes(objectStore, jwtSecret = appConfig.auth.jwtSecret)
