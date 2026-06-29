@@ -158,9 +158,8 @@ class SeparationRoutesTest {
     @Test
     fun `POST separate m4a happy path forwards to SeparationService`() = testApp {
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 30_000L
-        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+        coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("audio"), 30_000L)
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) } returns
             "sep-ok"
 
         val response = postSeparate(client)
@@ -168,29 +167,49 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.Accepted, response.status)
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
         assertEquals("sep-ok", body["jobId"]!!.jsonPrimitive.content)
-        verify(exactly = 1) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        verify(exactly = 1) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) }
     }
 
-    /** 확장자만 .m4a 인 video bytes 는 ffprobe stream-kind 검증에서 reject — Perso 가 silent fail
-     *  하는 회귀 차단 (확장자 위조 공격 / 클라 버그 양쪽에 대한 BFF 측 방어). */
+    /** video track 이 동봉된 입력 (mp4/mov/webm) 은 허용 — Perso 가 video 도 분리 입력으로 받고
+     *  결과 stem 은 audio 로 내려온다. video 등록 endpoint + isVideoProject=true 분기를 위해
+     *  isVideoSource=true 로 submit. */
     @Test
-    fun `POST separate rejects file labeled m4a whose probe shows video track`() = testApp {
+    fun `POST separate accepts file with video track and marks isVideoSource`() = testApp {
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("video", "audio")
+        coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("video", "audio"), 30_000L)
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) } returns
+            "sep-vid"
+
+        val response = postSeparate(client, fileName = "clip.mp4", contentType = "video/mp4")
+
+        assertEquals(HttpStatusCode.Accepted, response.status)
+        verify(exactly = 1) {
+            separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), eq(true))
+        }
+    }
+
+    /** video track 이 없는 입력 (순수 audio) 은 isVideoSource=false 로 submit — audio 등록 endpoint
+     *  + isVideoProject=false 분기. */
+    @Test
+    fun `POST separate marks isVideoSource false for audio-only input`() = testApp {
+        mockkObject(MediaTrimmer)
+        coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("audio"), 30_000L)
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) } returns
+            "sep-aud"
 
         val response = postSeparate(client)
 
-        assertEquals(HttpStatusCode.BadRequest, response.status)
-        val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
-        assertEquals("unsupported_audio_format", body["error"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        assertEquals(HttpStatusCode.Accepted, response.status)
+        verify(exactly = 1) {
+            separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), eq(false))
+        }
     }
 
     /** probe 자체 실패 (corrupt header, unrecognized container 등) 도 reject — fail-closed. */
     @Test
-    fun `POST separate rejects when probeStreamKinds fails`() = testApp {
+    fun `POST separate rejects when probe fails`() = testApp {
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns null
+        coEvery { MediaTrimmer.probe(any()) } returns null
 
         val response = postSeparate(client)
 
@@ -202,19 +221,18 @@ class SeparationRoutesTest {
     /** probe 가 audio stream 은 확인했지만 duration 측정 실패한 경우 — file size 기반 conservative
      *  추정으로 분 단위 차감. probe-fail 만으로 1 credit floor 로 떨어지는 undercharge 우회 차단. */
     @Test
-    fun `POST separate uses size-based duration fallback when probeDurationMs fails`() {
+    fun `POST separate uses size-based duration fallback when probe has no duration`() {
         val callerId = UUID.randomUUID()
         val creditRepo = mockk<CreditRepository>(relaxed = true)
-        // probeDurationMs 실패 → size-based duration fallback 경로 검증. 8MB / 8KB/s = 1000s
+        // probe duration 없음 → size-based duration fallback 경로 검증. 8MB / 8KB/s = 1000s
         // = 1_000_000ms ≈ 16.7분 → 시작된 1분 블록 17개 → reserve cost = 17. probe-fail 만으로
         // floor 1 credit 으로 떨어지는 undercharge 우회가 막혔음을 비례 차감 값으로 실증한다.
         val bigBytes = ByteArray(8_000_000) { 0 }
         every { creditRepo.reserve(eq(callerId), any(), eq(17)) } returns
             CreditRepository.ReserveOutcome(charged = 17, balance = 100)
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns null
-        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+        coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("audio"), null)
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) } returns
             "sep-fallback"
 
         testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
@@ -241,11 +259,16 @@ class SeparationRoutesTest {
             }))
         }
         assertEquals(HttpStatusCode.BadRequest, response.status)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) }
     }
 
+    /** 분리할 음성이 없는 video (audio track 부재) 는 reject — extension 은 허용되더라도
+     *  stream-kind 검증이 audio track 부재를 잡는다. */
     @Test
-    fun `POST separate rejects video upload with unsupported_audio_format`() = testApp {
+    fun `POST separate rejects video without audio track`() = testApp {
+        mockkObject(MediaTrimmer)
+        coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("video"), null)
+
         val response = postSeparate(
             client,
             fileName = "vid.mp4",
@@ -254,7 +277,7 @@ class SeparationRoutesTest {
         assertEquals(HttpStatusCode.BadRequest, response.status)
         val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
         assertEquals("unsupported_audio_format", body["error"]!!.jsonPrimitive.content)
-        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+        verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) }
     }
 
     @Test
@@ -272,9 +295,8 @@ class SeparationRoutesTest {
     @Test
     fun `POST separate accepts mp3 and wav extensions`() = testApp {
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 10_000L
-        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+        coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("audio"), 10_000L)
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) } returns
             "sep-mp3" andThen
             "sep-wav"
 
@@ -308,7 +330,7 @@ class SeparationRoutesTest {
                 }))
             }
             assertEquals(HttpStatusCode.Unauthorized, response.status)
-            verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+            verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) }
         }
     }
 
@@ -335,8 +357,7 @@ class SeparationRoutesTest {
 
         testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
             mockkObject(MediaTrimmer)
-            coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
-            coEvery { MediaTrimmer.probeDurationMs(any()) } returns 30_000L
+            coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("audio"), 30_000L)
 
             val response = client.post("/api/v2/separate") {
                 header(HttpHeaders.Authorization, "Bearer ${issueTestJwt(callerId, testJwtSecret)}")
@@ -351,7 +372,7 @@ class SeparationRoutesTest {
             assertEquals(HttpStatusCode.PaymentRequired, response.status)
             val body = AppJson.parseToJsonElement(response.bodyAsText()).jsonObject
             assertEquals("insufficient_credits", body["error"]!!.jsonPrimitive.content)
-            verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) }
+            verify(exactly = 0) { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) }
         }
     }
 
@@ -364,9 +385,8 @@ class SeparationRoutesTest {
         // probed duration 12분 → 시작된 1분 블록 12개 → reserve cost = 12. 라우트가 측정 길이를
         // CreditCost.forSeparation 으로 그대로 반영하는지 (견적-차감 단일 source) 검증.
         mockkObject(MediaTrimmer)
-        coEvery { MediaTrimmer.probeStreamKinds(any()) } returns setOf("audio")
-        coEvery { MediaTrimmer.probeDurationMs(any()) } returns 12 * 60_000L
-        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable()) } returns
+        coEvery { MediaTrimmer.probe(any()) } returns MediaTrimmer.MediaProbe(setOf("audio"), 12 * 60_000L)
+        every { separationService.submit(any(), any(), anyNullable(), any(), anyNullable(), anyNullable(), any()) } returns
             "sep-new"
 
         testApp(jwtSecret = testJwtSecret, creditRepository = creditRepo) {
