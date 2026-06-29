@@ -23,5 +23,12 @@ val MAX_UPLOAD_FILE_SIZE: Long =
 val MAX_SEPARATION_AUDIO_SIZE: Long =
     (System.getenv("MAX_SEPARATION_AUDIO_MB")?.toLongOrNull() ?: 100L) * 1024 * 1024
 
+/**
+ * 클라이언트가 보내는 audio 컨테이너 확장자 화이트리스트 — m4a (AAC) / mp3 / wav (PCM).
+ * `/separate` 분리 입력(video 확장자와 합쳐 사용)과 `/peaks` 디코드 양쪽의 단일 소스.
+ * flac 은 Perso 가 silent fail 하므로 제외 (CLAUDE.md FLAC 회귀 참조).
+ */
+val AUDIO_EXTENSIONS = setOf("m4a", "mp3", "wav")
+
 /** How long to keep a FAILED job in memory so the client can poll its error. */
 const val FAILED_JOB_TTL_MS = 5 * 60 * 1000L // 5 min

@@ -1,5 +1,6 @@
 package com.vibi.bff.routes
 
+import com.vibi.bff.AUDIO_EXTENSIONS
 import com.vibi.bff.MAX_SEPARATION_AUDIO_SIZE
 import com.vibi.bff.config.AppConfig
 import com.vibi.bff.model.*
@@ -38,11 +39,13 @@ import org.slf4j.LoggerFactory
 
 private val log = LoggerFactory.getLogger("com.vibi.bff.routes.SeparationRoutes")
 
-/** Perso audio-separation 이 받는 모든 audio 포맷 — m4a (AAC), mp3, wav (PCM). 모바일이 trim
- * + audio extract 까지 끝낸 m4a 가 신규 경로의 default. mp3/wav 는 사용자가 직접 갖고 있는
- * audio 파일 (녹음, 외부 다운로드 등) 을 재인코딩 없이 그대로 보내는 케이스. video / flac /
- * ogg 등은 모두 reject — flac 은 Perso 가 silent fail 하는 회귀 (CLAUDE.md 참조). */
-private val SEPARATION_AUDIO_EXTENSIONS = setOf("m4a", "mp3", "wav")
+/** Perso 가 받는 video 포맷 — mp4, mov, webm. 비디오를 올려도 분리 결과 stem 은 audio 로 내려온다
+ *  (download phase 변경 불필요). BFF 는 ffmpeg 추출 없이 그대로 Perso 에 forward 하되, 업로드는
+ *  audio 가 아니라 video 등록 endpoint + isVideoProject=true 로 분기 ([SeparationService.runPipeline]). */
+private val SEPARATION_VIDEO_EXTENSIONS = setOf("mp4", "mov", "webm")
+
+/** /separate 가 허용하는 전체 입력 확장자 — audio ([AUDIO_EXTENSIONS]) + video. */
+private val SEPARATION_INPUT_EXTENSIONS = AUDIO_EXTENSIONS + SEPARATION_VIDEO_EXTENSIONS
 
 /** 단일 분리 잡의 측정 길이 상한(분). Perso 는 분당 과금 + WAV stem egress 도 분 비례 → 무제한 길이는
  *  무제한 비용. 서버 측정 길이(computeSeparationSourceDurationMs)에 적용. env MAX_SEPARATION_MINUTES 조정. */
@@ -69,8 +72,9 @@ fun Route.separationRoutes(
         // submit(POST)만 레이트리밋 — 크레딧이 1차 방어, 보조 상한. 상태 조회/stem GET 은 제외.
         rateLimit(RL_SEPARATE) {
         // POST /api/v2/separate — submit job
-        // 모바일이 trim + audio extract 까지 끝낸 audio (m4a/mp3/wav) 만 받는다.
-        // BFF 는 file 을 그대로 Perso 에 forward — ffmpeg 단계 없음.
+        // audio (m4a/mp3/wav) 또는 video (mp4/mov/webm) 를 받는다 — 둘 다 ffmpeg 추출 없이
+        // 그대로 Perso 에 forward (video 는 video 등록 endpoint + isVideoProject=true 로 분기).
+        // 모바일은 보통 trim + audio extract 후 m4a 를 보낸다.
         post {
             val principal = call.requireUserActiveIfPossible(jwtSecret, userRepository)
             val (filePart, specOpt) = parseOptionalUploadAndSpec<SeparationSpec>(
@@ -87,26 +91,30 @@ fun Route.separationRoutes(
             // 화이트리스트 검증 2-단:
             //   1) 확장자 (caller-controlled — 1차 차단 + UX-friendly error)
             //   2) ffprobe stream-kind (실 byte content — 확장자 위조 우회 차단)
-            // m4a 는 mp4 container 라 video track 동봉도 가능 → 확장자만으론 부족하다. probe 실패 /
-            // video stream 동봉 / audio stream 부재면 즉시 reject.
+            // audio (m4a/mp3/wav) + video (mp4/mov/webm) 모두 허용. 분리할 음성이 있어야 하므로
+            // audio track 부재면 reject. video track 유무로 Perso 업로드 분기 (isVideoSource).
+            // probe 실패도 reject (확장자만으론 신뢰 불가).
             val ext = sourceFile.extension.lowercase()
-            if (ext !in SEPARATION_AUDIO_EXTENSIONS) {
+            if (ext !in SEPARATION_INPUT_EXTENSIONS) {
                 sourceFile.delete()
                 throw ApiErrorException(
                     HttpStatusCode.BadRequest,
                     "unsupported_audio_format",
-                    "audio extension must be one of $SEPARATION_AUDIO_EXTENSIONS (got '$ext')",
+                    "extension must be one of $SEPARATION_INPUT_EXTENSIONS (got '$ext')",
                 )
             }
-            val streamKinds = MediaTrimmer.probeStreamKinds(sourceFile)
-            if (streamKinds == null || "video" in streamKinds || "audio" !in streamKinds) {
+            // 단일 ffprobe 로 stream 종류 + 길이를 한 번에 측정 (이중 spawn 회피). durationMs 는
+            // 아래 크레딧 차감에 재사용.
+            val probe = MediaTrimmer.probe(sourceFile)
+            if (probe == null || "audio" !in probe.streamKinds) {
                 sourceFile.delete()
                 throw ApiErrorException(
                     HttpStatusCode.BadRequest,
                     "unsupported_audio_format",
-                    "file must contain exactly an audio track (probed streams=$streamKinds)",
+                    "file must contain an audio track (probed streams=${probe?.streamKinds})",
                 )
             }
+            val isVideoSource = "video" in probe.streamKinds
 
             // submit / 크레딧 reserve 어느 단계든 throw 시 caller-owned source 파일이
             // 디스크에 남는 것을 막기 위해 try-catch. submit 성공 후엔 service 가 owner —
@@ -119,7 +127,7 @@ fun Route.separationRoutes(
             var reservedJobId: String? = null
             var sourceOwned = true
             try {
-                val sourceDurationMs = computeSeparationSourceDurationMs(sourceFile)
+                val sourceDurationMs = computeSeparationSourceDurationMs(sourceFile, probe.durationMs)
                 // 단일 잡 측정 길이 상한 — 한 번의 submit 으로 임의 장시간 paid 잡(Perso 비용 + egress)이
                 // 도는 것 차단. 서버 측정 길이 기준(클라 durationMs hint 는 과금/캡에 안 씀). 초과 시 422.
                 if (sourceDurationMs > MAX_SEPARATION_MINUTES * 60_000L) {
@@ -146,6 +154,7 @@ fun Route.separationRoutes(
                     userId = principal?.userId,
                     sourceDurationMs = sourceDurationMs,
                     providedJobId = newJobId,
+                    isVideoSource = isVideoSource,
                 )
                 // submit 성공 후엔 잡 lifecycle 의 owner 가 SeparationService — 실패 시 환불은
                 // onJobFailed hook 이 담당. 파일 ownership 도 transfer — 라우트 catch 는 더 이상
@@ -460,12 +469,13 @@ private fun assembleScriptDraft(page: PersoScriptPage): ScriptDraftResponse {
 }
 
 /**
- * admin 대시보드의 "분리 사용량" KPI 원본 + 크레딧 차감 입력. 모바일이 이미 trim 한 audio 를
- * 보내므로 받은 파일 그대로 ffprobe.
+ * admin 대시보드의 "분리 사용량" KPI 원본 + 크레딧 차감 입력. [probedDurationMs] 는 라우트가 이미
+ * 돌린 ffprobe([MediaTrimmer.probe]) 결과를 그대로 넘긴 것 — 이중 probe 회피.
  *
- * ffprobe 실패 시 conservative size-based fallback — `MIN_AUDIO_BITRATE_BYTES_PER_SEC` 로 나눠
- * 분 단위 추정. 이걸 안 하면 corrupt header 로 probe 만 막힌 60분 파일이 0ms 로 평가돼 1 credit
- * (floor) 만 차감되는 undercharge 우회가 가능 — Perso 처리 비용은 그대로 발생하므로 BFF 손실.
+ * [probedDurationMs] 가 null / 0 (probe 실패·미측정) 이면 conservative size-based fallback —
+ * `MIN_AUDIO_BITRATE_BYTES_PER_SEC` 로 나눠 분 단위 추정. 이걸 안 하면 corrupt header 로 probe 만
+ * 막힌 60분 파일이 0ms 로 평가돼 1 credit (floor) 만 차감되는 undercharge 우회가 가능 — Perso
+ * 처리 비용은 그대로 발생하므로 BFF 손실.
  *
  * AAC 64kbps 모노 (Perso 가 받는 최저 품질대) ≈ 8KB/s. 이보다 낮은 bitrate 는 일반 m4a/mp3/wav
  * 시나리오에 없으므로 fallback duration 이 실제보다 길게 추정되지는 않는다 (= overcharge 위험 없음,
@@ -473,12 +483,11 @@ private fun assembleScriptDraft(page: PersoScriptPage): ScriptDraftResponse {
  */
 private const val MIN_AUDIO_BITRATE_BYTES_PER_SEC = 8_000L
 
-internal suspend fun computeSeparationSourceDurationMs(audioFile: File): Long {
-    val probed = runCatching { MediaTrimmer.probeDurationMs(audioFile) }.getOrNull()
-    if (probed != null && probed > 0L) return probed
+internal fun computeSeparationSourceDurationMs(sourceFile: File, probedDurationMs: Long?): Long {
+    if (probedDurationMs != null && probedDurationMs > 0L) return probedDurationMs
     // probe 실패 / 0 → file size 기반 conservative 추정. delete 실패 / 0-byte 파일 등 edge
     // 케이스도 0L 로 떨어져 floor 1 credit 이 적용.
-    val sizeBytes = runCatching { audioFile.length() }.getOrDefault(0L)
+    val sizeBytes = runCatching { sourceFile.length() }.getOrDefault(0L)
     return (sizeBytes / MIN_AUDIO_BITRATE_BYTES_PER_SEC * 1000L).coerceAtLeast(0L)
 }
 

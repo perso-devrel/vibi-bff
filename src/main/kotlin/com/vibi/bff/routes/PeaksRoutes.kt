@@ -1,5 +1,6 @@
 package com.vibi.bff.routes
 
+import com.vibi.bff.AUDIO_EXTENSIONS
 import com.vibi.bff.MAX_SEPARATION_AUDIO_SIZE
 import com.vibi.bff.model.PeaksError
 import com.vibi.bff.model.PeaksResponse
@@ -26,8 +27,6 @@ private val MAX_CONCURRENT_PEAKS =
     System.getenv("MAX_CONCURRENT_PEAKS")?.toIntOrNull()?.coerceAtLeast(1) ?: 2
 private val peaksGate = Semaphore(MAX_CONCURRENT_PEAKS)
 
-private val PEAKS_AUDIO_EXTENSIONS = setOf("m4a", "mp3", "wav")
-
 /**
  * POST /api/v2/peaks — 입력 오디오의 파형 미리보기 peak. UXP 가 mp3/AAC 를 직접 디코드 못 해 서버에
  * 요청한다. 크레딧 무차감. plugin server/ 의 routes/peaks.ts 포팅.
@@ -52,7 +51,7 @@ fun Route.peaksRoutes(fileStorage: FileStorageService, jwtSecret: String?) {
             ) ?: throw ApiErrorException(HttpStatusCode.BadRequest, "audio_required")
 
             val ext = audio.extension.lowercase()
-            if (ext !in PEAKS_AUDIO_EXTENSIONS) {
+            if (ext !in AUDIO_EXTENSIONS) {
                 throw ApiErrorException(HttpStatusCode.UnsupportedMediaType, "unsupported_format")
             }
 

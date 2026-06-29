@@ -68,6 +68,10 @@ data class SeparationJob(
     val spec: SeparationSpec,
     val sourceDurationMs: Long = 0L,
     val renderJobId: String? = null,
+    /** source 에 video track 이 있으면 true — Perso 업로드를 audio 가 아니라 video 등록 endpoint
+     *  + isVideoProject=true 로 분기 ([SeparationService.runPipeline]). 분리 결과 stem 은 video 여도
+     *  audio 로 내려오므로 download phase 는 동일. 라우트가 ffprobe stream-kind 로 판정해 주입. */
+    val isVideoSource: Boolean = false,
 )
 
 data class LocalStem(
@@ -209,6 +213,7 @@ class SeparationService(
         sourceDurationMs: Long = 0L,
         renderJobId: String? = null,
         providedJobId: String? = null,
+        isVideoSource: Boolean = false,
     ): String {
         val jobId = providedJobId ?: "sep-${UUID.randomUUID()}"
         val outputDir = File(separationDir, jobId).apply { mkdirs() }
@@ -220,6 +225,7 @@ class SeparationService(
             spec = spec,
             sourceDurationMs = sourceDurationMs,
             renderJobId = renderJobId,
+            isVideoSource = isVideoSource,
         )
         jobs[jobId] = job
 
@@ -405,24 +411,26 @@ class SeparationService(
         sourceFile: File,
         onPersoProjectSeq: suspend (Long) -> Unit = {},
     ) {
-        // 모바일이 항상 audio (m4a/mp3/wav) 를 보내므로 sourceFile 그대로 Perso 에 업로드.
-        // 라우트가 화이트리스트 검증 + size 제한 적용. video → audio 추출은 모바일 책임.
+        // sourceFile 을 그대로 Perso 에 업로드 (ffmpeg 추출 없음). 라우트가 화이트리스트 검증 +
+        // size 제한 + stream-kind 판정(isVideoSource) 적용. video 입력은 video 등록 endpoint +
+        // isVideoProject=true 로 분기 — 분리 결과 stem 은 video 여도 audio 로 내려온다.
         job.status = "PROCESSING"
         job.status = "UPLOADING_UPSTREAM"
         job.progressReason = "Uploading"
-        // sourceFile 은 라우트가 caller-owned 로 넘긴 audio. 업로드 성공/실패 무관하게 finally
+        val mediaType = if (job.isVideoSource) PersoMediaType.VIDEO else PersoMediaType.AUDIO
+        // sourceFile 은 라우트가 caller-owned 로 넘긴 입력. 업로드 성공/실패 무관하게 finally
         // 로 정리 — dispose() 는 outputDir 만 reap 하므로 따로 닦지 않으면 디스크 누수.
         val registration = try {
-            persoClient.uploadMedia(PersoMediaType.AUDIO, sourceFile)
+            persoClient.uploadMedia(mediaType, sourceFile)
         } finally {
             sourceFile.delete()
         }
 
-        // Perso 전용 audio-separation 프로젝트 생성. audio-only 업로드라 isVideoProject=false.
+        // Perso 분리 프로젝트 생성. video 입력이면 isVideoProject=true.
         job.status = "SUBMITTED"
         val projectSeq = persoClient.submitAudioSeparation(
             mediaSeq = registration.seq,
-            isVideoProject = false,
+            isVideoProject = job.isVideoSource,
             title = "separation-${job.jobId}",
         )
         // queue DB row 를 SUBMITTING → PROCESSING + persoProjectSeq 기록. 인스턴스 재시작 시
