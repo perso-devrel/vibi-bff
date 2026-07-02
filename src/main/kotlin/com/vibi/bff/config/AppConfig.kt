@@ -25,7 +25,31 @@ data class AppConfig(
 data class IapConfig(
     val apple: AppleIapConfig?,
     val google: GoogleIapConfig?,
+    val admob: AdMobConfig?,
 )
+
+/**
+ * AdMob 보상형 광고 Server-Side Verification (SSV) 설정. 광고 시청 완료 시 Google 이
+ * `GET /api/v2/credits/admob-ssv?...&signature=...&key_id=...` 콜백을 보내고, BFF 가
+ * [com.vibi.bff.service.iap.AdMobSsvVerifier] 로 서명을 검증한 뒤 +1 크레딧을 지급한다.
+ *
+ * apple/google 영수증 설정과 달리 **비밀값이 필요 없다** — 검증은 Google 의 공개 검증키(무인증
+ * 공개 JSON, URL 은 [com.vibi.bff.service.iap.AdMobSsvVerifier] 의 고정 상수) 로만 수행. 따라서
+ * [enabled] 기본 true. 끄려면 `ADMOB_SSV_ENABLED=false` → null 이 되어 라우트가 503 으로 거부.
+ *
+ * - [dailyCap] — 사용자당 24h 광고 보상 크레딧 상한 (서버 분리 비용 과지출 방지). 기본 [DEFAULT_DAILY_CAP].
+ */
+data class AdMobConfig(
+    val dailyCap: Int,
+) {
+    init {
+        require(dailyCap in 1..100) { "ADMOB_DAILY_CAP must be in 1..100 (got $dailyCap)" }
+    }
+
+    companion object {
+        const val DEFAULT_DAILY_CAP = 3
+    }
+}
 
 /**
  * Apple App Store Server API (`/inApps/v1/transactions/{transactionId}`) 호출용. ES256 JWT
@@ -413,7 +437,19 @@ fun loadConfig(config: ApplicationConfig): AppConfig {
                 GoogleIapConfig(packageName = googlePackage, serviceAccountJson = googleSa)
             } else null
 
-            IapConfig(apple = apple, google = google)
+            // AdMob SSV — 비밀값 없이 공개 검증키로만 동작하므로 기본 활성. 명시적으로
+            // enabled=false 면 null 로 비활성 (라우트 503).
+            val admobConfig = iap.config("admob")
+            val admobEnabled = admobConfig.propertyOrNull("enabled")?.getString()?.trim()
+                ?.lowercase() != "false"
+            val admob = if (admobEnabled) {
+                AdMobConfig(
+                    dailyCap = admobConfig.propertyOrNull("dailyCap")?.getString()?.toIntOrNull()
+                        ?: AdMobConfig.DEFAULT_DAILY_CAP,
+                )
+            } else null
+
+            IapConfig(apple = apple, google = google, admob = admob)
         },
     )
 }

@@ -1,5 +1,6 @@
 package com.vibi.bff.routes
 
+import com.vibi.bff.model.AdMobRewardStatusResponse
 import com.vibi.bff.model.AdminGrantRequest
 import com.vibi.bff.model.CreditBalanceResponse
 import com.vibi.bff.model.CreditCatalog
@@ -11,10 +12,12 @@ import com.vibi.bff.plugins.requireAdmin
 import com.vibi.bff.plugins.requireUser
 import com.vibi.bff.service.CreditCost
 import com.vibi.bff.service.CreditRepository
+import com.vibi.bff.service.iap.AdMobSsvVerifier
 import com.vibi.bff.service.iap.AppleReceiptVerifier
 import com.vibi.bff.service.iap.GoogleReceiptVerifier
 import com.vibi.bff.service.iap.ReceiptVerifyFailure
 import io.ktor.http.HttpStatusCode
+import io.ktor.server.request.queryString
 import io.ktor.server.request.receive
 import io.ktor.server.response.respond
 import io.ktor.server.routing.Route
@@ -47,6 +50,8 @@ fun Route.creditRoutes(
     creditRepository: CreditRepository,
     appleVerifier: AppleReceiptVerifier?,
     googleVerifier: GoogleReceiptVerifier?,
+    adMobVerifier: AdMobSsvVerifier?,
+    adMobDailyCap: Int,
     jwtSecret: String,
 ) {
     route("/credits") {
@@ -197,7 +202,83 @@ fun Route.creditRoutes(
                 )
             )
         }
+
+        // AdMob 보상형 광고 SSV 콜백 — Google 서버가 광고 시청 완료 시 호출 (무인증, 서명이 인증).
+        // 쿼리스트링 서명을 [AdMobSsvVerifier] 로 검증 후, 일일 상한 내에서 +1 크레딧 지급.
+        // (platform='admob', transaction_id) UNIQUE 로 동일 콜백 중복 가산 차단.
+        //
+        // 응답: AdMob 은 200 만 성공으로 본다. 검증 실패는 403(가산 안 함), 상한 초과는 200(가산
+        // 안 하되 재시도 유발 안 함). user_id 는 클라가 광고 로드 시 SSV userId 로 넣은 앱 user UUID.
+        get("/admob-ssv") {
+            val verifier = adMobVerifier
+                ?: throw ApiErrorException(HttpStatusCode.ServiceUnavailable, "admob_disabled")
+
+            // verify 가 서명 검증 + 쿼리 파싱을 한 번에 — 통과 시 파싱된 params 를 재사용한다
+            // (route 가 쿼리를 다시 파싱하지 않음).
+            val params = try {
+                verifier.verify(call.request.queryString())
+            } catch (e: ReceiptVerifyFailure.TransientUpstream) {
+                log.warn("admob ssv verifier keys unavailable")
+                throw ApiErrorException(HttpStatusCode.BadGateway, "admob_verify_unavailable")
+            } catch (e: ReceiptVerifyFailure) {
+                log.warn("admob ssv signature invalid: {}", e.message)
+                throw ApiErrorException(HttpStatusCode.Forbidden, "admob_signature_invalid")
+            }
+
+            val userId = params["user_id"]
+                ?.let { runCatching { UUID.fromString(it) }.getOrNull() }
+                ?: throw ApiErrorException(HttpStatusCode.BadRequest, "missing_user_id")
+            val transactionId = params["transaction_id"]?.takeIf { it.isNotBlank() }
+                ?: throw ApiErrorException(HttpStatusCode.BadRequest, "missing_transaction_id")
+
+            // 일일 상한 — 24h 내 admob 적립 합(= 시청 횟수)이 cap 이상이면 가산 skip. 서명은 유효
+            // 하므로 200 으로 응답해 AdMob 재시도를 피한다 (사용자에겐 상한 도달이 정상 상태).
+            val since = Instant.now().minus(24, ChronoUnit.HOURS)
+            val grantedRecently = withContext(Dispatchers.IO) {
+                creditRepository.admobGrantedCreditsSince(userId, since)
+            }
+            if (grantedRecently >= adMobDailyCap) {
+                log.info("admob reward daily cap reached user={} granted={} cap={}", userId, grantedRecently, adMobDailyCap)
+                call.respond(HttpStatusCode.OK, "cap_reached")
+                return@get
+            }
+
+            val outcome = withContext(Dispatchers.IO) {
+                creditRepository.grantPurchase(
+                    userId = userId,
+                    platform = "admob",
+                    transactionId = transactionId,
+                    productId = ADMOB_REWARD_PRODUCT_ID,
+                    credits = ADMOB_REWARD_CREDITS,
+                )
+            }
+            if (outcome.granted == 0) {
+                log.info("admob reward duplicate: user={} tx={}", userId, transactionId)
+            } else {
+                log.info("admob reward granted: user={} tx={} +{}", userId, transactionId, outcome.granted)
+            }
+            call.respond(HttpStatusCode.OK, "ok")
+        }
+
+        // 모바일이 "오늘 N/cap" 표시 + 버튼 활성/비활성 판단에 호출 (JWT 인증).
+        get("/admob-status") {
+            val principal = call.requireUser(jwtSecret)
+            val since = Instant.now().minus(24, ChronoUnit.HOURS)
+            val granted = withContext(Dispatchers.IO) {
+                creditRepository.admobGrantedCreditsSince(principal.userId, since)
+            }
+            call.respond(
+                AdMobRewardStatusResponse(
+                    dailyCap = adMobDailyCap,
+                    remaining = (adMobDailyCap - granted).coerceAtLeast(0),
+                )
+            )
+        }
     }
 }
+
+/** 보상형 광고 1회 시청당 지급 크레딧. 서버가 고정 — 클라/광고가 보낸 reward_amount 는 신뢰 안 함. */
+private const val ADMOB_REWARD_CREDITS = 1
+private const val ADMOB_REWARD_PRODUCT_ID = "admob.rewarded"
 
 private val ALLOWED_PLATFORMS = setOf("apple", "google")

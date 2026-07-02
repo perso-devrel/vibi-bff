@@ -89,3 +89,16 @@ data class CreditPurchaseResponse(
     val balance: Int,
     val transactionId: String,
 )
+
+/**
+ * 보상형 광고(AdMob) 일일 보상 현황 — 모바일이 "오늘 N/3" 표시 + 버튼 활성/비활성 판단에 사용.
+ *
+ * - [dailyCap]  — 하루 상한.
+ * - [remaining] — 남은 횟수 (max(0, cap - 오늘 적립). 0 이면 모바일이 버튼 비활성. "사용함"은
+ *   `dailyCap - remaining` 으로 모바일이 파생하므로 별도 필드를 두지 않는다.
+ */
+@Serializable
+data class AdMobRewardStatusResponse(
+    val dailyCap: Int,
+    val remaining: Int,
+)
